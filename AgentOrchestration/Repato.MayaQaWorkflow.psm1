@@ -463,10 +463,10 @@ function Invoke-MayaQaLaunchAgentHealth {
     $writer=$null;$reader=$null
     try {
         $pipe.Connect($TimeoutMilliseconds)
-        $writer=[IO.StreamWriter]::new($pipe);$writer.AutoFlush=$true
+          $writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true
         $writeTask=$writer.WriteLineAsync((@{schemaVersion=1;operation='health'}|ConvertTo-Json -Compress))
         if(!$writeTask.Wait($TimeoutMilliseconds)){throw 'Health request write timed out.'}
-        $reader=[IO.StreamReader]::new($pipe)
+          $reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true)
         $readTask=$reader.ReadLineAsync()
         if(!$readTask.Wait($TimeoutMilliseconds)){throw 'Health response read timed out.'}
         $line=$readTask.Result
@@ -475,7 +475,11 @@ function Invoke-MayaQaLaunchAgentHealth {
         foreach($n in 'schemaVersion','operation','ready','user','sid','sessionId','interactive'){if($h.PSObject.Properties.Name -notcontains $n){throw "Health response missing $n."}}
         if([int]$h.schemaVersion -ne 1 -or [string]$h.operation -cne 'health'){throw 'Unexpected health response.'}
         [pscustomobject]@{ProtocolVersion=[int]$h.schemaVersion;Operation=[string]$h.operation;Ready=[bool]$h.ready;User=[string]$h.user;SID=[string]$h.sid;SessionId=[int]$h.sessionId;UserInteractive=[bool]$h.interactive}
-    } finally { if($reader){$reader.Dispose()};if($writer){$writer.Dispose()};$pipe.Dispose() }
+      } finally {
+          try { if($reader){$reader.Dispose()} } catch { }
+          try { if($writer){$writer.Dispose()} } catch { }
+          try { if($pipe){$pipe.Dispose()} } catch { }
+      }
 }
 function Invoke-MayaQaCanonicalNativeCore {
     [CmdletBinding()]
