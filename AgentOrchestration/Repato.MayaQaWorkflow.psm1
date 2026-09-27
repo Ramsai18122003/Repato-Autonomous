@@ -445,28 +445,31 @@ function Invoke-MayaQaProcessLauncher {
     Invoke-MayaQaLaunchAgentRequest -Request $LaunchRequest -Executable $Executable
 }
 function Invoke-MayaQaLaunchAgentRequest {
-    param([Parameter(Mandatory)][object]$Request,[Parameter(Mandatory)][string]$Executable,[ValidateRange(100,30000)][int]$TimeoutMilliseconds=5000,[ValidateRange(1024,32768)][int]$MaxResponseBytes=32768)
+    param([Parameter(Mandatory)][object]$Request,[Parameter(Mandatory)][string]$Executable,[ValidateRange(100,30000)][int]$TimeoutMilliseconds=5000,[ValidateRange(1024,32768)][int]$MaxResponseBytes=32768,[scriptblock]$ResponseProvider,[int]$ExpectedSessionId)
     $pipe=$null;$writer=$null;$reader=$null;$original=$null
     try {
         if([string]$Request.operation -cne 'launch-revit-qa' -or [int]$Request.schemaVersion -ne 2){throw 'Invalid v2 launch request.'}
-        if([string]$Request.requestPath -notlike '*.request.json' -or !(Test-Path -LiteralPath $Request.requestPath -PathType Leaf)){throw 'Launch request path is missing.'}
-        $pipe=[IO.Pipes.NamedPipeClientStream]::new('.', 'Repato\QaLaunch', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::WriteThrough)
-        $pipe.Connect($TimeoutMilliseconds)
-        $json=$Request|ConvertTo-Json -Compress -Depth 10
-        if([Text.Encoding]::UTF8.GetByteCount($json) -gt 32768){throw 'Launch request is oversized.'}
-        $writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true
-        $writeTask=$writer.WriteLineAsync($json);if(!$writeTask.Wait($TimeoutMilliseconds)){throw 'Launch request write timed out.'};$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true)
-        $readTask=$reader.ReadLineAsync();if(!$readTask.Wait($TimeoutMilliseconds)){throw 'Launch response read timed out.'};$line=$readTask.Result
-        if([string]::IsNullOrWhiteSpace($line) -or [Text.Encoding]::UTF8.GetByteCount($line) -gt $MaxResponseBytes){throw 'Launch response is missing or oversized.'}
-        try{$response=$line|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Launch response JSON is malformed.'}
+        if($ResponseProvider){$response=& $ResponseProvider $Request}
+        else {
+            if([string]$Request.requestPath -notlike '*.request.json' -or !(Test-Path -LiteralPath $Request.requestPath -PathType Leaf)){throw 'Launch request path is missing.'}
+            $pipe=[IO.Pipes.NamedPipeClientStream]::new('.', 'Repato\QaLaunch', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::WriteThrough)
+            $pipe.Connect($TimeoutMilliseconds)
+            $json=$Request|ConvertTo-Json -Compress -Depth 10
+            if([Text.Encoding]::UTF8.GetByteCount($json) -gt 32768){throw 'Launch request is oversized.'}
+            $writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true
+            $writeTask=$writer.WriteLineAsync($json);if(!$writeTask.Wait($TimeoutMilliseconds)){throw 'Launch request write timed out.'};$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true)
+            $readTask=$reader.ReadLineAsync();if(!$readTask.Wait($TimeoutMilliseconds)){throw 'Launch response read timed out.'};$line=$readTask.Result
+            if([string]::IsNullOrWhiteSpace($line) -or [Text.Encoding]::UTF8.GetByteCount($line) -gt $MaxResponseBytes){throw 'Launch response is missing or oversized.'}
+            try{$response=$line|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Launch response JSON is malformed.'}
+        }
         foreach($n in 'schemaVersion','operation','requestId','correlationId','accepted','pid','user','sid','sessionId','launchUtc','imagePath','requestPath','taskId','workflowId','qaWorkflowId','testId','attemptId','runId','failureCode'){if($response.PSObject.Properties.Name -notcontains $n){throw "Launch response missing $n."}}
         if([int]$response.schemaVersion -ne 2 -or [string]$response.operation -cne 'launch-revit-qa'){throw 'Unexpected launch response contract.'}
         if([string]$response.requestId -cne [string]$Request.requestId -or [string]$response.correlationId -cne [string]$Request.requestId){throw 'Launch response correlation mismatch.'}
         foreach($n in 'taskId','workflowId','qaWorkflowId','testId','attemptId','runId','requestPath'){if([string]$response.$n -cne [string]$Request.$n){throw "Launch response identity mismatch: $n."}}
         if(-not [bool]$response.accepted){if([string]::IsNullOrWhiteSpace([string]$response.failureCode)){throw 'Rejected launch response has no failure code.'};throw "RepatoQA launch rejected: $($response.failureCode)"}
         if([int]$response.pid -le 0 -or [string]$response.user -ine 'RAMSAI\RepatoQA' -or [string]$response.sid -ine 'S-1-5-21-1031246752-3872016183-2454652381-1015'){throw 'Accepted launch identity is invalid.'}
-        $expectedSession=@(Get-Process -IncludeUserName -ErrorAction SilentlyContinue|Where-Object UserName -ieq 'RAMSAI\RepatoQA'|Select-Object -ExpandProperty SessionId -Unique)
-        if(!$expectedSession -or @($expectedSession -contains ([int]$response.sessionId)) -eq $false){throw 'Accepted launch session is not the authenticated RepatoQA session.'}
+        $expectedSession=if($ExpectedSessionId){@($ExpectedSessionId)}else{@(Get-Process -IncludeUserName -ErrorAction SilentlyContinue|Where-Object UserName -ieq 'RAMSAI\RepatoQA'|Select-Object -ExpandProperty SessionId -Unique)}
+        if(!$expectedSession -or !(@($expectedSession) -contains ([int]$response.sessionId))){throw 'Accepted launch session is not the authenticated RepatoQA session.'}
         if([IO.Path]::GetFullPath([string]$response.imagePath) -ine [IO.Path]::GetFullPath($Executable)){throw 'Accepted launch image mismatch.'}
         if([string]$response.failureCode){throw 'Accepted launch response contains a failure code.'}
         [pscustomobject]@{Pid=[int]$response.pid;StartedUtc=[string]$response.launchUtc;Response=$response}
