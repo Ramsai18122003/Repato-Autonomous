@@ -438,6 +438,12 @@ function Get-MayaQaCatalogDryRun { param([string]$WorkflowId)
 }
 function Invoke-MayaQaProcessLauncher {
     param([Parameter(Mandatory)][string]$Executable,[string]$Arguments,[scriptblock]$Launcher,[hashtable]$EnvironmentVariables)
+    if(!$Launcher){
+        if($Arguments){throw 'QA launch agent does not accept arbitrary Revit arguments.'}
+        $requestPath=[string]$EnvironmentVariables['REPATO_QA_CREATE_PLAN_VIEWS_REQUEST']
+        if([string]::IsNullOrWhiteSpace($requestPath)){throw 'QA launch request path is required.'}
+        throw 'RepatoQA launch agent transport is not installed or available.'
+    }
     $saved=@{}
     try {
         foreach($k in @($EnvironmentVariables.Keys)){$item=Get-Item ('Env:'+ $k) -ErrorAction SilentlyContinue;$saved[$k]=[pscustomobject]@{Exists=($null -ne $item);Value=$(if($item){$item.Value}else{$null})};Set-Item ('Env:'+ $k) $EnvironmentVariables[$k]}
