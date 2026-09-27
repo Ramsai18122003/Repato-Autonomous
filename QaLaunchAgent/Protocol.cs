@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Repato.QaLaunchAgent;
@@ -37,6 +39,25 @@ public static class QaLaunchPolicy
     public const string LogRoot = @"C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\Logs";
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
     public static readonly string[] AllowedQaWorkflows = ["create-plan-views-v1"];
+    public const string RequestSha256Placeholder = "0000000000000000000000000000000000000000000000000000000000000000";
+    public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.General) { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
+    public static string CanonicalRequestSha256(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
+        {
+            writer.WriteStartObject();
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                writer.WritePropertyName(property.Name);
+                if (property.Name.Equals("requestSha256", StringComparison.OrdinalIgnoreCase)) writer.WriteStringValue(RequestSha256Placeholder);
+                else property.Value.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
+    }
     public static bool IsValidRequest(QaLaunchRequest r, DateTimeOffset now) =>
         r is not null && r.SchemaVersion == LaunchSchemaVersion && r.Operation == Operation &&
         Guid.TryParse(r.RequestId, out _) &&

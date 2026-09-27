@@ -31,12 +31,12 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
             }
             else
             {
-                var request = JsonSerializer.Deserialize<QaLaunchRequest>(line) ?? throw new InvalidDataException();
-                response = coordinator.Handle(request, DateTimeOffset.UtcNow);
+                var request = JsonSerializer.Deserialize<QaLaunchRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();
+                response = coordinator.Handle(request, DateTimeOffset.UtcNow, line);
             }
         }
         catch { response = new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request"); }
         using var writer = new StreamWriter(pipe) { AutoFlush = true };
-        await writer.WriteLineAsync(JsonSerializer.Serialize(response));
+        await writer.WriteLineAsync(JsonSerializer.Serialize(response, response.GetType(), QaLaunchPolicy.JsonOptions));
     }
 }

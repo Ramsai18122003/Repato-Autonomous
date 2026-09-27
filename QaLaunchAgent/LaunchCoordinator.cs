@@ -1,13 +1,16 @@
+using System.Text.Json;
+
 namespace Repato.QaLaunchAgent;
 
 public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionProvider identity, IReplayLedger ledger, IChildProcessLauncher launcher, IChildProcessVerifier verifier)
 {
-    public QaLaunchResponseV2 Handle(QaLaunchRequest request, DateTimeOffset now)
+    public QaLaunchResponseV2 Handle(QaLaunchRequest request, DateTimeOffset now, string? rawJson = null)
     {
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid) return Reject(request, "wrong-agent-identity");
         if (!identity.Interactive) return Reject(request, "non-interactive-session");
         if (!QaLaunchPolicy.IsValidRequest(request, now)) return Reject(request, "request-invalid");
         if (!ledger.TryReserve(request, now)) return Reject(request, "request-replayed");
+        if (!QaLaunchPolicy.CanonicalRequestSha256(rawJson ?? JsonSerializer.Serialize(request, QaLaunchPolicy.JsonOptions)).Equals(request.RequestSha256, StringComparison.OrdinalIgnoreCase)) return Reject(request, "request-hash-mismatch");
         if (!IsUnder(request.RequestPath, options.RuntimeRoot) || !IsUnder(request.ModelPath, options.RuntimeRoot)) return Reject(request, "request-root-invalid");
         if (!IsUnder(request.ManifestPath, options.QaProfileRoot)) return Reject(request, "manifest-boundary-invalid");
         if (!File.Exists(request.ModelPath) || !File.Exists(request.ManifestPath)) return Reject(request, "artifact-unavailable");
