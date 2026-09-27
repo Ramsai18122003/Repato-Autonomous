@@ -33,6 +33,18 @@ function Assert-MayaQaPath { param([string]$Path,[string]$Root)
     $p=[IO.Path]::GetFullPath($Path); $r=([IO.Path]::GetFullPath($Root)).TrimEnd('\')+'\'
     if (-not $p.StartsWith($r,[StringComparison]::OrdinalIgnoreCase)) { throw "Path is outside approved QA root: $Path" }; $p
 }
+function New-MayaQaFixtureSidecar {
+    param([Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][string]$Model,[Parameter(Mandatory)][object]$Definition)
+    if(!(Test-Path -LiteralPath $Source -PathType Leaf)){throw "Approved fixture missing: $Source"}
+    if(!(Test-Path -LiteralPath $Model -PathType Leaf)){throw "Disposable model missing: $Model"}
+    $hash=(Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    if((Get-FileHash -LiteralPath $Model -Algorithm SHA256).Hash -ine $hash){throw 'Disposable model fixture hash mismatch.'}
+    $side=[ordered]@{fixtureId=$Definition.FixtureId;sourceSha256=$hash}
+    if($Definition.FixtureId -in @('GridBubbleVisibilityEmpty','GridBubbleOffsetEmpty')){$side.requiredGridNames=@('A','B','C','D','1','2','3','4')}
+    if($Definition.FixtureId -eq 'GridResequenceEmpty'){$side.requiredGridNames=@('1','2','3','3.2','4','A','A.1','B','C')}
+    $sidecar=$Model+'.fixture.json';$side|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $sidecar -Encoding UTF8
+    [pscustomobject]@{Path=$sidecar;FixtureId=$Definition.FixtureId;SourceSha256=$hash}
+}
 function New-MayaQaRun { param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$RunId,[switch]$DryRun)
     $def=Get-MayaQaWorkflowDefinition $QaWorkflowId; if ($RunId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$'){throw 'Invalid QA run ID.'}
     $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
@@ -41,12 +53,25 @@ function New-MayaQaRun { param([Parameter(Mandatory)][string]$StoreRoot,[Paramet
     if (Test-Path -LiteralPath $run) { throw 'QA run directory already exists.' }
     $source=Join-Path (Join-Path $qa 'Fixtures') $def.Source; if (!(Test-Path -LiteralPath $source -PathType Leaf)){throw "Approved fixture missing: $source"}
     New-Item -ItemType Directory -Path $run | Out-Null; $model=Join-Path $run 'model.rvt'; Copy-Item -LiteralPath $source -Destination $model
-    $fixtureHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash; $sidecar=Join-Path $run 'model.rvt.fixture.json'
-    $side=@{fixtureId=$def.FixtureId;sourceSha256=$fixtureHash}; if($WorkflowId -like 'grid-bubble-*'){$side.requiredGridNames=@('A','B','C','D','1','2','3','4')}; if($WorkflowId -eq 'grid-resequence-v1'){$side.requiredGridNames=@('1','2','3','3.2','4','A','A.1','B','C')}
-    $side | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $sidecar -Encoding UTF8
+    $fixture=New-MayaQaFixtureSidecar $source $model $def; $sidecar=$fixture.Path; $fixtureHash=$fixture.SourceSha256
     $d=Read-RepatoTaskStore $StoreRoot;$t=Find-RepatoTask $d $TaskId
     $m=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $w.workflowRevision $t.revision { param($x) foreach($v in @(@('qaWorkflowId',$QaWorkflowId),@('qaRunId',$RunId),@('qaModelPath',$model),@('qaSidecarPath',$sidecar),@('qaFixtureId',$def.FixtureId),@('qaFixtureSha256',$fixtureHash),@('qaTestId',$def.TestId),@('qaReportPath',$null),@('qaReportSha256',$null),@('qaEvidence',$null),@('qaVerificationStatus',$null),@('qaCompletionStatus',$null),@('qaCompletedUtc',$null))){$x|Add-Member -NotePropertyName $v[0] -NotePropertyValue $v[1] -Force}; return $x })[-1]
     [pscustomobject]@{WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;ModelPath=$model;SidecarPath=$sidecar;FixtureId=$def.FixtureId;FixtureSha256=$fixtureHash;Stage=$m.Workflow.stage;WorkflowRevision=$m.Workflow.workflowRevision;TaskRevision=$m.TaskRevision;SideEffectsPerformed=$true}
+}
+function Recover-MayaQaAbandonedNativeExecution {
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$ReplacementRunId)
+    $def=Get-MayaQaWorkflowDefinition $QaWorkflowId
+    if($ReplacementRunId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$'){throw 'Invalid replacement QA run ID.'}
+    $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if($w.stage -ne 'prepared'){throw 'Abandoned-native recovery requires a prepared workflow.'}
+    $qa=Get-MayaQaRoot;$runs=Join-Path $qa 'TestRuns';$run=Assert-MayaQaPath (Join-Path $runs ($WorkflowId+'-'+$ReplacementRunId)) $runs
+    if(Test-Path -LiteralPath $run){throw 'Replacement QA run directory already exists.'}
+    $source=Join-Path (Join-Path $qa 'Fixtures') $def.Source;New-Item -ItemType Directory -Path $run|Out-Null;$model=Join-Path $run 'model.rvt';Copy-Item -LiteralPath $source -Destination $model
+    $fixture=New-MayaQaFixtureSidecar $source $model $def;$d=Read-RepatoTaskStore $StoreRoot;$t=Find-RepatoTask $d $TaskId
+    $m=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $w.workflowRevision $t.revision {param($x)
+        foreach($p in @('qaReportPath','qaReportSha256','qaEvidence','qaVerificationStatus','qaCompletionStatus','qaCompletedUtc','nativeRunId','nativeRunStatus','nativeRunEvidence','nativeRunStartedUtc','nativeRunFinishedUtc','sideEffectsPerformed')){$x.PSObject.Properties.Remove($p)}
+        foreach($v in @(@('qaWorkflowId',$QaWorkflowId),@('qaRunId',$ReplacementRunId),@('qaModelPath',$model),@('qaSidecarPath',$fixture.Path),@('qaFixtureId',$fixture.FixtureId),@('qaFixtureSha256',$fixture.SourceSha256),@('qaTestId',$def.TestId),@('qaReportPath',$null),@('qaReportSha256',$null),@('qaEvidence',$null),@('qaVerificationStatus',$null),@('qaCompletionStatus',$null),@('qaCompletedUtc',$null))){$x|Add-Member -NotePropertyName $v[0] -NotePropertyValue $v[1] -Force};$x.stage='prepared';$x.status='prepared';return $x})[-1]
+    [pscustomobject]@{WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$ReplacementRunId;ModelPath=$model;SidecarPath=$fixture.Path;FixtureId=$fixture.FixtureId;FixtureSha256=$fixture.SourceSha256;Stage=$m.Workflow.stage;WorkflowRevision=$m.Workflow.workflowRevision;TaskRevision=$m.TaskRevision;SideEffectsPerformed=$true}
 }
 function Register-MayaQaReport { param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$ReportPath,[switch]$DryRun)
     $def=Get-MayaQaWorkflowDefinition $QaWorkflowId; $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
@@ -77,4 +102,4 @@ function Complete-MayaQaWorkflow { param([Parameter(Mandatory)][string]$StoreRoo
     $updated=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
     [pscustomobject]@{WorkflowId=$WorkflowId;QaVerificationStatus=$updated.qaVerificationStatus;QaCompletionStatus=$updated.qaCompletionStatus;CoordinatorRunId=$updated.qaEvidence.CoordinatorRunId;NativeRunId=$updated.qaEvidence.NativeRunId;WorkflowRevision=$m.Workflow.workflowRevision;TaskRevision=$m.TaskRevision;SideEffectsPerformed=$true}
 }
-Export-ModuleMember -Function Get-MayaQaWorkflowDefinition,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow
+Export-ModuleMember -Function Get-MayaQaWorkflowDefinition,New-MayaQaBootstrap,New-MayaQaRun,Recover-MayaQaAbandonedNativeExecution,Register-MayaQaReport,Complete-MayaQaWorkflow
