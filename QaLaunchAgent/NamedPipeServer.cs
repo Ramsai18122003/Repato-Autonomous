@@ -19,9 +19,19 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         using var reader = new StreamReader(pipe);
         var line = await reader.ReadLineAsync(cancellationToken);
         if (line is null || line.Length > 32768) throw new InvalidDataException("Bounded request rejected.");
-        QaLaunchResponse response;
-        try { response = coordinator.Handle(JsonSerializer.Deserialize<QaLaunchRequest>(line) ?? throw new InvalidDataException(), DateTimeOffset.UtcNow); }
-        catch { response = new(1, "", false, null, null, null, null, null, null, null, "malformed-request"); }
+        object response;
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var operation = document.RootElement.TryGetProperty("operation", out var op) ? op.GetString() : null;
+            if (operation == QaLaunchPolicy.HealthOperation)
+            {
+                var identity = WindowsIdentity.GetCurrent();
+                response = new QaHealthResponse(1, QaLaunchPolicy.HealthOperation, true, identity.Name, identity.User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, Environment.UserInteractive, null);
+            }
+            else response = coordinator.Handle(JsonSerializer.Deserialize<QaLaunchRequest>(line) ?? throw new InvalidDataException(), DateTimeOffset.UtcNow);
+        }
+        catch { response = new QaLaunchResponse(1, "", false, null, null, null, null, null, null, null, "malformed-request"); }
         using var writer = new StreamWriter(pipe) { AutoFlush = true };
         await writer.WriteLineAsync(JsonSerializer.Serialize(response));
     }

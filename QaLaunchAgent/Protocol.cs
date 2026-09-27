@@ -14,10 +14,14 @@ public sealed record QaLaunchResponse(
     int? SessionId, DateTimeOffset? LaunchUtc, string? ImagePath,
     string? RequestPath, string? RunId, string? FailureCode);
 
+public sealed record QaHealthRequest(int SchemaVersion, string Operation);
+public sealed record QaHealthResponse(int SchemaVersion, string Operation, bool Ready, string User, string Sid, int SessionId, bool Interactive, string? FailureCode);
+
 public static class QaLaunchPolicy
 {
     public const int SchemaVersion = 1;
     public const string Operation = "launch-revit-qa";
+    public const string HealthOperation = "health";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
     public static readonly string[] AllowedQaWorkflows = ["create-plan-views-v1"];
