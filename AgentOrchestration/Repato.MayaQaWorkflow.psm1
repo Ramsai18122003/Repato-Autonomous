@@ -463,10 +463,13 @@ function Invoke-MayaQaLaunchAgentHealth {
     $writer=$null;$reader=$null
     try {
         $pipe.Connect($TimeoutMilliseconds)
-        $pipe.ReadTimeout=$TimeoutMilliseconds;$pipe.WriteTimeout=$TimeoutMilliseconds
         $writer=[IO.StreamWriter]::new($pipe);$writer.AutoFlush=$true
-        $writer.WriteLine((@{schemaVersion=1;operation='health'}|ConvertTo-Json -Compress))
-        $reader=[IO.StreamReader]::new($pipe);$line=$reader.ReadLine()
+        $writeTask=$writer.WriteLineAsync((@{schemaVersion=1;operation='health'}|ConvertTo-Json -Compress))
+        if(!$writeTask.Wait($TimeoutMilliseconds)){throw 'Health request write timed out.'}
+        $reader=[IO.StreamReader]::new($pipe)
+        $readTask=$reader.ReadLineAsync()
+        if(!$readTask.Wait($TimeoutMilliseconds)){throw 'Health response read timed out.'}
+        $line=$readTask.Result
         if([string]::IsNullOrWhiteSpace($line) -or $line.Length -gt 32768){throw 'Invalid health response.'}
         $h=$line|ConvertFrom-Json
         foreach($n in 'schemaVersion','operation','ready','user','sid','sessionId','interactive'){if($h.PSObject.Properties.Name -notcontains $n){throw "Health response missing $n."}}
