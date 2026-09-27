@@ -300,6 +300,7 @@ function Recover-MayaQaCorrelatedNativeFailure {
     if(!$source.StartsWith($fixtures.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path $source) -or (Get-FileHash $source -Algorithm SHA256).Hash -ine $old.AuthoritativeFixtureSha256){throw 'Fixture validation failed.'};
     foreach($pair in @(@('ArtifactPath','ArtifactSha256'),@('DisposableModelPath','DisposableModelSha256'),@('IsolationPolicyPath','IsolationPolicySha256'))){if(!(Test-Path $old.($pair[0])) -or (Get-FileHash $old.($pair[0]) -Algorithm SHA256).Hash -ine $old.($pair[1])){throw "Hash validation failed: $($pair[0])"}};
     $manifestValidated=$false
+    $writer=$null;$reader=$null
     try {
         if(!(Test-Path -LiteralPath $old.RunnerManifestPath -PathType Leaf)){throw 'Runner manifest is inaccessible or missing.'}
         if((Get-FileHash -LiteralPath $old.RunnerManifestPath -Algorithm SHA256).Hash -ine $old.RunnerManifestSha256){throw 'Hash validation failed: RunnerManifestPath'}
@@ -458,12 +459,20 @@ function Invoke-MayaQaProcessLauncher {
 }
 function Invoke-MayaQaLaunchAgentHealth {
     param([ValidateRange(100,10000)][int]$TimeoutMilliseconds=3000)
-    $dll='C:\Program Files\Repato\QaLaunchAgent\Repato.QaLaunchAgent.dll'
-    if(!(Test-Path -LiteralPath $dll -PathType Leaf)){throw 'RepatoQA launch agent is not installed.'}
-    try { Add-Type -Path $dll -ErrorAction Stop } catch { if($_.Exception.Message -notmatch 'already exists'){throw} }
-    $client=[Repato.QaLaunchAgent.QaHealthClient]::new('Repato\QaLaunch')
-    $h=$client.GetHealth([TimeSpan]::FromMilliseconds($TimeoutMilliseconds))
-    [pscustomobject]@{ProtocolVersion=$h.SchemaVersion;Operation=$h.Operation;Ready=$h.Ready;User=$h.User;SID=$h.Sid;SessionId=$h.SessionId;UserInteractive=$h.Interactive}
+    $pipe=[IO.Pipes.NamedPipeClientStream]::new('.', 'Repato\QaLaunch', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::WriteThrough)
+    $writer=$null;$reader=$null
+    try {
+        $pipe.Connect($TimeoutMilliseconds)
+        $pipe.ReadTimeout=$TimeoutMilliseconds;$pipe.WriteTimeout=$TimeoutMilliseconds
+        $writer=[IO.StreamWriter]::new($pipe);$writer.AutoFlush=$true
+        $writer.WriteLine((@{schemaVersion=1;operation='health'}|ConvertTo-Json -Compress))
+        $reader=[IO.StreamReader]::new($pipe);$line=$reader.ReadLine()
+        if([string]::IsNullOrWhiteSpace($line) -or $line.Length -gt 32768){throw 'Invalid health response.'}
+        $h=$line|ConvertFrom-Json
+        foreach($n in 'schemaVersion','operation','ready','user','sid','sessionId','interactive'){if($h.PSObject.Properties.Name -notcontains $n){throw "Health response missing $n."}}
+        if([int]$h.schemaVersion -ne 1 -or [string]$h.operation -cne 'health'){throw 'Unexpected health response.'}
+        [pscustomobject]@{ProtocolVersion=[int]$h.schemaVersion;Operation=[string]$h.operation;Ready=[bool]$h.ready;User=[string]$h.user;SID=[string]$h.sid;SessionId=[int]$h.sessionId;UserInteractive=[bool]$h.interactive}
+    } finally { if($reader){$reader.Dispose()};if($writer){$writer.Dispose()};$pipe.Dispose() }
 }
 function Invoke-MayaQaCanonicalNativeCore {
     [CmdletBinding()]
