@@ -438,24 +438,43 @@ function Get-MayaQaCatalogDryRun { param([string]$WorkflowId)
     $items=@($items); [pscustomobject]@{Workflows=$items;SupportedWorkflowCount=$items.Count;SideEffectsPerformed=$false;RevitLaunchPerformed=$false;DeploymentPerformed=$false;StoreWritePerformed=$false}
 }
 function Invoke-MayaQaProcessLauncher {
-    param([Parameter(Mandatory)][string]$Executable,[string]$Arguments,[scriptblock]$Launcher,[hashtable]$EnvironmentVariables)
-    if(!$Launcher){
-        if($Arguments){throw 'QA launch agent does not accept arbitrary Revit arguments.'}
-        $requestPath=[string]$EnvironmentVariables['REPATO_QA_CREATE_PLAN_VIEWS_REQUEST']
-        if([string]::IsNullOrWhiteSpace($requestPath)){throw 'QA launch request path is required.'}
-        throw 'RepatoQA launch agent transport is not installed or available.'
-    }
-    $saved=@{}
+    param([Parameter(Mandatory)][string]$Executable,[string]$Arguments,[scriptblock]$Launcher,[hashtable]$EnvironmentVariables,[object]$LaunchRequest)
+    if($Launcher){$p=& $Launcher $Executable $Arguments;if(!$p -or !$p.Pid){throw 'Injected process launcher returned no PID.'};return [pscustomobject]@{Pid=[int]$p.Pid;StartedUtc=$(if($p.StartedUtc){$p.StartedUtc}else{Get-RepatoUtc})}}
+    if($Arguments){throw 'QA launch agent does not accept arbitrary Revit arguments.'}
+    if(!$LaunchRequest){throw 'RepatoQA v2 launch request is required.'}
+    Invoke-MayaQaLaunchAgentRequest -Request $LaunchRequest -Executable $Executable
+}
+function Invoke-MayaQaLaunchAgentRequest {
+    param([Parameter(Mandatory)][object]$Request,[Parameter(Mandatory)][string]$Executable,[ValidateRange(100,30000)][int]$TimeoutMilliseconds=5000,[ValidateRange(1024,32768)][int]$MaxResponseBytes=32768)
+    $pipe=$null;$writer=$null;$reader=$null;$original=$null
     try {
-        foreach($k in @($EnvironmentVariables.Keys)){$item=Get-Item ('Env:'+ $k) -ErrorAction SilentlyContinue;$saved[$k]=[pscustomobject]@{Exists=($null -ne $item);Value=$(if($item){$item.Value}else{$null})};Set-Item ('Env:'+ $k) $EnvironmentVariables[$k]}
-        if($Launcher){$p=& $Launcher $Executable $Arguments;if(!$p -or !$p.Pid){throw 'Process launcher returned no PID.'};return [pscustomobject]@{Pid=[int]$p.Pid;StartedUtc=$(if($p.StartedUtc){$p.StartedUtc}else{Get-RepatoUtc})}}
-        if([string]::IsNullOrWhiteSpace($Arguments)) {
-            $p=Start-Process -FilePath $Executable -PassThru -ErrorAction Stop
-        } else {
-            $p=Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru -ErrorAction Stop
-        }
-        return [pscustomobject]@{Pid=[int]$p.Id;StartedUtc=$p.StartTime.ToUniversalTime().ToString('O')}
-    } catch { throw "Native process start failed: $($_.Exception.Message)" } finally {foreach($k in $saved.Keys){if($saved[$k].Exists){Set-Item ('Env:'+ $k) $saved[$k].Value}else{Remove-Item ('Env:'+ $k) -ErrorAction SilentlyContinue}}}
+        if([string]$Request.operation -cne 'launch-revit-qa' -or [int]$Request.schemaVersion -ne 2){throw 'Invalid v2 launch request.'}
+        if([string]$Request.requestPath -notlike '*.request.json' -or !(Test-Path -LiteralPath $Request.requestPath -PathType Leaf)){throw 'Launch request path is missing.'}
+        $pipe=[IO.Pipes.NamedPipeClientStream]::new('.', 'Repato\QaLaunch', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::WriteThrough)
+        $pipe.Connect($TimeoutMilliseconds)
+        $json=$Request|ConvertTo-Json -Compress -Depth 10
+        if([Text.Encoding]::UTF8.GetByteCount($json) -gt 32768){throw 'Launch request is oversized.'}
+        $writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true
+        $writeTask=$writer.WriteLineAsync($json);if(!$writeTask.Wait($TimeoutMilliseconds)){throw 'Launch request write timed out.'};$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true)
+        $readTask=$reader.ReadLineAsync();if(!$readTask.Wait($TimeoutMilliseconds)){throw 'Launch response read timed out.'};$line=$readTask.Result
+        if([string]::IsNullOrWhiteSpace($line) -or [Text.Encoding]::UTF8.GetByteCount($line) -gt $MaxResponseBytes){throw 'Launch response is missing or oversized.'}
+        try{$response=$line|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Launch response JSON is malformed.'}
+        foreach($n in 'schemaVersion','operation','requestId','correlationId','accepted','pid','user','sid','sessionId','launchUtc','imagePath','requestPath','taskId','workflowId','qaWorkflowId','testId','attemptId','runId','failureCode'){if($response.PSObject.Properties.Name -notcontains $n){throw "Launch response missing $n."}}
+        if([int]$response.schemaVersion -ne 2 -or [string]$response.operation -cne 'launch-revit-qa'){throw 'Unexpected launch response contract.'}
+        if([string]$response.requestId -cne [string]$Request.requestId -or [string]$response.correlationId -cne [string]$Request.requestId){throw 'Launch response correlation mismatch.'}
+        foreach($n in 'taskId','workflowId','qaWorkflowId','testId','attemptId','runId','requestPath'){if([string]$response.$n -cne [string]$Request.$n){throw "Launch response identity mismatch: $n."}}
+        if(-not [bool]$response.accepted){if([string]::IsNullOrWhiteSpace([string]$response.failureCode)){throw 'Rejected launch response has no failure code.'};throw "RepatoQA launch rejected: $($response.failureCode)"}
+        if([int]$response.pid -le 0 -or [string]$response.user -ine 'RAMSAI\RepatoQA' -or [string]$response.sid -ine 'S-1-5-21-1031246752-3872016183-2454652381-1015'){throw 'Accepted launch identity is invalid.'}
+        $expectedSession=@(Get-Process -IncludeUserName -ErrorAction SilentlyContinue|Where-Object UserName -ieq 'RAMSAI\RepatoQA'|Select-Object -ExpandProperty SessionId -Unique)
+        if(!$expectedSession -or @($expectedSession -contains ([int]$response.sessionId)) -eq $false){throw 'Accepted launch session is not the authenticated RepatoQA session.'}
+        if([IO.Path]::GetFullPath([string]$response.imagePath) -ine [IO.Path]::GetFullPath($Executable)){throw 'Accepted launch image mismatch.'}
+        if([string]$response.failureCode){throw 'Accepted launch response contains a failure code.'}
+        [pscustomobject]@{Pid=[int]$response.pid;StartedUtc=[string]$response.launchUtc;Response=$response}
+    } catch { $original=$_.Exception;throw } finally {
+        try{if($reader){$reader.Dispose()}}catch{}
+        try{if($writer){$writer.Dispose()}}catch{}
+        try{if($pipe){$pipe.Dispose()}}catch{}
+    }
 }
 function Invoke-MayaQaLaunchAgentHealth {
     param([ValidateRange(100,10000)][int]$TimeoutMilliseconds=3000)
@@ -488,9 +507,10 @@ function Invoke-MayaQaCanonicalNativeCore {
     if(!$r){throw 'Canonical execution is missing.'};if($r.Stage -cne 'claimed' -or $r.ExecutionStatus -cne 'Claimed' -or $r.ClaimStatus -cne 'claimed'){throw 'Execution is not claimed.'};if($r.ClaimOwner -cne 'Tara' -or $r.ClaimId -cne $ClaimId){throw 'Claim identity mismatch.'};if([DateTimeOffset]::Parse($task.mayaTaraAttempt.RequestExpiresUtc)-le[DateTimeOffset]::UtcNow){throw 'Attempt expired before native launch.'};if([long]$task.revision -ne ([long]$r.TaskRevisionAtClaim+1)){throw 'Claimed execution revision is stale.'}
     if($null -ne $Result){foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','HandoffId','AttemptId','RunId','ClaimId'){if($Result.PSObject.Properties.Name -contains $n -and [string]$Result.$n -cne [string]$r.$n){throw "Result identity mismatch: $n"}}}
     if($DryRun){return [pscustomobject]@{Stage='claimed';ProcessStarted=$false;NativeProcessId=$null;TaskRevision=$task.revision}}
-    $request=Join-Path $r.DisposableRuntimeRoot ('maya-tara-'+$r.RunId+'.request.json');$startupVariable=@{'create-plan-views-v1'='REPATO_QA_CREATE_PLAN_VIEWS_REQUEST'}[$r.QaWorkflowId];if(!$startupVariable){throw 'Canonical native startup contract is not supported for the selected QA workflow.'};$requestObject=[ordered]@{requestId=$r.RunId;testId=$r.TestId;modelPath=$r.DisposableModelPath;expiresUtc=$task.mayaTaraAttempt.RequestExpiresUtc;selectedManifestPath=$r.RunnerManifestPath;selectedManifestSha256=$r.RunnerManifestSha256;addinIsolation=[pscustomobject]@{};canonicalTaskId=$r.TaskId;canonicalWorkflowId=$r.WorkflowId;canonicalQaWorkflowId=$r.QaWorkflowId;canonicalTestId=$r.TestId;canonicalHandoffId=$r.HandoffId;canonicalAttemptId=$r.AttemptId;canonicalRunId=$r.RunId;canonicalClaimId=$r.ClaimId;ModelSha256=$r.DisposableModelSha256;ArtifactSha256=$r.ArtifactSha256;RunnerManifestSha256=$r.RunnerManifestSha256};$requestObject|ConvertTo-Json -Depth 20|Set-Content -LiteralPath $request -Encoding UTF8
+    $request=Join-Path $r.DisposableRuntimeRoot ('maya-tara-'+$r.RunId+'.request.json');if($r.QaWorkflowId -cne 'create-plan-views-v1'){throw 'Canonical native startup contract is not supported for the selected QA workflow.'};$requestObject=[ordered]@{schemaVersion=2;operation='launch-revit-qa';requestId=$r.RunId;taskId=$r.TaskId;workflowId=$r.WorkflowId;qaWorkflowId=$r.QaWorkflowId;testId=$r.TestId;attemptId=$r.AttemptId;runId=$r.RunId;claimId=$r.ClaimId;requestPath=$request;requestSha256=('0'*64);modelPath=$r.DisposableModelPath;modelSha256=$r.DisposableModelSha256;manifestPath=$r.RunnerManifestPath;manifestSha256=$r.RunnerManifestSha256;expiresUtc=$task.mayaTaraAttempt.RequestExpiresUtc};$requestObject|ConvertTo-Json -Compress -Depth 20|Set-Content -LiteralPath $request -Encoding utf8
     $null=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'claimed' -or $x.ClaimId -cne $ClaimId -or [long]$t.revision -ne ([long]$x.TaskRevisionAtClaim+1)){throw 'Launch transition compare-and-swap failed.'};$x.Stage='launching';$x.ExecutionStatus='Launching';$x.LaunchingUtc=Get-RepatoUtc;$x.RequestPath=$request;Add-RepatoHistory $t 'maya-tara-native-launching' 'Tara' "claim=$ClaimId";$x}
-    try{$started=Invoke-MayaQaProcessLauncher $Executable $Arguments $ProcessLauncher @{ $startupVariable = $request }}catch{Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;$x.Stage='launch-failed';$x.ExecutionStatus='LaunchFailed';$x.FailureCode='native-process-start-failed';$x.FailureDetails=$_.Exception.Message;$x.FailedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-native-launch-failed' 'Tara' $x.FailureDetails;$x};throw}
+    $requestJson=[IO.File]::ReadAllText($request);$requestObject.requestSha256=(Get-FileHash -LiteralPath $request -Algorithm SHA256).Hash;$requestObject|ConvertTo-Json -Compress -Depth 20|Set-Content -LiteralPath $request -Encoding utf8
+    try{$started=Invoke-MayaQaProcessLauncher $Executable $Arguments $ProcessLauncher $null $requestObject}catch{Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;$x.Stage='launch-failed';$x.ExecutionStatus='LaunchFailed';$x.FailureCode='native-process-start-failed';$x.FailureDetails=$_.Exception.Message;$x.FailedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-native-launch-failed' 'Tara' $x.FailureDetails;$x};throw}
     $transition=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'launching' -or $x.NativeProcessId){throw 'Duplicate native launch rejected.'};$x.NativeProcessId=[int]$started.Pid;$x.LaunchedUtc=$started.StartedUtc;$x.ExecutingUtc=$started.StartedUtc;$x.Stage='executing';$x.ExecutionStatus='Executing';Add-RepatoHistory $t 'maya-tara-native-executing' 'Tara' "pid=$($started.Pid)";$x}
     $currentResult=Read-RepatoTaskStore $StoreRoot;$currentTask=Find-RepatoTask $currentResult $TaskId;$x=$currentTask.mayaTaraExecution
     if($null -eq $Result){return [pscustomobject]@{Stage=$x.Stage;ExecutionStatus=$x.ExecutionStatus;NativeProcessId=$x.NativeProcessId;RequestPath=$x.RequestPath;RequestId=$x.RequestPath;ProcessStarted=$true;ResultAccepted=$false;Completed=$false}}
