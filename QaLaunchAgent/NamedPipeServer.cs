@@ -29,9 +29,13 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
                 var identity = WindowsIdentity.GetCurrent();
                 response = new QaHealthResponse(1, QaLaunchPolicy.HealthOperation, true, identity.Name, identity.User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, Environment.UserInteractive, null);
             }
-            else response = coordinator.Handle(JsonSerializer.Deserialize<QaLaunchRequest>(line) ?? throw new InvalidDataException(), DateTimeOffset.UtcNow);
+            else
+            {
+                var request = JsonSerializer.Deserialize<QaLaunchRequest>(line) ?? throw new InvalidDataException();
+                response = coordinator.Handle(request, DateTimeOffset.UtcNow);
+            }
         }
-        catch { response = new QaLaunchResponse(1, "", false, null, null, null, null, null, null, null, "malformed-request"); }
+        catch { response = new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request"); }
         using var writer = new StreamWriter(pipe) { AutoFlush = true };
         await writer.WriteLineAsync(JsonSerializer.Serialize(response));
     }
