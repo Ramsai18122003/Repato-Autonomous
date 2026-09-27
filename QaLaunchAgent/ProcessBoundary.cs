@@ -4,13 +4,14 @@ using System.Security.Principal;
 namespace Repato.QaLaunchAgent;
 
 public sealed record ChildLaunchResult(int Pid, string User, int SessionId, string ImagePath, DateTimeOffset LaunchUtc);
-public interface IIdentitySessionProvider { string User { get; } int SessionId { get; } bool Interactive { get; } }
+public interface IIdentitySessionProvider { string User { get; } string Sid { get; } int SessionId { get; } bool Interactive { get; } }
 public interface IChildProcessLauncher { ChildLaunchResult Launch(QaLaunchRequest request, QaAgentOptions options); }
 public interface IChildProcessVerifier { bool Verify(ChildLaunchResult result, QaLaunchRequest request, QaAgentOptions options); }
 
 public sealed class CurrentIdentitySessionProvider : IIdentitySessionProvider
 {
     public string User => WindowsIdentity.GetCurrent().Name;
+    public string Sid => WindowsIdentity.GetCurrent().User?.Value ?? "";
     public int SessionId => Process.GetCurrentProcess().SessionId;
     public bool Interactive => Environment.UserInteractive;
 }

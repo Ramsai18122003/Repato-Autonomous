@@ -456,6 +456,15 @@ function Invoke-MayaQaProcessLauncher {
         return [pscustomobject]@{Pid=[int]$p.Id;StartedUtc=$p.StartTime.ToUniversalTime().ToString('O')}
     } catch { throw "Native process start failed: $($_.Exception.Message)" } finally {foreach($k in $saved.Keys){if($saved[$k].Exists){Set-Item ('Env:'+ $k) $saved[$k].Value}else{Remove-Item ('Env:'+ $k) -ErrorAction SilentlyContinue}}}
 }
+function Invoke-MayaQaLaunchAgentHealth {
+    param([ValidateRange(100,10000)][int]$TimeoutMilliseconds=3000)
+    $dll='C:\Program Files\Repato\QaLaunchAgent\Repato.QaLaunchAgent.dll'
+    if(!(Test-Path -LiteralPath $dll -PathType Leaf)){throw 'RepatoQA launch agent is not installed.'}
+    try { Add-Type -Path $dll -ErrorAction Stop } catch { if($_.Exception.Message -notmatch 'already exists'){throw} }
+    $client=[Repato.QaLaunchAgent.QaHealthClient]::new('Repato\QaLaunch')
+    $h=$client.GetHealth([TimeSpan]::FromMilliseconds($TimeoutMilliseconds))
+    [pscustomobject]@{ProtocolVersion=$h.SchemaVersion;Operation=$h.Operation;Ready=$h.Ready;User=$h.User;SID=$h.Sid;SessionId=$h.SessionId;UserInteractive=$h.Interactive}
+}
 function Invoke-MayaQaCanonicalNativeCore {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[object]$Result,[Parameter(Mandatory)][string]$Executable,[string]$Arguments,[scriptblock]$ProcessLauncher,[switch]$DryRun)
@@ -1398,6 +1407,7 @@ Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCan
 Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
+Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)

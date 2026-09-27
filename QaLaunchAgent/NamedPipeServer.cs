@@ -13,7 +13,7 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         security.SetAccessRuleProtection(true, false);
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
-        if (!string.IsNullOrWhiteSpace(options.OrchestrationSid)) security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(options.OrchestrationSid), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(options.ClientSid), PipeAccessRights.ReadWrite, AccessControlType.Allow));
         using var pipe = NamedPipeServerStreamAcl.Create(options.PipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 8192, 8192, security);
         await pipe.WaitForConnectionAsync(cancellationToken);
         using var reader = new StreamReader(pipe);

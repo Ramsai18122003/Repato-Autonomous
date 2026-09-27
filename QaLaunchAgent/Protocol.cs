@@ -23,6 +23,10 @@ public static class QaLaunchPolicy
     public const string Operation = "launch-revit-qa";
     public const string HealthOperation = "health";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
+    public const string ExpectedUserSid = "S-1-5-21-1031246752-3872016183-2454652381-1015";
+    public const string ClientAccount = "RAMSAI\\rsgud";
+    public const string ClientSid = "S-1-5-21-1031246752-3872016183-2454652381-1001";
+    public const string LogRoot = @"C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\Logs";
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
     public static readonly string[] AllowedQaWorkflows = ["create-plan-views-v1"];
     public static bool IsValidRequest(QaLaunchRequest r, DateTimeOffset now) =>

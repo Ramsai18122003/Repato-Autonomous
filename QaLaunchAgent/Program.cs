@@ -8,15 +8,23 @@ internal static class Program
     // restricted named pipe only after one-time RepatoQA installation.
     public static int Main(string[] args)
     {
+        if (args.Length > 0 && (args[0] == "--help" || args[0] == "-h")) { Console.WriteLine("RepatoQA launch agent: fixed local QA listener."); return 0; }
+        if (args.Length > 0) return 64;
         if (!OperatingSystem.IsWindows()) return 2;
         if (!string.Equals(WindowsIdentity.GetCurrent().Name, QaLaunchPolicy.ExpectedUser, StringComparison.OrdinalIgnoreCase)) return 3;
         var options = new QaAgentOptions(
             @"E:\revit\Revit 2025\Revit.exe",
             @"C:\Repato-Autonomous\Source\QA\TestRuns",
             @"C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025",
-            @"C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\replay.json");
-        var coordinator = new LaunchCoordinator(options, new CurrentIdentitySessionProvider(), new FileReplayLedger(options.ReplayLedgerPath), new RevitChildProcessLauncher(), new StrictChildProcessVerifier());
+            @"C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\replay.json",
+            QaLaunchPolicy.LogRoot);
+        var identity = new CurrentIdentitySessionProvider();
+        if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive) return 3;
+        using var stop = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+        var coordinator = new LaunchCoordinator(options, identity, new FileReplayLedger(options.ReplayLedgerPath), new RevitChildProcessLauncher(), new StrictChildProcessVerifier());
         var server = new NamedPipeLaunchServer(options, coordinator);
-        while (true) server.ServeOnceAsync(CancellationToken.None).GetAwaiter().GetResult();
+        try { while (!stop.IsCancellationRequested) server.ServeOnceAsync(stop.Token).GetAwaiter().GetResult(); } catch (OperationCanceledException) { }
+        return 0;
     }
 }

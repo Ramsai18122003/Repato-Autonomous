@@ -4,7 +4,7 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
 {
     public QaLaunchResponse Handle(QaLaunchRequest request, DateTimeOffset now)
     {
-        if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase)) return Reject(request, "wrong-agent-identity");
+        if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid) return Reject(request, "wrong-agent-identity");
         if (!identity.Interactive) return Reject(request, "non-interactive-session");
         if (!QaLaunchPolicy.IsValidRequest(request, now)) return Reject(request, "request-invalid");
         if (!ledger.TryReserve(request, now)) return Reject(request, "request-replayed");
