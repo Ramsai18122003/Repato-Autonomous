@@ -833,6 +833,67 @@ function Invoke-MayaQaRequest {
     [ordered]@{StoreRoot=$StoreRoot;TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;HandoffId=$handoff.HandoffId;QaApprovalId=$approved.requestId;QaApprovalStatus=$approved.status;ModelPath=$handoff.ModelPath;SidecarPath=$handoff.SidecarPath;ArtifactPath=$handoff.ArtifactPath;ArtifactSha256=$handoff.ArtifactSha256;ManifestPath=$handoff.ManifestPath;ManifestSha256=$handoff.ManifestSha256} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $handoffPath -Encoding UTF8
     [pscustomobject]@{Success=$true;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;HandoffPath=$handoffPath;Stage='handoff-ready';Intake=$intake;BuildRequest=$buildRequest;Build=$build;Run=$run;Handoff=$handoff;SideEffectsPerformed=$true;Error=$null}
 }
+
+function Invoke-MayaQaCanonicalTransaction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$UserRequest,
+        [string]$SourceBranch = 'current',
+        [string]$ProjectPath = 'Forma.RevitConnector.csproj',
+        [scriptblock]$RequestInvoker,
+        [scriptblock]$ExecutionRecordInvoker,
+        [scriptblock]$ClaimInvoker,
+        [scriptblock]$NativeCoreInvoker
+    )
+
+    # These delegates are test seams only. In production the existing Maya,
+    # canonical preparation, claim, and native-core implementations remain
+    # the defaults and retain ownership of their validation/state transitions.
+    if ($RequestInvoker) {
+        $request = & $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath
+    } else {
+        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath
+    }
+    if (!$request -or $request.Stage -notin @('handoff-ready','execution-ready')) {
+        throw 'Canonical transaction requires an approved Tara handoff.'
+    }
+
+    $handoff = if ($request.PSObject.Properties.Name -contains 'Handoff') { $request.Handoff } else { $request }
+    $preflight = [pscustomobject]@{
+        TaskId = $request.TaskId; WorkflowId = $request.WorkflowId
+        QaWorkflowId = $request.QaWorkflowId; TestId = $handoff.NativeTestId
+        HandoffId = $handoff.HandoffId; AttemptId = $handoff.AttemptId
+        RunId = $request.RunId; ArtifactPath = $handoff.ArtifactPath
+        ArtifactSha256 = $handoff.ArtifactSha256; RunnerManifest = $handoff.ManifestPath
+        RunnerManifestSha256 = $handoff.ManifestSha256; FixturePath = $handoff.ModelPath
+        FixtureSha256 = $handoff.ModelSha256; DisposableFixturePath = $handoff.ModelPath
+        DisposableFixtureSha256 = $handoff.ModelSha256
+        Isolation = $handoff.Isolation
+    }
+    if ($ExecutionRecordInvoker) {
+        $execution = & $ExecutionRecordInvoker $StoreRoot $request.TaskId $preflight
+    } else {
+        $execution = New-MayaQaExecutionRecord -StoreRoot $StoreRoot -TaskId $request.TaskId -Preflight $preflight
+    }
+    if (!$execution) { throw 'Canonical execution preparation returned no execution record.' }
+
+    if ($ClaimInvoker) {
+        $claimed = & $ClaimInvoker $StoreRoot $request.TaskId 'Tara' $execution
+    } else {
+        $claimed = Claim-MayaQaExecutionRecord -StoreRoot $StoreRoot -TaskId $request.TaskId -ClaimOwner 'Tara' -Preflight $execution
+    }
+    if (!$claimed -or [string]::IsNullOrWhiteSpace([string]$claimed.ClaimId)) {
+        throw 'Canonical execution claim was not established.'
+    }
+
+    if ($NativeCoreInvoker) {
+        $result = & $NativeCoreInvoker $StoreRoot $request.TaskId $claimed.ClaimId
+    } else {
+        $result = Invoke-MayaQaCanonicalNativeCore -StoreRoot $StoreRoot -TaskId $request.TaskId -ClaimId $claimed.ClaimId -Executable (Join-Path 'E:\revit\Revit 2025' 'Revit.exe') -Arguments ''
+    }
+    [pscustomobject]@{TaskId=$request.TaskId;WorkflowId=$request.WorkflowId;QaWorkflowId=$request.QaWorkflowId;Execution=$execution;Claim=$claimed;Result=$result}
+}
 function Invoke-MayaQaBuildExecute {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[string]$SourceBranch='current',[string]$ProjectPath='Forma.RevitConnector.csproj',[switch]$DryRun)
     $QaWorkflowId = Resolve-MayaQaWorkflowId $QaWorkflowId
@@ -1475,7 +1536,7 @@ function Invoke-MayaQaOverview { param([Parameter(Mandatory)][ValidateSet('qa-ca
 }
 Export-ModuleMember -Function Prepare-MayaQaCanonicalLaunchPhase,Start-MayaQaCanonicalProcessPhase,Accept-MayaQaCanonicalEvidencePhase,Verify-MayaQaCanonicalRollbackPhase,Verify-MayaQaCanonicalExecutionPhase
 Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCanonicalExecutionPhase
-Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
+Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Invoke-MayaQaCanonicalTransaction,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth
