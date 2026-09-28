@@ -29,6 +29,8 @@
     <Compile Remove="ConnectorModels.cs" />
     <Compile Remove="ConnectorServer.cs" />
     <Compile Remove="FormaEventHandler.cs" />
+    <Compile Remove="QaLaunchAgent\**\*.cs" />
+    <Compile Remove="QaLaunchAgent.ProtocolInteropTests\**\*.cs" />
   </ItemGroup>
 
   <Target Name="CheckRevitApi" BeforeTargets="ResolveReferences">
