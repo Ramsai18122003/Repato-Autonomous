@@ -837,11 +837,12 @@ function Invoke-MayaQaRequest {
         if($null -eq $approval -or [string]::IsNullOrWhiteSpace([string]$approval.requestId)){throw 'Persisted qa-run approval request is missing requestId.'}
         return [pscustomobject]@{Success=$false;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;Stage='approval-required';NextOperation='Resolve-RepatoTaskApproval';QaApprovalId=$approval.requestId;QaApprovalStatus=$approval.status;SideEffectsPerformed=$true;Error=$null}
     }
-    $handoff=New-MayaQaHandoff -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId
+    $canonical=New-MayaQaCanonicalPreparation -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId
+    $handoff=$canonical.Handoff
     $handoffPath=Join-Path (Join-Path $StoreRoot 'handoffs') ($handoff.HandoffId+'.json'); New-Item -ItemType Directory -Path (Split-Path $handoffPath -Parent) -Force | Out-Null
     $approvedTask=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId;$approved=@($approvedTask.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})[-1]
     [ordered]@{StoreRoot=$StoreRoot;TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;HandoffId=$handoff.HandoffId;QaApprovalId=$approved.requestId;QaApprovalStatus=$approved.status;ModelPath=$handoff.ModelPath;SidecarPath=$handoff.SidecarPath;ArtifactPath=$handoff.ArtifactPath;ArtifactSha256=$handoff.ArtifactSha256;ManifestPath=$handoff.ManifestPath;ManifestSha256=$handoff.ManifestSha256} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $handoffPath -Encoding UTF8
-    [pscustomobject]@{Success=$true;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;HandoffPath=$handoffPath;Stage='handoff-ready';Intake=$intake;BuildRequest=$buildRequest;Build=$build;Run=$run;Handoff=$handoff;SideEffectsPerformed=$true;Error=$null}
+    [pscustomobject]@{Success=$true;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;AttemptId=$canonical.Attempt.AttemptId;HandoffPath=$handoffPath;Stage='handoff-ready';Intake=$intake;BuildRequest=$buildRequest;Build=$build;Run=$run;Handoff=$handoff;CanonicalPreparation=$canonical;SideEffectsPerformed=$true;Error=$null}
 }
 
 function Invoke-MayaQaCanonicalTransaction {
@@ -1129,6 +1130,40 @@ function New-MayaQaHandoff {
         TaskRevision = $mutation.TaskRevision
         SideEffectsPerformed = $true
     }
+}
+
+function New-MayaQaCanonicalPreparation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [switch]$DryRun
+    )
+    $QaWorkflowId=Resolve-MayaQaWorkflowId $QaWorkflowId
+    $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    $handoff=if($workflow.PSObject.Properties.Name -contains 'qaHandoff' -and $workflow.qaHandoff){$workflow.qaHandoff}else{New-MayaQaHandoff -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -DryRun:$DryRun}
+    $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    $runId=[string]$workflow.qaRunId
+    if([string]::IsNullOrWhiteSpace($runId)){throw 'Canonical QA run identity is missing.'}
+    $attemptId=[guid]::NewGuid().ToString('N')
+    $runtimeRoot=[IO.Path]::GetDirectoryName([string]$workflow.qaModelPath)
+    $attempt=[pscustomobject][ordered]@{SchemaVersion='maya-tara-execution-request-v1';AttemptId=$attemptId;TaskId=$TaskId;WorkflowId=$WorkflowId;RunId=$runId;RuntimeRoot=$runtimeRoot;RequestExpiresUtc=[DateTimeOffset]::UtcNow.AddMinutes((Get-MayaQaAttemptDurationMinutes)).ToString('O');Stage='prepared';Success=$false;RequestPath=$null}
+    $plan=[pscustomobject][ordered]@{TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;Stage='qa-prepared';ActiveAgent='Maya';NextAgent='Tara';NextOperation='canonical-execution-record';SideEffectsPerformed=$false}
+    $packet=[pscustomobject][ordered]@{SchemaVersion='maya-tara-qa-packet-v3';HandoffId=$handoff.HandoffId;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;TestId=$handoff.NativeTestId;RunId=$runId;AttemptId=$attemptId;ArtifactPath=$handoff.ArtifactPath;ArtifactSha256=$handoff.ArtifactSha256;ManifestPath=$handoff.ManifestPath;ManifestSha256=$handoff.ManifestSha256;ModelPath=$workflow.qaModelPath;SidecarPath=$workflow.qaSidecarPath;FixturePath=$workflow.qaModelPath;FixtureSha256=$workflow.qaFixtureSha256;RequestExpiresUtc=$attempt.RequestExpiresUtc;Stage='prepared';SideEffectsPerformed=$false;StoreRoot=$StoreRoot}
+    if($DryRun){return [pscustomobject]@{TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;Handoff=$handoff;Attempt=$attempt;Plan=$plan;Packet=$packet;SideEffectsPerformed=$false}}
+    $result=Invoke-RepatoStoreMutation $StoreRoot {
+        param($data,$preview)
+        $task=Find-RepatoTask $data $TaskId
+        foreach($name in 'mayaPlan','mayaTaraQaPacket','mayaTaraAttempt'){if($task.PSObject.Properties.Name -contains $name -and $task.$name){throw "Canonical preparation already contains $name."}}
+        $task|Add-Member NoteProperty mayaPlan $plan -Force
+        $task|Add-Member NoteProperty mayaTaraQaPacket $packet -Force
+        $task|Add-Member NoteProperty mayaTaraAttempt $attempt -Force
+        Add-RepatoHistory $task 'maya-tara-canonical-prepared' 'Maya' "workflow=$WorkflowId; handoff=$($handoff.HandoffId); attempt=$attemptId; run=$runId"
+        [pscustomobject]@{TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;Handoff=$handoff;Attempt=$attempt;Plan=$plan;Packet=$packet;SideEffectsPerformed=$true}
+    }
+    $result
 }
 function Get-MayaQaWorkflowStatus { param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId)
     $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId; $qaId=if($w.PSObject.Properties.Name -contains 'qaWorkflowId'){$w.qaWorkflowId}else{$null}; $def=if($qaId){Get-MayaQaWorkflowDefinition $qaId}else{$null}
@@ -1614,6 +1649,7 @@ Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence
+Export-ModuleMember -Function New-MayaQaCanonicalPreparation
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
