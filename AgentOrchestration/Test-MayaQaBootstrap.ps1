@@ -9,7 +9,7 @@ $root=Join-Path $env:TEMP ('maya-qa-bootstrap-test-'+[guid]::NewGuid().ToString(
 try {
     $args=@('-Operation','qa-bootstrap','-QaWorkflowId','create-levels','-RunId',$run,'-StoreRoot',$store,'-TaskId',$task);$one=Invoke-JsonChild $args
     foreach($n in 'StoreRoot','TaskId','WorkflowId','QaWorkflowId','RunId'){if(!$one.$n){throw "Bootstrap omitted $n."}}
-    if($one.QaWorkflowId -ne 'create-levels' -or $one.Stage -ne 'planned'){throw 'Bootstrap identity/stage mismatch.'}
+    if($one.QaWorkflowId -ne 'create-levels-elevations-v1' -or $one.Stage -ne 'planned'){throw 'Bootstrap identity/stage mismatch.'}
     $duplicate=Invoke-JsonChild $args -ExpectFailure;if($duplicate.ExitCode -eq 0){throw 'Duplicate bootstrap accepted.'}
     $wrong=Invoke-JsonChild @('-Operation','qa-bootstrap','-QaWorkflowId','unsupported','-RunId','wrong','-StoreRoot',(Join-Path $root 'wrong')) -ExpectFailure
     $dry=Invoke-JsonChild @('-Operation','qa-bootstrap','-QaWorkflowId','create-levels','-RunId','dry','-StoreRoot',(Join-Path $root 'dry'),'-DryRun');if($dry.SideEffectsPerformed -or (Test-Path (Join-Path $root 'dry'))){throw 'Bootstrap dry-run wrote state.'}
