@@ -793,12 +793,18 @@ function Resolve-MayaQaRequestWorkflow {
     throw 'User request does not identify a supported QA workflow.'
 }
 function Invoke-MayaQaRequest {
-    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,[switch]$DryRun)
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,
+        [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[switch]$DryRun)
     $qaId=Resolve-MayaQaRequestWorkflow $UserRequest
+    if($ArtifactMode -ceq 'FrozenCandidate'){
+        foreach($required in @(@('CandidateDirectory',$CandidateDirectory),@('ExpectedCandidateSha256',$ExpectedCandidateSha256),@('ExpectedCandidateSourceCommit',$ExpectedCandidateSourceCommit))){if([string]::IsNullOrWhiteSpace([string]$required[1])){throw "FrozenCandidate mode requires $($required[0])."}}
+        $null=Test-MayaQaFrozenCandidate -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -QaWorkflowId $qaId
+    }
     $taskId='task-'+[guid]::NewGuid().ToString('N');$workflowId='workflow-'+[guid]::NewGuid().ToString('N');$runId=[guid]::NewGuid().ToString('N')
     $def=Get-MayaQaWorkflowDefinition $qaId
     if($DryRun){return [pscustomobject]@{Success=$true;Mode='DryRun';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;FixtureId=$def.FixtureId;NativeTestId=(Get-MayaQaNativeTestId $def);Stages=@('intake','build-request','build-execute','handoff','tara-execute','report-verify','complete','receipt','dashboard');SideEffectsPerformed=$false;Error=$null}}
-    if([string]::IsNullOrWhiteSpace($ProjectPath)){throw 'ProjectPath is required for real Maya request orchestration.'}
+    if([string]::IsNullOrWhiteSpace($ProjectPath)){$ProjectPath='Forma.RevitConnector.csproj'}
     $null=Initialize-RepatoTaskStore $StoreRoot
     $existing=$null; try{$existing=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId}catch{}
     if($null -eq $existing){ New-RepatoTask $StoreRoot $taskId 'Maya QA request' $UserRequest 'qa/maya-qa-workflow' 'maya' | Out-Null }
@@ -811,7 +817,11 @@ function Invoke-MayaQaRequest {
     }
     $intake=Invoke-MayaQaIntake $taskId $workflowId $qaId $UserRequest
     $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath
-    $build=Invoke-MayaQaBuildExecute -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -SourceBranch $SourceBranch -ProjectPath $ProjectPath
+    if($ArtifactMode -ceq 'FrozenCandidate'){
+        $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit
+    }else{
+        $build=Invoke-MayaQaBuildExecute -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -SourceBranch $SourceBranch -ProjectPath $ProjectPath
+    }
     if($build.BuildStatus -cne 'succeeded' -or [string]::IsNullOrWhiteSpace($build.ArtifactPath) -or [string]::IsNullOrWhiteSpace($build.ArtifactSha256) -or !(Test-Path -LiteralPath $build.ArtifactPath -PathType Leaf)){throw 'Neil build did not produce a verified artifact.'}
     if((Get-FileHash -LiteralPath $build.ArtifactPath -Algorithm SHA256).Hash -ine $build.ArtifactSha256){throw 'Neil artifact SHA-256 verification failed.'}
     if([string]::IsNullOrWhiteSpace($build.ManifestPath) -or (Get-FileHash -LiteralPath $build.ManifestPath -Algorithm SHA256).Hash -ine $build.ManifestSha256){throw 'Neil artifact manifest SHA-256 verification failed.'}
@@ -841,6 +851,8 @@ function Invoke-MayaQaCanonicalTransaction {
         [Parameter(Mandatory)][string]$UserRequest,
         [string]$SourceBranch = 'current',
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
+        [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',
+        [string]$CandidateDirectory,[string]$CandidateDllPath,[string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,
         [scriptblock]$RequestInvoker,
         [scriptblock]$ExecutionRecordInvoker,
         [scriptblock]$ClaimInvoker,
@@ -853,7 +865,7 @@ function Invoke-MayaQaCanonicalTransaction {
     if ($RequestInvoker) {
         $request = & $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath
     } else {
-        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath
+        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit
     }
     if (!$request -or $request.Stage -notin @('handoff-ready','execution-ready')) {
         throw 'Canonical transaction requires an approved Tara handoff.'
@@ -943,6 +955,67 @@ function Invoke-MayaQaBuildExecute {
     })[-1]
     if ($status -ne 'succeeded') { throw "Release build failed with exit code $exit." }
     [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus=$status;Command=$command;Configuration='Release';ExitCode=$exit;ArtifactPath=$artifact;ArtifactSha256=$mutation.Workflow.qaBuildEvidence.ArtifactSha256;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$mutation.Workflow.qaBuildEvidence.ManifestSha256;ManifestPath=$artifactManifest;ManifestSha256=$mutation.Workflow.qaBuildEvidence.ManifestSha256;WarningCount=$warningCount;ErrorCount=$errorCount;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;SideEffectsPerformed=$true}
+}
+
+function Test-MayaQaFrozenCandidate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CandidateDirectory,
+        [string]$CandidateDllPath,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{7,40}$')][string]$ExpectedSourceCommit,
+        [Parameter(Mandatory)][string]$QaWorkflowId
+    )
+    $directory=[IO.Path]::GetFullPath($CandidateDirectory)
+    if(!(Test-Path -LiteralPath $directory -PathType Container)){throw 'Frozen candidate directory is missing.'}
+    $dll=if([string]::IsNullOrWhiteSpace($CandidateDllPath)){Join-Path $directory 'Repato.Revit.dll'}else{[IO.Path]::GetFullPath($CandidateDllPath)}
+    $prefix=$directory.TrimEnd('\')+'\'
+    if(!$dll.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){throw 'Frozen candidate DLL must be inside the candidate directory.'}
+    if(!(Test-Path -LiteralPath $dll -PathType Leaf)){throw 'Frozen candidate DLL is missing.'}
+    $actual=(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+    if($actual -ine $ExpectedSha256){throw 'Frozen candidate DLL SHA-256 mismatch.'}
+    $provenancePath=Join-Path $directory 'release-manifest.json'
+    if(!(Test-Path -LiteralPath $provenancePath -PathType Leaf)){throw 'Frozen candidate provenance is missing.'}
+    try{$provenance=Get-Content -LiteralPath $provenancePath -Raw|ConvertFrom-Json}catch{throw 'Frozen candidate provenance is invalid JSON.'}
+    foreach($name in 'SourceCommit','FrozenArtifactSha256'){
+        if($provenance.PSObject.Properties.Name -notcontains $name -or [string]::IsNullOrWhiteSpace([string]$provenance.$name)){throw "Frozen candidate provenance is missing $name."}
+    }
+    $source=[string]$provenance.SourceCommit
+    if(!$source.StartsWith($ExpectedSourceCommit,[StringComparison]::OrdinalIgnoreCase) -or
+       ($ExpectedSourceCommit.Length -eq 40 -and $source -ine $ExpectedSourceCommit)){throw 'Frozen candidate source commit mismatch.'}
+    if([string]$provenance.FrozenArtifactSha256 -ine $actual){throw 'Frozen candidate provenance artifact hash mismatch.'}
+    if($provenance.PSObject.Properties.Name -notcontains 'SupportedQaWorkflows' -or
+       @($provenance.SupportedQaWorkflows|Where-Object{[string]$_ -ceq $QaWorkflowId}).Count -ne 1){throw 'Frozen candidate is not compatible with the requested QA workflow.'}
+    $manifestPath=Join-Path $directory 'Repato.addin'
+    if(!(Test-Path -LiteralPath $manifestPath -PathType Leaf)){throw 'Frozen candidate add-in manifest is missing.'}
+    try{$manifestXml=[xml](Get-Content -LiteralPath $manifestPath -Raw)}catch{throw 'Frozen candidate add-in manifest is invalid XML.'}
+    if($manifestXml.DocumentElement.Name -cne 'RevitAddIns'){throw 'Frozen candidate add-in manifest is invalid.'}
+    [pscustomobject]@{CandidateDirectory=$directory;ArtifactPath=$dll;ArtifactSha256=$actual;ManifestPath=$manifestPath;ManifestSha256=(Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash;ProvenancePath=$provenancePath;ProvenanceSha256=(Get-FileHash -LiteralPath $provenancePath -Algorithm SHA256).Hash;SourceCommit=$source;QaWorkflowId=$QaWorkflowId}
+}
+
+function Invoke-MayaQaFrozenCandidateEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$CandidateDirectory,[string]$CandidateDllPath,
+        [Parameter(Mandatory)][string]$ExpectedSha256,[Parameter(Mandatory)][string]$ExpectedSourceCommit,
+        [switch]$DryRun
+    )
+    $verified=Test-MayaQaFrozenCandidate -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedSha256 -ExpectedSourceCommit $ExpectedSourceCommit -QaWorkflowId $QaWorkflowId
+    if($DryRun){return $verified}
+    $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if($workflow.PSObject.Properties.Name -notcontains 'qaBuildRequest' -or !$workflow.qaBuildRequest){throw 'Persisted Neil build request is missing.'}
+    if($workflow.qaWorkflowId -cne $QaWorkflowId){throw 'QA workflow identity mismatch.'}
+    $now=(Get-Date).ToUniversalTime().ToString('O');$data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+    $mutation=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $workflow.workflowRevision $task.revision {
+        param($current)
+        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId}
+        $current|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force
+        $current|Add-Member NoteProperty qaBuildEvidence $e -Force
+        return $current
+    })[-1]
+    [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus='succeeded';Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ArtifactManifestPath=$verified.ManifestPath;ArtifactManifestSha256=$verified.ManifestSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;WarningCount=0;ErrorCount=0;EvidenceSource='FrozenCandidate';CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;SideEffectsPerformed=$true}
 }
 function New-MayaQaHandoff {
     param(
@@ -1540,6 +1613,7 @@ Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWork
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth
+Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
