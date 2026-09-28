@@ -48,7 +48,7 @@ public static class QaLaunchPolicy
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
         {
             writer.WriteStartObject();
-            foreach (var property in document.RootElement.EnumerateObject())
+            foreach (var property in document.RootElement.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal))
             {
                 writer.WritePropertyName(property.Name);
                 if (property.Name.Equals("requestSha256", StringComparison.OrdinalIgnoreCase)) writer.WriteStringValue(RequestSha256Placeholder);

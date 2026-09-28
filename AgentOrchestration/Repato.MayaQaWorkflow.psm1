@@ -520,6 +520,21 @@ function Invoke-MayaQaLaunchAgentHealth {
           try { if($pipe){$pipe.Dispose()} } catch { }
       }
 }
+function ConvertTo-MayaQaCanonicalRequestJson {
+    param([Parameter(Mandatory)][object]$Request)
+    $ordered=[ordered]@{}
+    $properties=if($Request -is [System.Collections.IDictionary]){@($Request.GetEnumerator()|ForEach-Object{[pscustomobject]@{Name=$_.Key;Value=$_.Value}})}else{@($Request.PSObject.Properties|ForEach-Object{[pscustomobject]@{Name=$_.Name;Value=$_.Value}})}
+    foreach($p in @($properties|Sort-Object Name)){$ordered[$p.Name]=$p.Value}
+    ($ordered|ConvertTo-Json -Compress -Depth 20).Replace('+','\u002B')
+}
+function Get-MayaQaCanonicalRequestSha256 {
+    param([Parameter(Mandatory)][object]$Request)
+    $placeholder=[ordered]@{}
+    $properties=if($Request -is [System.Collections.IDictionary]){@($Request.GetEnumerator()|ForEach-Object{[pscustomobject]@{Name=$_.Key;Value=$_.Value}})}else{@($Request.PSObject.Properties|ForEach-Object{[pscustomobject]@{Name=$_.Name;Value=$_.Value}})}
+    foreach($p in @($properties|Sort-Object Name)){$placeholder[$p.Name]=if($p.Name -ceq 'requestSha256'){('0'*64)}else{$p.Value}}
+    $json=ConvertTo-MayaQaCanonicalRequestJson $placeholder
+    $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','')}finally{$sha.Dispose()}
+}
 function Invoke-MayaQaCanonicalNativeCore {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[object]$Result,[Parameter(Mandatory)][string]$Executable,[string]$Arguments,[scriptblock]$ProcessLauncher,[switch]$DryRun)
@@ -527,7 +542,7 @@ function Invoke-MayaQaCanonicalNativeCore {
     if(!$r){throw 'Canonical execution is missing.'};if($r.Stage -cne 'claimed' -or $r.ExecutionStatus -cne 'Claimed' -or $r.ClaimStatus -cne 'claimed'){throw 'Execution is not claimed.'};if($r.ClaimOwner -cne 'Tara' -or $r.ClaimId -cne $ClaimId){throw 'Claim identity mismatch.'};if([DateTimeOffset]::Parse($task.mayaTaraAttempt.RequestExpiresUtc)-le[DateTimeOffset]::UtcNow){throw 'Attempt expired before native launch.'};if([long]$task.revision -ne ([long]$r.TaskRevisionAtClaim+1)){throw 'Claimed execution revision is stale.'}
     if($null -ne $Result){foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','HandoffId','AttemptId','RunId','ClaimId'){if($Result.PSObject.Properties.Name -contains $n -and [string]$Result.$n -cne [string]$r.$n){throw "Result identity mismatch: $n"}}}
     if($DryRun){return [pscustomobject]@{Stage='claimed';ProcessStarted=$false;NativeProcessId=$null;TaskRevision=$task.revision}}
-    $request=Join-Path $r.DisposableRuntimeRoot ('maya-tara-'+$r.RunId+'.request.json');if($r.QaWorkflowId -cne 'create-plan-views-v1'){throw 'Canonical native startup contract is not supported for the selected QA workflow.'};$requestObject=[ordered]@{schemaVersion=2;operation='launch-revit-qa';requestId=$r.RunId;taskId=$r.TaskId;workflowId=$r.WorkflowId;qaWorkflowId=$r.QaWorkflowId;testId=$r.TestId;attemptId=$r.AttemptId;runId=$r.RunId;claimId=$r.ClaimId;requestPath=$request;requestSha256=('0'*64);modelPath=$r.DisposableModelPath;modelSha256=$r.DisposableModelSha256;manifestPath=$r.RunnerManifestPath;manifestSha256=$r.RunnerManifestSha256;expiresUtc=$task.mayaTaraAttempt.RequestExpiresUtc};$canonicalJson=$requestObject|ConvertTo-Json -Compress -Depth 20;[IO.File]::WriteAllText($request,$canonicalJson,[Text.UTF8Encoding]::new($false));$requestObject.requestSha256=(Get-FileHash -LiteralPath $request -Algorithm SHA256).Hash
+    $request=Join-Path $r.DisposableRuntimeRoot ('maya-tara-'+$r.RunId+'.request.json');if($r.QaWorkflowId -cne 'create-plan-views-v1'){throw 'Canonical native startup contract is not supported for the selected QA workflow.'};$requestObject=[ordered]@{schemaVersion=2;operation='launch-revit-qa';requestId=$r.RunId;taskId=$r.TaskId;workflowId=$r.WorkflowId;qaWorkflowId=$r.QaWorkflowId;testId=$r.TestId;attemptId=$r.AttemptId;runId=$r.RunId;claimId=$r.ClaimId;requestPath=$request;requestSha256=('0'*64);modelPath=$r.DisposableModelPath;modelSha256=$r.DisposableModelSha256;manifestPath=$r.RunnerManifestPath;manifestSha256=$r.RunnerManifestSha256;expiresUtc=$task.mayaTaraAttempt.RequestExpiresUtc};$canonicalJson=ConvertTo-MayaQaCanonicalRequestJson $requestObject;[IO.File]::WriteAllText($request,$canonicalJson,[Text.UTF8Encoding]::new($false));$requestObject.requestSha256=Get-MayaQaCanonicalRequestSha256 $requestObject
     $null=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'claimed' -or $x.ClaimId -cne $ClaimId -or [long]$t.revision -ne ([long]$x.TaskRevisionAtClaim+1)){throw 'Launch transition compare-and-swap failed.'};$x.Stage='launching';$x.ExecutionStatus='Launching';$x.LaunchingUtc=Get-RepatoUtc;$x.RequestPath=$request;Add-RepatoHistory $t 'maya-tara-native-launching' 'Tara' "claim=$ClaimId";$x}
     $finalJson=$requestObject|ConvertTo-Json -Compress -Depth 20;[IO.File]::WriteAllText($request,$finalJson,[Text.UTF8Encoding]::new($false))
     try{$started=Invoke-MayaQaProcessLauncher $Executable $Arguments $ProcessLauncher $null $requestObject}catch{Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;$x.Stage='launch-failed';$x.ExecutionStatus='LaunchFailed';$x.FailureCode='native-process-start-failed';$x.FailureDetails=$_.Exception.Message;$x.FailedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-native-launch-failed' 'Tara' $x.FailureDetails;$x};throw}
