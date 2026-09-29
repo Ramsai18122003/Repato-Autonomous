@@ -61,10 +61,10 @@ function Get-TaskSpecComparison($Actual) {
         $e=[string]$expected.$name
         $a=if($null -eq $Actual){$null}else{[string]$Actual.$name}
         if($name -eq 'Principal') {
-            $expectedSid=$expected.Sid; $actualSid=if($Actual){$Actual.PrincipalResolvedSid}else{$null}
+            $expectedSid=$expected.Sid; $actualSid=if($Actual -and $Actual.PSObject.Properties.Name -contains 'PrincipalResolvedSid'){$Actual.PrincipalResolvedSid}elseif($Actual){Resolve-RepatoAccountSid $a}else{$null}
             [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$expectedSid;NormalizedActual=$actualSid;Match=($actualSid -cne $null -and $actualSid -ceq $expectedSid);ExpectedPrincipalDisplay=$e;ActualPrincipalDisplay=$a;ExpectedPrincipalSid=$expectedSid;ActualPrincipalResolvedSid=$actualSid}
         } elseif($name -eq 'TriggerUser') {
-            $expectedSid=$expected.Sid; $actualSid=if($Actual){$Actual.TriggerResolvedSid}else{$null}
+            $expectedSid=$expected.Sid; $actualSid=if($Actual -and $Actual.PSObject.Properties.Name -contains 'TriggerResolvedSid'){$Actual.TriggerResolvedSid}elseif($Actual){Resolve-RepatoAccountSid $a}else{$null}
             [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$expectedSid;NormalizedActual=$actualSid;Match=($actualSid -cne $null -and $actualSid -ceq $expectedSid);ExpectedTriggerDisplay=$e;ActualTriggerDisplay=$a;ExpectedTriggerSid=$expectedSid;ActualTriggerResolvedSid=$actualSid}
         } else {
             [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$e;NormalizedActual=$a;Match=($a -cne $null -and $a -ceq $e)}
@@ -152,7 +152,7 @@ function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$All
         Move-Item -LiteralPath $stage -Destination $TargetRoot
         & $Context.SetTask (New-TaskSpec)
         $actual=& $Context.GetTask
-        $snapshot=& $Context.GetTaskSnapshot
+        $snapshot=if($Context.PSObject.Properties.Name -contains 'GetTaskSnapshot'){& $Context.GetTaskSnapshot}else{$actual}
         $comparison=@(Get-TaskSpecComparison $actual)
         if(-not (Test-TaskSpec $actual)) {
             $report=Write-RepatoQaLaunchAgentDiagnostics $snapshot $comparison (Get-RepatoQaLaunchAgentRuntimeIntegrity $TargetRoot $Validated.Manifest) 'Registered scheduled task does not match the security contract.'
