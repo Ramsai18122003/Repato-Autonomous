@@ -1,0 +1,6 @@
+param([Parameter(Mandatory)][string]$RequestPath)
+$ErrorActionPreference='Stop';Import-Module (Join-Path $PSScriptRoot 'Repato.QaAddinDeployment.psm1') -Force
+$r=Get-Content $RequestPath -Raw|ConvertFrom-Json
+if($r.schemaVersion -ne 1 -or $r.operation -cne 'validate-qa-deployment' -or $r.candidateCommit -cne 'fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3' -or $r.expectedCandidateSha256 -cne '7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2' -or $r.qaWorkflowId -cne 'create-plan-views-v1' -or $r.testId -cne $r.qaWorkflowId){throw 'Invalid fixed deployment-validation request.'}
+$candidate='C:\Repato-Autonomous\Source\DeploymentCandidates\AgentBuilds\ReleaseCandidate-fcf624ee3ed1';$x=Test-TaraFrozenCandidateQaIsolation -CandidateDirectory $candidate -ExpectedArtifactSha256 $r.expectedCandidateSha256 -ExpectedSourceCommit $r.candidateCommit -QaWorkflowId $r.qaWorkflowId -TestId $r.testId;$qaRoot=Split-Path $x.InstalledDllPath
+[pscustomobject]@{schemaVersion=1;operation=$r.operation;requestId=$r.requestId;succeeded=[bool]$x.Success;candidateCommit=$r.candidateCommit;candidateSha256=$x.CandidateSha256;qaWorkflowId=$r.qaWorkflowId;testId=$r.testId;validationIdentity=[Security.Principal.WindowsIdentity]::GetCurrent().Name;qaAddinRoot=$qaRoot;isolationPassed=[bool]$x.Isolation.Allowed;errorCode=$null;errorMessage=$null}|ConvertTo-Json -Compress

@@ -16,6 +16,13 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
         }
         catch (Exception ex) { return StageReject(request, "staging-adapter-failed", ex.Message); }
     }
+    public QaDeploymentValidationResponse HandleDeploymentValidation(QaDeploymentValidationRequest? request, DateTimeOffset now)
+    {
+        if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request?.RequestId ?? "", false, request?.CandidateCommit, request?.ExpectedCandidateSha256, request?.QaWorkflowId, request?.TestId, null, null, false, "wrong-agent-identity", null);
+        if (request is null || request.SchemaVersion != 1 || request.Operation != QaLaunchPolicy.ValidateDeploymentOperation || !Guid.TryParse(request.RequestId, out _) || request.CandidateCommit != QaLaunchPolicy.FrozenCandidateCommit || request.ExpectedCandidateSha256 != QaLaunchPolicy.FrozenCandidateSha256 || request.QaWorkflowId != "create-plan-views-v1" || request.TestId != request.QaWorkflowId) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request?.RequestId ?? "", false, request?.CandidateCommit, request?.ExpectedCandidateSha256, request?.QaWorkflowId, request?.TestId, null, null, false, "validation-request-invalid", null);
+        if (!ledger.TryReserve(request.RequestId, now)) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "validation-request-replayed", null);
+        try { return StagingAdapter.ValidateDeployment(request); } catch (Exception ex) { return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "deployment-validation-failed", ex.Message); }
+    }
 
     public QaLaunchResponseV2 Handle(QaLaunchRequest request, DateTimeOffset now, string? rawJson = null)
     {

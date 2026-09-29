@@ -34,6 +34,11 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
                 var request = JsonSerializer.Deserialize<QaStageRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();
                 response = coordinator.HandleStage(request, DateTimeOffset.UtcNow);
             }
+            else if (operation == QaLaunchPolicy.ValidateDeploymentOperation)
+            {
+                var request = JsonSerializer.Deserialize<QaDeploymentValidationRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();
+                response = coordinator.HandleDeploymentValidation(request, DateTimeOffset.UtcNow);
+            }
             else
             {
                 var request = JsonSerializer.Deserialize<QaLaunchRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();

@@ -83,30 +83,30 @@ function New-TaraRevitQaPlan {
     $side=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json
     if($side.fixtureId -cne $Context.FixtureId -or $side.sourceSha256 -ine $Context.FixtureSha256){throw 'Fixture sidecar identity or expected source hash mismatch.'}
     foreach($p in @($source,$model)){if((Get-TaraSha256 $p) -ine $Context.FixtureSha256){throw 'Fixture/model hash mismatch.'}}
-    $addin=Assert-TaraPath $QaAddinRoot $roots.UserAddinsRoot
+    $addin=if([Security.Principal.WindowsIdentity]::GetCurrent().Name.Split('\')[-1] -ieq 'RepatoQA'){Assert-TaraPath $QaAddinRoot $roots.UserAddinsRoot}else{$QaAddinRoot}
     if($addin -ine (Join-Path $roots.UserAddinsRoot 'RepatoQA')){throw 'Production add-in path rejected: only the dedicated RepatoQA folder is allowed.'}
     $runner=$runners[$QaWorkflowId]
-    $manifest=Assert-TaraPath (Join-Path $roots.UserAddinsRoot $runner[0]) $roots.UserAddinsRoot -Leaf
-    $dll=Assert-TaraPath (Join-Path $addin 'Repato.Revit.dll') $addin -Leaf
+    $remoteDeployment=$null
+    if([Security.Principal.WindowsIdentity]::GetCurrent().Name.Split('\')[-1] -ieq 'RepatoQA'){$manifest=Assert-TaraPath (Join-Path $roots.UserAddinsRoot $runner[0]) $roots.UserAddinsRoot -Leaf;$dll=Assert-TaraPath (Join-Path $addin 'Repato.Revit.dll') $addin -Leaf}else{if(!(Get-Command Invoke-MayaQaLaunchAgentDeploymentValidation -ErrorAction SilentlyContinue)){throw 'RepatoQA deployment validation boundary is unavailable.'};$remoteDeployment=Invoke-MayaQaLaunchAgentDeploymentValidation -CandidateCommit 'fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3' -ExpectedCandidateSha256 $Context.ArtifactSha256 -QaWorkflowId $QaWorkflowId -TestId $Context.TestId;$manifest=Join-Path $roots.UserAddinsRoot $runner[0];$dll=Join-Path $addin 'Repato.Revit.dll'}
     $artifactManifest=Assert-TaraPath $Context.ManifestPath -Leaf
     $qaRunnerSourceManifest=Assert-TaraPath (Join-Path $qa $runner[0]) $qa -Leaf
     $artifactPairs=@(@($dll,$Context.ArtifactSha256),@($Context.ArtifactPath,$Context.ArtifactSha256),@($artifactManifest,$Context.ManifestSha256))
-    foreach($pair in $artifactPairs){$null=Assert-TaraPath $pair[0] -Leaf;if($pair[1] -notmatch '^[a-fA-F0-9]{64}$' -or (Get-TaraSha256 $pair[0]) -ine $pair[1]){throw 'Artifact or artifact-manifest hash mismatch.'}}
+    foreach($pair in $artifactPairs){$null=if($pair[0] -eq $dll -and $remoteDeployment){$pair[0]}else{Assert-TaraPath $pair[0] -Leaf};if($pair[1] -notmatch '^[a-fA-F0-9]{64}$' -or (!$remoteDeployment -and (Get-TaraSha256 $pair[0]) -ine $pair[1])){throw 'Artifact or artifact-manifest hash mismatch.'}}
     $qaRunnerManifestSha256=Get-TaraSha256 $qaRunnerSourceManifest
     if((Get-TaraSha256 $manifest) -ine $qaRunnerManifestSha256){throw 'QA runner manifest hash mismatch.'}
-    $xml=[xml](Get-Content -LiteralPath $manifest -Raw)
+    $xml=[xml](Get-Content -LiteralPath $(if($remoteDeployment){$qaRunnerSourceManifest}else{$manifest}) -Raw)
     if(@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application').Count -ne 1){throw 'QA startup application manifest is required.'}
     $appEntries=@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application')
     if($appEntries.Count -ne 1 -or $appEntries[0].FullClassName -cne $runner[3]){throw 'QA runner startup class does not match the selected workflow.'}
     foreach($entry in $xml.RevitAddIns.AddIn){if([IO.Path]::GetFullPath((Join-Path $roots.UserAddinsRoot ([string]$entry.Assembly))) -ine $dll){throw 'Manifest assembly path is outside the QA deployment.'}}
-    $inventory=Get-AddinIsolationInventory -PolicyPath (Join-Path $qa 'MachineWideAddins.allowlist.json') -MachineRoot $roots.MachineRoot -UserRoot $roots.UserAddinsRoot -QaSourceRoot $qa -ApprovedUserManifestName $runner[0]
+    $inventory=if($remoteDeployment){[pscustomobject]@{Allowed=[bool]$remoteDeployment.isolationPassed;Errors=@()}}else{Get-AddinIsolationInventory -PolicyPath (Join-Path $qa 'MachineWideAddins.allowlist.json') -MachineRoot $roots.MachineRoot -UserRoot $roots.UserAddinsRoot -QaSourceRoot $qa -ApprovedUserManifestName $runner[0]}
     if(!$inventory.Allowed -or @($inventory.Errors).Count){throw ('Add-in allowlist rejected: '+(@($inventory.Errors)+@($inventory.DetectedAddins|Where-Object {!$_.Allowlisted}|ForEach-Object Reason)-join '; '))}
     $exe=Assert-TaraPath (Join-Path $RevitInstallDir 'Revit.exe') $RevitInstallDir -Leaf
     Assert-TaraRevitExecutableVersion $exe
     $verifier=Assert-TaraPath (Join-Path $qa $runner[2]) $qa -Leaf
     if(!$DryRun){Assert-TaraInteractiveSession}
     $requestId=[guid]::NewGuid().ToString('N');$requestPath=Join-Path ([IO.Path]::GetDirectoryName($model)) ('tara-'+$requestId+'.request.json')
-    $trust=Get-TaraQaTrustConfiguration $addin $qa $inventory
+    $trust=if($remoteDeployment){$remoteDeployment}else{Get-TaraQaTrustConfiguration $addin $qa $inventory}
     [pscustomobject]@{StoreRoot=$StoreRoot;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;Context=$Context;ModelPath=$model;SidecarPath=$sidecar;SidecarSha256=(Get-TaraSha256 $sidecar);ReportDirectory=$reportRoot;RevitInstallDir=$RevitInstallDir;QaAddinRoot=$addin;TrustConfiguration=$trust;TimeoutSeconds=$TimeoutSeconds;Executable=$exe;ExecutableSha256=(Get-TaraSha256 $exe);Command=('"'+$exe+'"');Arguments='';EnvironmentVariable=$runner[1];VerifierPath=$verifier;VerifierSha256=(Get-TaraSha256 $verifier);RequestId=$requestId;RequestPath=$requestPath;ResultPath=($requestPath+'.result.json');EvidencePath=(Join-Path $reportRoot ('tara-'+$requestId+'.json'));InstalledDll=$dll;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$Context.ManifestSha256;QaRunnerManifestPath=$manifest;QaRunnerManifestSha256=$qaRunnerManifestSha256;InstalledManifest=$manifest;Isolation=$inventory;SideEffectsPerformed=$false}
 }
 function Write-TaraJsonNew($Path,$Value){

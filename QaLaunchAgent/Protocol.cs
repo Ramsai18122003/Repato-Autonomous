@@ -27,6 +27,8 @@ public sealed record QaHealthRequest(int SchemaVersion, string Operation);
 public sealed record QaHealthResponse(int SchemaVersion, string Operation, bool Ready, string User, string Sid, int SessionId, bool Interactive, string? FailureCode);
 public sealed record QaStageRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
 public sealed record QaStageResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? StagingIdentity, string? QaAddinRoot, bool IsolationPassed, string? ReceiptPath, string? ErrorCode, string? ErrorMessage);
+public sealed record QaDeploymentValidationRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
+public sealed record QaDeploymentValidationResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? ValidationIdentity, string? QaAddinRoot, bool IsolationPassed, string? ErrorCode, string? ErrorMessage);
 
 public static class QaLaunchPolicy
 {
@@ -35,6 +37,7 @@ public static class QaLaunchPolicy
     public const string Operation = "launch-revit-qa";
     public const string HealthOperation = "health";
     public const string StageOperation = "stage-frozen-candidate-for-qa";
+    public const string ValidateDeploymentOperation = "validate-qa-deployment";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
     public const string ExpectedUserSid = "S-1-5-21-1031246752-3872016183-2454652381-1015";
     public const string ClientAccount = "RAMSAI\\rsgud";
