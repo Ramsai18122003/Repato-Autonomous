@@ -795,15 +795,24 @@ function Resolve-MayaQaRequestWorkflow {
 function Invoke-MayaQaRequest {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,
-        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[switch]$DryRun)
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[switch]$StageFrozenCandidateForQa,[scriptblock]$QaStagingInvoker,[switch]$DryRun)
     $qaId=Resolve-MayaQaRequestWorkflow $UserRequest
+    $def=Get-MayaQaWorkflowDefinition $qaId
+    $qaStaging=$null
     if($ArtifactMode -ceq 'FrozenCandidate'){
         foreach($required in @(@('CandidateDirectory',$CandidateDirectory),@('ExpectedCandidateSha256',$ExpectedCandidateSha256),@('ExpectedCandidateSourceCommit',$ExpectedCandidateSourceCommit))){if([string]::IsNullOrWhiteSpace([string]$required[1])){throw "FrozenCandidate mode requires $($required[0])."}}
         $null=Test-MayaQaFrozenCandidate -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -QaWorkflowId $qaId
+        if($StageFrozenCandidateForQa){
+            $nativeTestId=Get-MayaQaNativeTestId $def
+            if($QaStagingInvoker){$qaStaging=& $QaStagingInvoker $CandidateDirectory $ExpectedCandidateSha256 $ExpectedCandidateSourceCommit $qaId $nativeTestId ([bool]$DryRun)}else{
+                Import-Module (Join-Path $PSScriptRoot 'Repato.QaAddinDeployment.psm1') -Force -WarningAction SilentlyContinue
+                $qaStaging=Install-TaraFrozenCandidateForQa -CandidateDirectory $CandidateDirectory -ExpectedArtifactSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -QaWorkflowId $qaId -TestId $nativeTestId -DryRun:$DryRun
+            }
+            if(!$qaStaging -or !$qaStaging.Success -or [string]$qaStaging.CandidateSha256 -ine $ExpectedCandidateSha256 -or $qaStaging.BuildInvoked){throw 'Canonical QA-only frozen-candidate staging failed validation.'}
+        }
     }
     $taskId='task-'+[guid]::NewGuid().ToString('N');$workflowId='workflow-'+[guid]::NewGuid().ToString('N');$runId=[guid]::NewGuid().ToString('N')
-    $def=Get-MayaQaWorkflowDefinition $qaId
-    if($DryRun){return [pscustomobject]@{Success=$true;Mode='DryRun';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;FixtureId=$def.FixtureId;NativeTestId=(Get-MayaQaNativeTestId $def);Stages=@('intake','build-request','build-execute','handoff','tara-execute','report-verify','complete','receipt','dashboard');SideEffectsPerformed=$false;Error=$null}}
+    if($DryRun){return [pscustomobject]@{Success=$true;Mode='DryRun';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;FixtureId=$def.FixtureId;NativeTestId=(Get-MayaQaNativeTestId $def);QaStaging=$qaStaging;Stages=@('frozen-candidate-validation','qa-only-staging','isolation','intake','build-request','build-execute','handoff','tara-execute','report-verify','complete','receipt','dashboard');SideEffectsPerformed=$false;Error=$null}}
     if([string]::IsNullOrWhiteSpace($ProjectPath)){$ProjectPath='Forma.RevitConnector.csproj'}
     $null=Initialize-RepatoTaskStore $StoreRoot
     $existing=$null; try{$existing=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId}catch{}
@@ -835,14 +844,14 @@ function Invoke-MayaQaRequest {
             $approval=@((Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId).approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})[-1]
         } else {$approval=@($taskNow.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})[-1]}
         if($null -eq $approval -or [string]::IsNullOrWhiteSpace([string]$approval.requestId)){throw 'Persisted qa-run approval request is missing requestId.'}
-        return [pscustomobject]@{Success=$false;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;Stage='approval-required';NextOperation='Resolve-RepatoTaskApproval';QaApprovalId=$approval.requestId;QaApprovalStatus=$approval.status;SideEffectsPerformed=$true;Error=$null}
+        return [pscustomobject]@{Success=$false;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;Stage='approval-required';NextOperation='Resolve-RepatoTaskApproval';QaApprovalId=$approval.requestId;QaApprovalStatus=$approval.status;QaStaging=$qaStaging;SideEffectsPerformed=$true;Error=$null}
     }
     $canonical=New-MayaQaCanonicalPreparation -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId
     $handoff=$canonical.Handoff
     $handoffPath=Join-Path (Join-Path $StoreRoot 'handoffs') ($handoff.HandoffId+'.json'); New-Item -ItemType Directory -Path (Split-Path $handoffPath -Parent) -Force | Out-Null
     $approvedTask=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId;$approved=@($approvedTask.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})[-1]
     [ordered]@{StoreRoot=$StoreRoot;TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;HandoffId=$handoff.HandoffId;QaApprovalId=$approved.requestId;QaApprovalStatus=$approved.status;ModelPath=$handoff.ModelPath;SidecarPath=$handoff.SidecarPath;ArtifactPath=$handoff.ArtifactPath;ArtifactSha256=$handoff.ArtifactSha256;ManifestPath=$handoff.ManifestPath;ManifestSha256=$handoff.ManifestSha256} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $handoffPath -Encoding UTF8
-    [pscustomobject]@{Success=$true;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;AttemptId=$canonical.Attempt.AttemptId;HandoffPath=$handoffPath;Stage='handoff-ready';Intake=$intake;BuildRequest=$buildRequest;Build=$build;Run=$run;Handoff=$handoff;CanonicalPreparation=$canonical;SideEffectsPerformed=$true;Error=$null}
+    [pscustomobject]@{Success=$true;Mode='Real';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;AttemptId=$canonical.Attempt.AttemptId;HandoffPath=$handoffPath;Stage='handoff-ready';Intake=$intake;BuildRequest=$buildRequest;Build=$build;Run=$run;Handoff=$handoff;CanonicalPreparation=$canonical;QaStaging=$qaStaging;SideEffectsPerformed=$true;Error=$null}
 }
 
 function Invoke-MayaQaCanonicalTransaction {
@@ -854,6 +863,7 @@ function Invoke-MayaQaCanonicalTransaction {
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',
         [string]$CandidateDirectory,[string]$CandidateDllPath,[string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,
+        [switch]$StageFrozenCandidateForQa,
         [scriptblock]$RequestInvoker,
         [scriptblock]$ExecutionRecordInvoker,
         [scriptblock]$ClaimInvoker,
@@ -866,7 +876,7 @@ function Invoke-MayaQaCanonicalTransaction {
     if ($RequestInvoker) {
         $request = & $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath
     } else {
-        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit
+        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -StageFrozenCandidateForQa:$StageFrozenCandidateForQa
     }
     if (!$request -or $request.Stage -notin @('handoff-ready','execution-ready')) {
         throw 'Canonical transaction requires an approved Tara handoff.'
