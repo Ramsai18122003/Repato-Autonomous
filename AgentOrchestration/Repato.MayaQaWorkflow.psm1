@@ -808,7 +808,7 @@ function Invoke-MayaQaRequest {
                 Import-Module (Join-Path $PSScriptRoot 'Repato.QaAddinDeployment.psm1') -Force -WarningAction SilentlyContinue
                 $qaStaging=Install-TaraFrozenCandidateForQa -CandidateDirectory $CandidateDirectory -ExpectedArtifactSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -QaWorkflowId $qaId -TestId $nativeTestId -DryRun:$DryRun
             }
-            if(!$qaStaging -or !$qaStaging.Success -or [string]$qaStaging.CandidateSha256 -ine $ExpectedCandidateSha256 -or $qaStaging.BuildInvoked){throw 'Canonical QA-only frozen-candidate staging failed validation.'}
+            if(!$qaStaging -or !$qaStaging.Success -or [string]$qaStaging.CandidateSha256 -ine $ExpectedCandidateSha256 -or $qaStaging.BuildInvoked -or !$qaStaging.Isolation -or !$qaStaging.Isolation.Allowed -or @($qaStaging.Isolation.Errors).Count){throw 'Canonical QA-only frozen-candidate staging or isolation failed validation.'}
         }
     }
     $taskId='task-'+[guid]::NewGuid().ToString('N');$workflowId='workflow-'+[guid]::NewGuid().ToString('N');$runId=[guid]::NewGuid().ToString('N')

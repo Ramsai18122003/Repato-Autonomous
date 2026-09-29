@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $modulePath = Join-Path $PSScriptRoot 'Repato.TaraRevitQa.psm1'
 $mayaModulePath = Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1'
-$isolationPath = Join-Path (Join-Path $PSScriptRoot '..\QA') 'AddinIsolation.ps1'
+$deploymentModulePath = Join-Path $PSScriptRoot 'Repato.QaAddinDeployment.psm1'
 $passed = 0
 
 function Check([bool]$Condition, [string]$Name) {
@@ -11,7 +11,7 @@ function Check([bool]$Condition, [string]$Name) {
     $script:passed++
 }
 
-foreach ($path in @($modulePath, $mayaModulePath, $isolationPath)) {
+foreach ($path in @($modulePath, $mayaModulePath, $deploymentModulePath)) {
     Check (Test-Path -LiteralPath $path -PathType Leaf) ("required dependency exists: " + [IO.Path]::GetFileName($path))
     $tokens = $null
     $errors = $null
@@ -21,13 +21,13 @@ foreach ($path in @($modulePath, $mayaModulePath, $isolationPath)) {
 
 Import-Module $modulePath -Force -ErrorAction Stop
 Import-Module $mayaModulePath -Force -ErrorAction Stop -WarningAction SilentlyContinue
-. $isolationPath
+Import-Module $deploymentModulePath -Force -ErrorAction Stop
 
 Check ($null -ne (Get-Command New-TaraRevitQaPlan -ErrorAction SilentlyContinue)) 'New-TaraRevitQaPlan resolves'
 Check ($null -ne (Get-Command Invoke-TaraRevitQa -ErrorAction SilentlyContinue)) 'Invoke-TaraRevitQa resolves'
-$isolation = Get-Command Get-AddinIsolationInventory -ErrorAction Stop
-Check ($isolation.Parameters.ContainsKey('ApprovedUserManifestName')) 'selected-runner isolation contract resolves'
-Check ($null -ne (Get-Command Assert-ReportedAddinIsolation -ErrorAction SilentlyContinue)) 'isolation evidence validator resolves'
+$isolation = Get-Command Test-TaraFrozenCandidateQaIsolation -ErrorAction Stop
+Check ($isolation.Parameters.ContainsKey('QaWorkflowId')) 'supported post-stage isolation API resolves'
+Check ($null -eq (Get-Command Assert-ChildPath -ErrorAction SilentlyContinue)) 'isolation path helper remains module-private'
 
 [pscustomobject]@{
     Status = 'PASS'

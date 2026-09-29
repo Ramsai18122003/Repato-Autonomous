@@ -1,5 +1,94 @@
 $script:QaTargetRoot = 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA'
 $script:QaManifestRoot = Split-Path -Parent $script:QaTargetRoot
+$script:IsolationImplementation = Join-Path $PSScriptRoot '..\QA\AddinIsolation.ps1'
+
+# AddinIsolation.ps1 is a shared internal implementation. These helpers stay
+# module-private so its path containment and hashing cannot depend on caller or
+# global scope.
+function Assert-ChildPath([string]$Path,[string]$Parent) {
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetFullPath($Parent).TrimEnd('\') + '\'
+    if ($resolved -ine $root.TrimEnd('\') -and
+        !$resolved.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Path escaped approved root.'
+    }
+    $resolved
+}
+function Get-Sha256([string]$Path) {
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+if (!(Test-Path -LiteralPath $script:IsolationImplementation -PathType Leaf)) {
+    throw 'Required add-in isolation implementation is missing.'
+}
+. $script:IsolationImplementation
+
+function Get-TaraQaWorkflowContract {
+    param([Parameter(Mandatory)][string]$QaWorkflowId)
+    $contracts = @{
+        'create-plan-views-v1' = [pscustomobject]@{ TestId='create-plan-views-v1'; Manifest='Repato.CreatePlanViews.TestRunner.addin'; Class='Repato.Revit.TestRunner.CreatePlanViewsQaApplication' }
+        'create-levels-elevations-v1' = [pscustomobject]@{ TestId='create-levels'; Manifest='Repato.CreateLevels.TestRunner.addin'; Class='Repato.Revit.TestRunner.CreateLevelsQaApplication' }
+        'create-grids-world-axis-v1' = [pscustomobject]@{ TestId='create-grids-world-axis-v1'; Manifest='Repato.CreateGrids.TestRunner.addin'; Class='Repato.Revit.TestRunner.CreateGridsQaApplication' }
+        'grid-bubble-visibility-v1' = [pscustomobject]@{ TestId='grid-bubble-visibility-v1'; Manifest='Repato.GridBubbleVisibility.TestRunner.addin'; Class='Repato.Revit.TestRunner.GridBubbleVisibilityQaApplication' }
+        'grid-bubble-offset-v1' = [pscustomobject]@{ TestId='grid-bubble-offset-v1'; Manifest='Repato.GridBubbleOffset.TestRunner.addin'; Class='Repato.Revit.TestRunner.GridBubbleOffsetQaApplication' }
+        'grid-resequence-v1' = [pscustomobject]@{ TestId='grid-resequence-v1'; Manifest='Repato.GridResequence.TestRunner.addin'; Class='Repato.Revit.TestRunner.GridResequenceQaApplication' }
+    }
+    if (!$contracts.ContainsKey($QaWorkflowId)) { throw 'QA staging workflow is not supported by the trusted manifest map.' }
+    $contracts[$QaWorkflowId]
+}
+
+function Test-TaraFrozenCandidateQaIsolation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CandidateDirectory,
+        [Parameter(Mandatory)][string]$ExpectedArtifactSha256,
+        [Parameter(Mandatory)][string]$ExpectedSourceCommit,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$TestId,
+        [string]$TargetRoot = $script:QaTargetRoot,
+        [string]$ManifestRoot = $script:QaManifestRoot,
+        [string]$QaSourceRoot = (Join-Path $PSScriptRoot '..\QA'),
+        [string]$MachineRoot = 'C:\ProgramData\Autodesk\Revit\Addins\2025',
+        [switch]$TestLayout
+    )
+    $contract = Get-TaraQaWorkflowContract $QaWorkflowId
+    if ($TestId -cne $contract.TestId) { throw 'QA isolation TestId is incompatible with the selected workflow.' }
+    if ($ExpectedArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedSourceCommit -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Frozen candidate identity is malformed.' }
+    $candidate = [IO.Path]::GetFullPath($CandidateDirectory)
+    $qaSource = [IO.Path]::GetFullPath($QaSourceRoot)
+    $target = [IO.Path]::GetFullPath($TargetRoot)
+    $manifestBase = [IO.Path]::GetFullPath($ManifestRoot)
+    $machine = [IO.Path]::GetFullPath($MachineRoot)
+    if ($TestLayout) {
+        $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        foreach ($path in @($qaSource,$target,$manifestBase,$machine)) {
+            if (!$path.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)) { throw 'Synthetic QA isolation roots must be temporary.' }
+        }
+    } else {
+        if ($target -cne $script:QaTargetRoot -or $manifestBase -cne $script:QaManifestRoot) { throw 'Isolation target is not the dedicated RepatoQA Revit 2025 environment.' }
+        if ([Security.Principal.WindowsIdentity]::GetCurrent().Name.Split('\')[-1] -cne 'RepatoQA') { throw 'QA isolation requires the dedicated RepatoQA Windows profile.' }
+    }
+    $candidateDll = Assert-ChildPath (Join-Path $candidate 'Repato.Revit.dll') $candidate
+    $provenancePath = Assert-ChildPath (Join-Path $candidate 'release-manifest.json') $candidate
+    $installedDll = Assert-ChildPath (Join-Path $target 'Repato.Revit.dll') $target
+    $installedManifest = Assert-ChildPath (Join-Path $manifestBase $contract.Manifest) $manifestBase
+    $sourceManifest = Assert-ChildPath (Join-Path $qaSource $contract.Manifest) $qaSource
+    $stagingEvidence = Assert-ChildPath (Join-Path $target 'Repato.QaStaging.json') $target
+    foreach ($path in @($candidateDll,$provenancePath,$installedDll,$installedManifest,$sourceManifest,$stagingEvidence)) {
+        if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required QA isolation input is missing: $path" }
+    }
+    if ((Get-Sha256 $candidateDll) -ine $ExpectedArtifactSha256 -or (Get-Sha256 $installedDll) -ine $ExpectedArtifactSha256) { throw 'Installed QA DLL is not bound to the frozen candidate.' }
+    $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+    $evidence = Get-Content -LiteralPath $stagingEvidence -Raw | ConvertFrom-Json
+    if ([string]$provenance.SourceCommit -cne $ExpectedSourceCommit -or [string]$provenance.FrozenArtifactSha256 -ine $ExpectedArtifactSha256) { throw 'Frozen candidate provenance mismatch.' }
+    if ([string]$evidence.CandidateSourceCommit -cne $ExpectedSourceCommit -or [string]$evidence.CandidateSha256 -ine $ExpectedArtifactSha256 -or [string]$evidence.QaWorkflowId -cne $QaWorkflowId -or [string]$evidence.TestId -cne $TestId) { throw 'Installed QA staging evidence mismatch.' }
+    if ((Get-Sha256 $installedManifest) -ine (Get-Sha256 $sourceManifest)) { throw 'Installed QA manifest differs from the trusted workflow manifest.' }
+    $xml = [xml](Get-Content -LiteralPath $installedManifest -Raw)
+    $apps = @($xml.RevitAddIns.AddIn | Where-Object Type -eq 'Application')
+    if ($apps.Count -ne 1 -or [string]$apps[0].FullClassName -cne $contract.Class -or [string]$apps[0].Assembly -cne '.\RepatoQA\Repato.Revit.dll') { throw 'Installed QA workflow manifest contract is incompatible.' }
+    $inventory = Get-AddinIsolationInventory -PolicyPath (Join-Path $qaSource 'MachineWideAddins.allowlist.json') -MachineRoot $machine -UserRoot $manifestBase -QaSourceRoot $qaSource -ApprovedUserManifestName $contract.Manifest
+    if (!$inventory.Allowed -or @($inventory.Errors).Count) { throw ('Staged QA isolation validation failed: '+(@($inventory.Errors)-join '; ')) }
+    [pscustomobject]@{Success=$true;QaWorkflowId=$QaWorkflowId;TestId=$TestId;CandidateSha256=$ExpectedArtifactSha256;InstalledDllPath=$installedDll;InstalledDllSha256=(Get-Sha256 $installedDll);InstalledManifestPath=$installedManifest;InstalledManifestSha256=(Get-Sha256 $installedManifest);Isolation=$inventory;SideEffectsPerformed=$false}
+}
 
 function Get-QaAddinDeploymentTarget {
     [pscustomobject]@{ TargetId='repatoqa-user-addin'; TargetRoot=$script:QaTargetRoot; ManifestRoot=$script:QaManifestRoot; ManifestPath=(Join-Path $script:QaManifestRoot 'Repato.WelcomeSmoke.TestRunner.addin'); AssemblyPath=(Join-Path $script:QaTargetRoot 'Repato.Revit.dll'); Allowed=$true }
@@ -51,16 +140,7 @@ function Install-TaraFrozenCandidateForQa {
         [ValidateSet('None','AfterPayloadValidation','AfterDllCommit')][string]$FailureMode = 'None',
         [switch]$DryRun
     )
-    $contracts = @{
-        'create-plan-views-v1' = [pscustomobject]@{ TestId='create-plan-views-v1'; Manifest='Repato.CreatePlanViews.TestRunner.addin'; Class='Repato.Revit.TestRunner.CreatePlanViewsQaApplication' }
-        'create-levels-elevations-v1' = [pscustomobject]@{ TestId='create-levels'; Manifest='Repato.CreateLevels.TestRunner.addin'; Class='Repato.Revit.TestRunner.CreateLevelsQaApplication' }
-        'create-grids-world-axis-v1' = [pscustomobject]@{ TestId='create-grids-world-axis-v1'; Manifest='Repato.CreateGrids.TestRunner.addin'; Class='Repato.Revit.TestRunner.CreateGridsQaApplication' }
-        'grid-bubble-visibility-v1' = [pscustomobject]@{ TestId='grid-bubble-visibility-v1'; Manifest='Repato.GridBubbleVisibility.TestRunner.addin'; Class='Repato.Revit.TestRunner.GridBubbleVisibilityQaApplication' }
-        'grid-bubble-offset-v1' = [pscustomobject]@{ TestId='grid-bubble-offset-v1'; Manifest='Repato.GridBubbleOffset.TestRunner.addin'; Class='Repato.Revit.TestRunner.GridBubbleOffsetQaApplication' }
-        'grid-resequence-v1' = [pscustomobject]@{ TestId='grid-resequence-v1'; Manifest='Repato.GridResequence.TestRunner.addin'; Class='Repato.Revit.TestRunner.GridResequenceQaApplication' }
-    }
-    if(!$contracts.ContainsKey($QaWorkflowId)){throw 'QA staging workflow is not supported by the trusted manifest map.'}
-    $contract=$contracts[$QaWorkflowId]
+    $contract=Get-TaraQaWorkflowContract $QaWorkflowId
     if($TestId -cne $contract.TestId){throw 'QA staging TestId is incompatible with the selected workflow.'}
     if($ExpectedArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedSourceCommit -notmatch '^[A-Fa-f0-9]{40}$'){throw 'Frozen candidate identity is malformed.'}
     $candidate=[IO.Path]::GetFullPath($CandidateDirectory)
@@ -110,11 +190,8 @@ function Install-TaraFrozenCandidateForQa {
         if((Get-FileHash $dllDestination).Hash -ine $candidateHash -or (Get-FileHash $manifestDestination).Hash -ine $sourceManifestHash){throw 'Installed QA payload hash validation failed.'}
         $installedEvidence=Get-Content $evidenceDestination -Raw|ConvertFrom-Json
         if($installedEvidence.CandidateSourceCommit -cne $ExpectedSourceCommit -or $installedEvidence.CandidateSha256 -ine $candidateHash -or $installedEvidence.QaWorkflowId -cne $QaWorkflowId -or $installedEvidence.TestId -cne $TestId){throw 'Installed QA staging evidence validation failed.'}
-        function local:Assert-ChildPath([string]$Path,[string]$Parent){$p=[IO.Path]::GetFullPath($Path);$r=[IO.Path]::GetFullPath($Parent).TrimEnd('\')+'\';if($p -ine $r.TrimEnd('\') -and !$p.StartsWith($r,[StringComparison]::OrdinalIgnoreCase)){throw 'Path escaped approved root.'};$p}
-        function local:Get-Sha256([string]$Path){(Get-FileHash $Path -Algorithm SHA256).Hash}
-        . (Join-Path $PSScriptRoot '..\QA\AddinIsolation.ps1')
-        $isolation=Get-AddinIsolationInventory -PolicyPath (Join-Path $qaSource 'MachineWideAddins.allowlist.json') -MachineRoot $machine -UserRoot $manifestBase -QaSourceRoot $qaSource -ApprovedUserManifestName $contract.Manifest
-        if(!$isolation.Allowed -or @($isolation.Errors).Count){throw ('Staged QA isolation validation failed: '+(@($isolation.Errors)-join '; '))}
+        $validation=Test-TaraFrozenCandidateQaIsolation -CandidateDirectory $candidate -ExpectedArtifactSha256 $ExpectedArtifactSha256 -ExpectedSourceCommit $ExpectedSourceCommit -QaWorkflowId $QaWorkflowId -TestId $TestId -TargetRoot $target -ManifestRoot $manifestBase -QaSourceRoot $qaSource -MachineRoot $machine -TestLayout:$testMode
+        $isolation=$validation.Isolation
         [pscustomobject]@{Success=$true;Mode='Installed';QaWorkflowId=$QaWorkflowId;TestId=$TestId;TargetRoot=$target;InstalledDllPath=$dllDestination;InstalledDllSha256=(Get-FileHash $dllDestination).Hash;InstalledManifestPath=$manifestDestination;InstalledManifestSha256=(Get-FileHash $manifestDestination).Hash;StagingEvidencePath=$evidenceDestination;StagingEvidenceSha256=(Get-FileHash $evidenceDestination).Hash;CandidateSourceCommit=$ExpectedSourceCommit;CandidateSha256=$candidateHash;ProvenancePath=$provenancePath;Isolation=$isolation;BuildInvoked=$false;SideEffectsPerformed=$true}
     }catch{
         if($dllExisted -and (Test-Path (Join-Path $stageRoot 'previous.dll'))){Copy-Item (Join-Path $stageRoot 'previous.dll') $dllDestination -Force}elseif(!$dllExisted -and (Test-Path $dllDestination)){Remove-Item $dllDestination -Force}
@@ -124,4 +201,4 @@ function Install-TaraFrozenCandidateForQa {
         throw
     }finally{Remove-Item $stageRoot -Recurse -Force -ErrorAction SilentlyContinue}
 }
-Export-ModuleMember -Function Get-QaAddinDeploymentTarget,Test-QaAddinTarget,Invoke-QaAddinDeployment,Install-TaraFrozenCandidateForQa
+Export-ModuleMember -Function Get-QaAddinDeploymentTarget,Test-QaAddinTarget,Invoke-QaAddinDeployment,Install-TaraFrozenCandidateForQa,Test-TaraFrozenCandidateQaIsolation
