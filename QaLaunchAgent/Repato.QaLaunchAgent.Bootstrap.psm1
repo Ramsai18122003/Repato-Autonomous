@@ -25,6 +25,11 @@ function Assert-Identity([string]$Account,[string]$ExpectedSid) {
     if ($actual -cne $ExpectedSid) { throw "RepatoQA SID mismatch. Expected $ExpectedSid; resolved $actual." }
 }
 
+function Resolve-RepatoAccountSid([string]$Account) {
+    if([string]::IsNullOrWhiteSpace($Account)){return $null}
+    try { ([Security.Principal.NTAccount]$Account).Translate([Security.Principal.SecurityIdentifier]).Value } catch { $null }
+}
+
 function Read-ValidatedManifest([string]$SourceRoot,[string]$ManifestPath,[string]$ManifestSha256) {
     $source = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
     $manifestFull = [IO.Path]::GetFullPath($ManifestPath)
@@ -55,7 +60,15 @@ function Get-TaskSpecComparison($Actual) {
     foreach($name in $expected.PSObject.Properties.Name) {
         $e=[string]$expected.$name
         $a=if($null -eq $Actual){$null}else{[string]$Actual.$name}
-        [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$e;NormalizedActual=$a;Match=($a -cne $null -and $a -ceq $e)}
+        if($name -eq 'Principal') {
+            $expectedSid=$expected.Sid; $actualSid=if($Actual){$Actual.PrincipalResolvedSid}else{$null}
+            [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$expectedSid;NormalizedActual=$actualSid;Match=($actualSid -cne $null -and $actualSid -ceq $expectedSid);ExpectedPrincipalDisplay=$e;ActualPrincipalDisplay=$a;ExpectedPrincipalSid=$expectedSid;ActualPrincipalResolvedSid=$actualSid}
+        } elseif($name -eq 'TriggerUser') {
+            $expectedSid=$expected.Sid; $actualSid=if($Actual){$Actual.TriggerResolvedSid}else{$null}
+            [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$expectedSid;NormalizedActual=$actualSid;Match=($actualSid -cne $null -and $actualSid -ceq $expectedSid);ExpectedTriggerDisplay=$e;ActualTriggerDisplay=$a;ExpectedTriggerSid=$expectedSid;ActualTriggerResolvedSid=$actualSid}
+        } else {
+            [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$e;NormalizedActual=$a;Match=($a -cne $null -and $a -ceq $e)}
+        }
     }
 }
 
@@ -100,12 +113,13 @@ function New-RealBootstrapContext {
         GetTask = {
             $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue
             if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
-            [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;Principal=$t.Principal.UserId;Sid=$script:Contract.Sid;LogonType=[string]$t.Principal.LogonType;RunLevel=[string]$t.Principal.RunLevel;TriggerType=if($g.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'){'Logon'}else{$g.CimClass.CimClassName};TriggerUser=$g.UserId;Execute=$a.Execute;Arguments=[string]$a.Arguments;WorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval}
+            [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;Principal=$t.Principal.UserId;PrincipalResolvedSid=(Resolve-RepatoAccountSid $t.Principal.UserId);Sid=$script:Contract.Sid;LogonType=[string]$t.Principal.LogonType;RunLevel=[string]$t.Principal.RunLevel;TriggerType=if($g.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'){'Logon'}else{$g.CimClass.CimClassName};TriggerUser=$g.UserId;TriggerResolvedSid=(Resolve-RepatoAccountSid $g.UserId);Execute=$a.Execute;Arguments=[string]$a.Arguments;WorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval}
         }
         GetTaskSnapshot = {
             $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue
             if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
-            [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;State=$t.State;PrincipalUserId=$t.Principal.UserId;PrincipalLogonType=[string]$t.Principal.LogonType;PrincipalRunLevel=[string]$t.Principal.RunLevel;TriggerType=$g.CimClass.CimClassName;TriggerUserId=$g.UserId;ActionExecute=$a.Execute;ActionArguments=[string]$a.Arguments;ActionWorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval;ValidatorRepresentation=(& $Context.GetTask)}
+            $v=& $Context.GetTask
+            [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;State=$t.State;PrincipalUserId=$t.Principal.UserId;PrincipalLogonType=[string]$t.Principal.LogonType;PrincipalRunLevel=[string]$t.Principal.RunLevel;TriggerType=$g.CimClass.CimClassName;TriggerUserId=$g.UserId;ActionExecute=$a.Execute;ActionArguments=[string]$a.Arguments;ActionWorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval;ExpectedPrincipalDisplay=$script:Contract.Account;ActualPrincipalDisplay=$t.Principal.UserId;ExpectedPrincipalSid=$script:Contract.Sid;ActualPrincipalResolvedSid=$v.PrincipalResolvedSid;ExpectedTriggerDisplay=$script:Contract.Account;ActualTriggerDisplay=$g.UserId;ExpectedTriggerSid=$script:Contract.Sid;ActualTriggerResolvedSid=$v.TriggerResolvedSid;AccountDisplayCanonicalizationObserved=(($t.Principal.UserId -cne $script:Contract.Account -or $g.UserId -cne $script:Contract.Account) -and $v.PrincipalResolvedSid -ceq $script:Contract.Sid -and $v.TriggerResolvedSid -ceq $script:Contract.Sid);ValidatorRepresentation=$v}
         }
         ExportTask = { param($task) if($task){ Export-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName } }
         SetTask = { param($spec)
