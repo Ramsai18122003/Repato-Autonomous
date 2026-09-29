@@ -25,6 +25,8 @@ public sealed record QaLaunchResponseV2(
 
 public sealed record QaHealthRequest(int SchemaVersion, string Operation);
 public sealed record QaHealthResponse(int SchemaVersion, string Operation, bool Ready, string User, string Sid, int SessionId, bool Interactive, string? FailureCode);
+public sealed record QaStageRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
+public sealed record QaStageResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? StagingIdentity, string? QaAddinRoot, bool IsolationPassed, string? ReceiptPath, string? ErrorCode, string? ErrorMessage);
 
 public static class QaLaunchPolicy
 {
@@ -32,10 +34,15 @@ public static class QaLaunchPolicy
     public const int LaunchSchemaVersion = 2;
     public const string Operation = "launch-revit-qa";
     public const string HealthOperation = "health";
+    public const string StageOperation = "stage-frozen-candidate-for-qa";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
     public const string ExpectedUserSid = "S-1-5-21-1031246752-3872016183-2454652381-1015";
     public const string ClientAccount = "RAMSAI\\rsgud";
     public const string ClientSid = "S-1-5-21-1031246752-3872016183-2454652381-1001";
+    public const string FrozenCandidateCommit = "fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3";
+    public const string FrozenCandidateSha256 = "7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2";
+    public const string StagingAdapterPath = @"C:\Repato-Autonomous\Source\AgentOrchestration\Invoke-RepatoQaFrozenCandidateStaging.ps1";
+    public const string StagingCandidateDirectory = @"C:\Repato-Autonomous\Source\DeploymentCandidates\AgentBuilds\ReleaseCandidate-fcf624ee3ed1";
     public const string LogRoot = @"C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\Logs";
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
     public static readonly string[] AllowedQaWorkflows = ["create-plan-views-v1"];

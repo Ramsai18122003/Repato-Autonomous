@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace Repato.QaLaunchAgent;
 
-public interface IReplayLedger { bool TryReserve(QaLaunchRequest request, DateTimeOffset now); }
+public interface IReplayLedger { bool TryReserve(QaLaunchRequest request, DateTimeOffset now); bool TryReserve(string requestId, DateTimeOffset now); }
 
 public sealed class FileReplayLedger(string path) : IReplayLedger
 {
@@ -26,5 +26,10 @@ public sealed class FileReplayLedger(string path) : IReplayLedger
             File.Move(temp, path, true);
             return true;
         }
+    }
+    public bool TryReserve(string requestId, DateTimeOffset now)
+    {
+        var request = new QaLaunchRequest(2, QaLaunchPolicy.Operation, requestId, "stage", "stage", "create-plan-views-v1", "create-plan-views-v1", "stage", requestId, "stage", "stage.request.json", QaLaunchPolicy.RequestSha256Placeholder, "stage.model", QaLaunchPolicy.RequestSha256Placeholder, "stage.manifest", QaLaunchPolicy.RequestSha256Placeholder, now.AddMinutes(1));
+        return TryReserve(request, now);
     }
 }

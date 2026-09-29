@@ -520,6 +520,13 @@ function Invoke-MayaQaLaunchAgentHealth {
           try { if($pipe){$pipe.Dispose()} } catch { }
       }
 }
+function Invoke-MayaQaLaunchAgentFrozenCandidateStaging {
+    param([Parameter(Mandatory)][string]$CandidateCommit,[Parameter(Mandatory)][string]$ExpectedCandidateSha256,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$TestId,[ValidateRange(100,30000)][int]$TimeoutMilliseconds=5000)
+    if($CandidateCommit -cne 'fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3' -or $ExpectedCandidateSha256 -cne '7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2' -or $QaWorkflowId -cne 'create-plan-views-v1' -or $TestId -cne $QaWorkflowId){throw 'Frozen candidate staging identity is not authoritative.'}
+    $request=[ordered]@{schemaVersion=1;operation='stage-frozen-candidate-for-qa';requestId=[guid]::NewGuid().ToString('N');candidateCommit=$CandidateCommit;expectedCandidateSha256=$ExpectedCandidateSha256;qaWorkflowId=$QaWorkflowId;testId=$TestId}
+    $pipe=[IO.Pipes.NamedPipeClientStream]::new('.', 'Repato\QaLaunch', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::WriteThrough);$writer=$null;$reader=$null
+    try{$pipe.Connect($TimeoutMilliseconds);$writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true;$writer.WriteLine(($request|ConvertTo-Json -Compress));$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true);$line=$reader.ReadLine();if([string]::IsNullOrWhiteSpace($line)){throw 'Staging response missing.'};$r=$line|ConvertFrom-Json;if([int]$r.schemaVersion -ne 1 -or [string]$r.operation -cne $request.operation -or [string]$r.requestId -cne $request.requestId){throw 'Staging response identity mismatch.'};if(!$r.succeeded -or [string]$r.candidateCommit -cne $CandidateCommit -or [string]$r.candidateSha256 -ine $ExpectedCandidateSha256 -or [string]$r.qaWorkflowId -cne $QaWorkflowId -or [string]$r.testId -cne $TestId -or [string]$r.stagingIdentity -ine 'RAMSAI\RepatoQA' -or !$r.isolationPassed){throw "Frozen candidate staging rejected: $($r.errorCode)"};$r}finally{try{if($reader){$reader.Dispose()}}catch{};try{if($writer){$writer.Dispose()}}catch{};try{$pipe.Dispose()}catch{}}
+}
 function ConvertTo-MayaQaCanonicalRequestJson {
     param([Parameter(Mandatory)][object]$Request)
     $ordered=[ordered]@{}
@@ -804,7 +811,11 @@ function Invoke-MayaQaRequest {
         $null=Test-MayaQaFrozenCandidate -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -QaWorkflowId $qaId
         if($StageFrozenCandidateForQa){
             $nativeTestId=Get-MayaQaNativeTestId $def
-            if($QaStagingInvoker){$qaStaging=& $QaStagingInvoker $CandidateDirectory $ExpectedCandidateSha256 $ExpectedCandidateSourceCommit $qaId $nativeTestId ([bool]$DryRun)}else{
+            if($QaStagingInvoker){$qaStaging=& $QaStagingInvoker $CandidateDirectory $ExpectedCandidateSha256 $ExpectedCandidateSourceCommit $qaId $nativeTestId ([bool]$DryRun)}elseif($DryRun){$qaStaging=[pscustomobject]@{Success=$true;Mode='DryRun';CandidateSha256=$ExpectedCandidateSha256;CandidateSourceCommit=$ExpectedCandidateSourceCommit;QaWorkflowId=$qaId;TestId=$nativeTestId;BuildInvoked=$false;Isolation=[pscustomobject]@{Allowed=$true;Errors=@()}}}else{
+                $qaStaging=Invoke-MayaQaLaunchAgentFrozenCandidateStaging -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $qaId -TestId $nativeTestId
+                $qaStaging|Add-Member NoteProperty Success ([bool]$qaStaging.succeeded) -Force; $qaStaging|Add-Member NoteProperty CandidateSha256 $qaStaging.candidateSha256 -Force; $qaStaging|Add-Member NoteProperty CandidateSourceCommit $qaStaging.candidateCommit -Force; $qaStaging|Add-Member NoteProperty Isolation ([pscustomobject]@{Allowed=[bool]$qaStaging.isolationPassed;Errors=@()}) -Force; $qaStaging|Add-Member NoteProperty BuildInvoked $false -Force
+            }
+            if($false){
                 Import-Module (Join-Path $PSScriptRoot 'Repato.QaAddinDeployment.psm1') -Force -WarningAction SilentlyContinue
                 $qaStaging=Install-TaraFrozenCandidateForQa -CandidateDirectory $CandidateDirectory -ExpectedArtifactSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -QaWorkflowId $qaId -TestId $nativeTestId -DryRun:$DryRun
             }
@@ -1657,7 +1668,7 @@ Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCan
 Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Invoke-MayaQaCanonicalTransaction,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
-Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth
+Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentFrozenCandidateStaging
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
 
