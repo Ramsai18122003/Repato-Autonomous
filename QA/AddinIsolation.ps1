@@ -1,11 +1,12 @@
 # Shared preflight/verification functions. No actions occur when dot-sourced.
 # Path overrides exist only for synthetic checks; the Install/Run CLI fixes all roots.
 function Get-AddinIsolationInventory {
-    param([string]$PolicyPath, [string]$MachineRoot, [string]$UserRoot, [string]$QaSourceRoot)
+    param([string]$PolicyPath, [string]$MachineRoot, [string]$UserRoot, [string]$QaSourceRoot, [string]$ApprovedUserManifestName)
     $inventory = [ordered]@{
         PolicyPath = $PolicyPath; PolicySha256 = ''; DetectedAddins = @(); Errors = @(); Allowed = $false
     }
     $approved = @{}
+    $qaManifestHashes = @{ 'Repato.CreateGrids.TestRunner.addin' = 'D4A749B573240725B904938ED4260F15AF54314B2D5F8DF0F51B0CC6389AF63D' }
     try {
         $PolicyPath = Assert-ChildPath $PolicyPath $QaSourceRoot
         $inventory.PolicySha256 = Get-Sha256 $PolicyPath
@@ -45,9 +46,13 @@ function Get-AddinIsolationInventory {
                 elseif ($scope -eq 'UserProfile') {
                     # Only the two repository-owned QA bootstrap manifests are eligible.
                     # The machine-wide allowlist can never authorize a user-profile add-in.
-                    if ($file.Name -in @('Repato.CreateLevels.TestRunner.addin','Repato.TestRunner.addin','Repato.GridBubbleVisibility.TestRunner.addin','Repato.GridBubbleOffset.TestRunner.addin','Repato.GridResequence.TestRunner.addin','Repato.WelcomeSmoke.TestRunner.addin')) {
+                    $eligible = if ([string]::IsNullOrWhiteSpace($ApprovedUserManifestName)) {
+                        $file.Name -in @('Repato.CreateLevels.TestRunner.addin','Repato.CreateGrids.TestRunner.addin','Repato.TestRunner.addin','Repato.GridBubbleVisibility.TestRunner.addin','Repato.GridBubbleOffset.TestRunner.addin','Repato.GridResequence.TestRunner.addin','Repato.WelcomeSmoke.TestRunner.addin')
+                    } else { $file.Name -ceq $ApprovedUserManifestName }
+                    if ($eligible) {
                         $source = Assert-ChildPath (Join-Path $QaSourceRoot $file.Name) $QaSourceRoot
-                        $detected.Allowlisted = $detected.Sha256 -ieq (Get-Sha256 $source)
+                        $sourceHash = Get-Sha256 $source
+                        $detected.Allowlisted = $detected.Sha256 -ieq $sourceHash -and (!$qaManifestHashes.ContainsKey($file.Name) -or $detected.Sha256 -ieq $qaManifestHashes[$file.Name])
                         $detected.Reason = if ($detected.Allowlisted) { 'Repository-owned QA manifest verified against source' } else { 'QA manifest differs from repository source' }
                     }
                     else { $detected.Reason = 'User-profile add-in prohibited' }
@@ -68,8 +73,11 @@ function Get-AddinIsolationInventory {
 function Assert-ReportedAddinIsolation {
     param($RequestInventory, $ReportInventory)
     foreach ($inventory in @($RequestInventory, $ReportInventory)) {
-        if ($null -eq $inventory -or $inventory.Allowed -isnot [bool] -or !$inventory.Allowed -or
-            @($inventory.Errors).Count -ne 0 -or $null -eq $inventory.DetectedAddins) { throw 'Missing or failed add-in inventory.' }
+        if ($null -eq $inventory) { throw 'Missing add-in inventory object.' }
+        if ($inventory.Allowed -isnot [bool] -or !$inventory.Allowed -or @($inventory.Errors).Count -ne 0 -or $null -eq $inventory.DetectedAddins) {
+            $details = (@($inventory.Errors) -join '; ')
+            throw "Add-in inventory failed. Policy='$($inventory.PolicyPath)' Allowed='$($inventory.Allowed)' Errors='$details' DetectedCount=$(@($inventory.DetectedAddins).Count)."
+        }
         $seen = @{}
         foreach ($item in $inventory.DetectedAddins) {
             if ($item.Scope -notin @('MachineWide','UserProfile') -or $item.Allowlisted -isnot [bool] -or !$item.Allowlisted -or
