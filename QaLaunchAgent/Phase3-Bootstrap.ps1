@@ -1,13 +1,10 @@
-param([ValidateSet('Show','Install')][string]$Mode='Show')
+[CmdletBinding(SupportsShouldProcess)]
+param([ValidateSet('Show','Install','Verify','Uninstall')][string]$Mode='Show',[string]$SourceRoot=(Join-Path $PSScriptRoot 'bin\Release\net8.0-windows'),[string]$ManifestPath=(Join-Path $PSScriptRoot 'Repato.QaLaunchAgent.release.json'),[string]$ManifestSha256)
 $ErrorActionPreference='Stop'
-if($Mode -eq 'Install'){ throw 'Phase 3 installation is intentionally disabled during Phase 2.' }
-[pscustomobject]@{
-    AgentPath='C:\Program Files\Repato\QaLaunchAgent\Repato.QaLaunchAgent.exe'
-    PipeName='Repato\QaLaunch'
-    ExpectedUser='RAMSAI\RepatoQA'
-    RevitExe='E:\revit\Revit 2025\Revit.exe'
-    QaProfileRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025'
-    RuntimeRoot='C:\Repato-Autonomous\Source\QA\TestRuns'
-    Startup='RepatoQA logon only; fixed agent executable; no arbitrary arguments'
-    Credentials='none'
+Import-Module (Join-Path $PSScriptRoot 'Repato.QaLaunchAgent.Bootstrap.psm1') -Force
+switch($Mode){
+ 'Show' { Get-RepatoQaLaunchAgentBootstrapContract }
+ 'Install' { if(!$ManifestSha256){throw 'Install requires the independently reviewed -ManifestSha256.'}; Install-RepatoQaLaunchAgentBootstrap -SourceRoot $SourceRoot -ManifestPath $ManifestPath -ManifestSha256 $ManifestSha256 -WhatIf:$WhatIfPreference }
+ 'Verify' { if(!$ManifestSha256){throw 'Verify requires the independently reviewed -ManifestSha256.'}; Test-RepatoQaLaunchAgentBootstrap -ManifestPath $ManifestPath -ManifestSha256 $ManifestSha256 }
+ 'Uninstall' { Uninstall-RepatoQaLaunchAgentBootstrap -WhatIf:$WhatIfPreference }
 }
