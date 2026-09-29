@@ -93,7 +93,7 @@ function New-TaraRevitQaPlan {
     $artifactPairs=@(@($dll,$Context.ArtifactSha256),@($Context.ArtifactPath,$Context.ArtifactSha256),@($artifactManifest,$Context.ManifestSha256))
     foreach($pair in $artifactPairs){$null=if($pair[0] -eq $dll -and $remoteDeployment){$pair[0]}else{Assert-TaraPath $pair[0] -Leaf};if($pair[1] -notmatch '^[a-fA-F0-9]{64}$' -or (!$remoteDeployment -and (Get-TaraSha256 $pair[0]) -ine $pair[1])){throw 'Artifact or artifact-manifest hash mismatch.'}}
     $qaRunnerManifestSha256=Get-TaraSha256 $qaRunnerSourceManifest
-    if((Get-TaraSha256 $manifest) -ine $qaRunnerManifestSha256){throw 'QA runner manifest hash mismatch.'}
+    if($remoteDeployment){if(!$remoteDeployment.manifestIntegrityPassed){throw 'RepatoQA deployment manifest integrity validation failed.'}}elseif((Get-TaraSha256 $manifest) -ine $qaRunnerManifestSha256){throw 'QA runner manifest hash mismatch.'}
     $xml=[xml](Get-Content -LiteralPath $(if($remoteDeployment){$qaRunnerSourceManifest}else{$manifest}) -Raw)
     if(@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application').Count -ne 1){throw 'QA startup application manifest is required.'}
     $appEntries=@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application')
