@@ -1081,6 +1081,15 @@ function New-MayaQaHandoff {
     }
 
     $evidence = $workflow.qaBuildEvidence
+    if($evidence.PSObject.Properties.Name -contains 'EvidenceSource' -and $evidence.EvidenceSource -ceq 'FrozenCandidate'){
+        if([string]::IsNullOrWhiteSpace([string]$evidence.CandidateDirectory) -or [string]::IsNullOrWhiteSpace([string]$evidence.CandidateSourceCommit)){throw 'Frozen candidate handoff evidence is incomplete.'}
+        $provenancePath=Join-Path $evidence.CandidateDirectory 'release-manifest.json'
+        if(!(Test-Path -LiteralPath $provenancePath -PathType Leaf)){throw 'Frozen candidate handoff provenance is missing.'}
+        $provenance=Get-Content -LiteralPath $provenancePath -Raw|ConvertFrom-Json
+        $candidate=Test-MayaQaFrozenCandidate -CandidateDirectory $evidence.CandidateDirectory -ExpectedSha256 ([string]$provenance.FrozenArtifactSha256) -ExpectedSourceCommit $evidence.CandidateSourceCommit -QaWorkflowId $QaWorkflowId
+        if($candidate.SourceCommit -ine [string]$evidence.CandidateSourceCommit){throw 'Frozen candidate handoff provenance mismatch.'}
+        $evidence=[pscustomobject]@{ArtifactPath=$candidate.ArtifactPath;ArtifactSha256=$candidate.ArtifactSha256;ManifestPath=$candidate.ManifestPath;ManifestSha256=$candidate.ManifestSha256;CandidateDirectory=$candidate.CandidateDirectory;CandidateProvenancePath=$candidate.ProvenancePath;CandidateSourceCommit=$candidate.SourceCommit;EvidenceSource='FrozenCandidate'}
+    }
     $taskData=Read-RepatoTaskStore $StoreRoot; $task=Find-RepatoTask $taskData $TaskId
     $approvedApproval=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})[-1]
     if($null -eq $approvedApproval){throw 'Approved qa-run approval is required before Tara handoff.'}
