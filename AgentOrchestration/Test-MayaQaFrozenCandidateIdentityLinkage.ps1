@@ -12,6 +12,7 @@ try{
  Check ($r.TaskId -and $r.Stage -ceq 'approval-required') 'TaskId created'
  Check (![string]::IsNullOrWhiteSpace([string]$r.WorkflowId)) 'WorkflowId created'
  $null=Resolve-RepatoTaskApproval $store $r.TaskId approve Maya 'synthetic canonical linkage approval'
+ $d0=Read-RepatoTaskStore $store;$t0=Find-RepatoTask $d0 $r.TaskId;$w0=Get-DeployWorkflow $store $r.TaskId $r.WorkflowId;$runner='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA\Repato.CreatePlanViews.TestRunner.addin';$null=Invoke-RepatoWorkflowMutation $store $r.TaskId $r.WorkflowId $w0.workflowRevision $t0.revision {param($x)$x.qaBuildEvidence|Add-Member NoteProperty RunnerManifestPath $runner -Force;$x.qaBuildEvidence|Add-Member NoteProperty RunnerManifestSha256 ('B'*64) -Force;$x.qaBuildEvidence|Add-Member NoteProperty DeploymentValidation $true -Force;$x.qaBuildEvidence|Add-Member NoteProperty ManifestIntegrityValidation $true -Force;$x.qaBuildEvidence|Add-Member NoteProperty QaIsolation $true -Force;$x}
  $c=New-MayaQaCanonicalPreparation $store $r.TaskId $r.WorkflowId $r.QaWorkflowId
  $d=Read-RepatoTaskStore $store;$t=Find-RepatoTask $d $r.TaskId
  Check ($null-ne$t.mayaPlan) 'mayaPlan persisted'

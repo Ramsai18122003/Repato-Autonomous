@@ -531,7 +531,7 @@ function Invoke-MayaQaLaunchAgentDeploymentValidation {
     param([Parameter(Mandatory)][string]$CandidateCommit,[Parameter(Mandatory)][string]$ExpectedCandidateSha256,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$TestId,[ValidateRange(100,30000)][int]$TimeoutMilliseconds=5000)
     if($CandidateCommit -cne 'fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3' -or $ExpectedCandidateSha256 -cne '7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2' -or $QaWorkflowId -cne 'create-plan-views-v1' -or $TestId -cne $QaWorkflowId){throw 'Deployment validation identity is not authoritative.'}
     $request=[ordered]@{schemaVersion=1;operation='validate-qa-deployment';requestId=[guid]::NewGuid().ToString('N');candidateCommit=$CandidateCommit;expectedCandidateSha256=$ExpectedCandidateSha256;qaWorkflowId=$QaWorkflowId;testId=$TestId};$pipe=[IO.Pipes.NamedPipeClientStream]::new('.', 'Repato\QaLaunch', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::WriteThrough);$writer=$null;$reader=$null
-    try{$pipe.Connect($TimeoutMilliseconds);$writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true;$writer.WriteLine(($request|ConvertTo-Json -Compress));$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true);$r=$reader.ReadLine()|ConvertFrom-Json;if($r.schemaVersion -ne 1 -or $r.operation -cne $request.operation -or $r.requestId -cne $request.requestId){throw 'Deployment validation response identity mismatch.'};if(!$r.succeeded -or $r.validationIdentity -ine 'RAMSAI\RepatoQA' -or $r.qaWorkflowId -cne $QaWorkflowId -or $r.testId -cne $TestId -or $r.candidateSha256 -ine $ExpectedCandidateSha256 -or !$r.isolationPassed){throw "RepatoQA deployment validation rejected: $($r.errorCode)"};$r|Add-Member NoteProperty manifestIntegrityPassed ([bool]($r.succeeded -and $r.isolationPassed)) -Force;$r}finally{try{if($reader){$reader.Dispose()}}catch{};try{if($writer){$writer.Dispose()}}catch{};try{$pipe.Dispose()}catch{}}
+    try{$pipe.Connect($TimeoutMilliseconds);$writer=[IO.StreamWriter]::new($pipe,[Text.Encoding]::UTF8,1024,$true);$writer.AutoFlush=$true;$writer.WriteLine(($request|ConvertTo-Json -Compress));$reader=[IO.StreamReader]::new($pipe,[Text.Encoding]::UTF8,$false,1024,$true);$r=$reader.ReadLine()|ConvertFrom-Json;if($r.schemaVersion -ne 1 -or $r.operation -cne $request.operation -or $r.requestId -cne $request.requestId){throw 'Deployment validation response identity mismatch.'};if(!$r.succeeded -or $r.validationIdentity -ine 'RAMSAI\RepatoQA' -or $r.qaWorkflowId -cne $QaWorkflowId -or $r.testId -cne $TestId -or $r.candidateSha256 -ine $ExpectedCandidateSha256 -or !$r.isolationPassed -or !$r.manifestIntegrityPassed -or [string]::IsNullOrWhiteSpace([string]$r.runnerManifestPath) -or [string]$r.runnerManifestPath -notmatch '\\Repato\.CreatePlanViews\.TestRunner\.addin$' -or [string]$r.runnerManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$'){throw "RepatoQA deployment validation rejected: $($r.errorCode)"};$r}finally{try{if($reader){$reader.Dispose()}}catch{};try{if($writer){$writer.Dispose()}}catch{};try{$pipe.Dispose()}catch{}}
 }
 function ConvertTo-MayaQaCanonicalRequestJson {
     param([Parameter(Mandatory)][object]$Request)
@@ -843,8 +843,10 @@ function Invoke-MayaQaRequest {
     }
     $intake=Invoke-MayaQaIntake $taskId $workflowId $qaId $UserRequest
     $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath
+    $deploymentEvidence=$null
+    if($ArtifactMode -ceq 'FrozenCandidate' -and $StageFrozenCandidateForQa -and !$DryRun){$deploymentEvidence=Invoke-MayaQaLaunchAgentDeploymentValidation -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $qaId -TestId (Get-MayaQaNativeTestId $def)}
     if($ArtifactMode -ceq 'FrozenCandidate'){
-        $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit
+        $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -DeploymentEvidence $deploymentEvidence
     }else{
         $build=Invoke-MayaQaBuildExecute -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -SourceBranch $SourceBranch -ProjectPath $ProjectPath
     }
@@ -905,8 +907,8 @@ function Invoke-MayaQaCanonicalTransaction {
         QaWorkflowId = $request.QaWorkflowId; TestId = $handoff.NativeTestId
         HandoffId = $handoff.HandoffId; AttemptId = $handoff.AttemptId
         RunId = $request.RunId; ArtifactPath = $handoff.ArtifactPath
-        ArtifactSha256 = $handoff.ArtifactSha256; RunnerManifest = $handoff.ManifestPath
-        RunnerManifestSha256 = $handoff.ManifestSha256; FixturePath = $handoff.ModelPath
+        ArtifactSha256 = $handoff.ArtifactSha256; RunnerManifest = $(if($handoff.PSObject.Properties.Name -contains 'RunnerManifestPath'){$handoff.RunnerManifestPath}else{$handoff.ManifestPath})
+        RunnerManifestSha256 = $(if($handoff.PSObject.Properties.Name -contains 'RunnerManifestSha256'){$handoff.RunnerManifestSha256}else{$handoff.ManifestSha256}); FixturePath = $handoff.ModelPath
         FixtureSha256 = $handoff.ModelSha256; DisposableFixturePath = $handoff.ModelPath
         DisposableFixtureSha256 = $handoff.ModelSha256
         Isolation = $handoff.Isolation
@@ -1027,7 +1029,7 @@ function Invoke-MayaQaFrozenCandidateEvidence {
         [Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
         [Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,
         [Parameter(Mandatory)][string]$CandidateDirectory,[string]$CandidateDllPath,
-        [Parameter(Mandatory)][string]$ExpectedSha256,[Parameter(Mandatory)][string]$ExpectedSourceCommit,
+        [Parameter(Mandatory)][string]$ExpectedSha256,[Parameter(Mandatory)][string]$ExpectedSourceCommit,[object]$DeploymentEvidence,
         [switch]$DryRun
     )
     $verified=Test-MayaQaFrozenCandidate -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedSha256 -ExpectedSourceCommit $ExpectedSourceCommit -QaWorkflowId $QaWorkflowId
@@ -1038,7 +1040,7 @@ function Invoke-MayaQaFrozenCandidateEvidence {
     $now=(Get-Date).ToUniversalTime().ToString('O');$data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
     $mutation=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $workflow.workflowRevision $task.revision {
         param($current)
-        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId}
+        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId;RunnerManifestPath=$(if($DeploymentEvidence){$DeploymentEvidence.runnerManifestPath}else{$null});RunnerManifestSha256=$(if($DeploymentEvidence){$DeploymentEvidence.runnerManifestSha256}else{$null});DeploymentValidation=$(if($DeploymentEvidence){[bool]$DeploymentEvidence.succeeded}else{$false});ManifestIntegrityValidation=$(if($DeploymentEvidence){[bool]$DeploymentEvidence.manifestIntegrityPassed}else{$false});QaIsolation=$(if($DeploymentEvidence){[bool]$DeploymentEvidence.isolationPassed}else{$false})}
         $current|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force
         $current|Add-Member NoteProperty qaBuildEvidence $e -Force
         return $current
@@ -1088,7 +1090,10 @@ function New-MayaQaHandoff {
         $provenance=Get-Content -LiteralPath $provenancePath -Raw|ConvertFrom-Json
         $candidate=Test-MayaQaFrozenCandidate -CandidateDirectory $evidence.CandidateDirectory -ExpectedSha256 ([string]$provenance.FrozenArtifactSha256) -ExpectedSourceCommit $evidence.CandidateSourceCommit -QaWorkflowId $QaWorkflowId
         if($candidate.SourceCommit -ine [string]$evidence.CandidateSourceCommit){throw 'Frozen candidate handoff provenance mismatch.'}
-        $evidence=[pscustomobject]@{ArtifactPath=$candidate.ArtifactPath;ArtifactSha256=$candidate.ArtifactSha256;ManifestPath=$candidate.ManifestPath;ManifestSha256=$candidate.ManifestSha256;CandidateDirectory=$candidate.CandidateDirectory;CandidateProvenancePath=$candidate.ProvenancePath;CandidateSourceCommit=$candidate.SourceCommit;EvidenceSource='FrozenCandidate'}
+        if($evidence.PSObject.Properties.Name -contains 'DeploymentValidation'){
+            if([string]::IsNullOrWhiteSpace([string]$evidence.RunnerManifestPath) -or [string]$evidence.RunnerManifestPath -notmatch '\\Repato\.CreatePlanViews\.TestRunner\.addin$' -or [string]$evidence.RunnerManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or !$evidence.DeploymentValidation -or !$evidence.ManifestIntegrityValidation -or !$evidence.QaIsolation){throw 'Validated RepatoQA runner manifest evidence is missing or invalid.'}
+            $evidence=[pscustomobject]@{ArtifactPath=$candidate.ArtifactPath;ArtifactSha256=$candidate.ArtifactSha256;ManifestPath=$candidate.ManifestPath;ManifestSha256=$candidate.ManifestSha256;CandidateDirectory=$candidate.CandidateDirectory;CandidateProvenancePath=$candidate.ProvenancePath;CandidateSourceCommit=$candidate.SourceCommit;EvidenceSource='FrozenCandidate';RunnerManifestPath=$evidence.RunnerManifestPath;RunnerManifestSha256=$evidence.RunnerManifestSha256;DeploymentValidation=$evidence.DeploymentValidation;ManifestIntegrityValidation=$evidence.ManifestIntegrityValidation;QaIsolation=$evidence.QaIsolation}
+        }
     }
     $taskData=Read-RepatoTaskStore $StoreRoot; $task=Find-RepatoTask $taskData $TaskId
     $approvedApproval=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})[-1]
@@ -1120,6 +1125,8 @@ function New-MayaQaHandoff {
             ArtifactSha256 = $artifactHash
             ManifestPath = $evidence.ManifestPath
             ManifestSha256 = $manifestHash
+            RunnerManifestPath = $evidence.RunnerManifestPath
+            RunnerManifestSha256 = $evidence.RunnerManifestSha256
             QaWorkflowId = $QaWorkflowId
             FixtureId = $definition.FixtureId
             NativeTestId = Get-MayaQaNativeTestId $definition
@@ -1150,6 +1157,8 @@ function New-MayaQaHandoff {
         ArtifactSha256 = $artifactHash
         ManifestPath = $evidence.ManifestPath
         ManifestSha256 = $manifestHash
+        RunnerManifestPath = $evidence.RunnerManifestPath
+        RunnerManifestSha256 = $evidence.RunnerManifestSha256
         QaWorkflowId = $QaWorkflowId
         FixtureId = $definition.FixtureId
         NativeTestId = Get-MayaQaNativeTestId $definition
@@ -1187,7 +1196,7 @@ function New-MayaQaCanonicalPreparation {
     $runtimeRoot=[IO.Path]::GetDirectoryName([string]$workflow.qaModelPath)
     $attempt=[pscustomobject][ordered]@{SchemaVersion='maya-tara-execution-request-v1';AttemptId=$attemptId;TaskId=$TaskId;WorkflowId=$WorkflowId;RunId=$runId;RuntimeRoot=$runtimeRoot;RequestExpiresUtc=[DateTimeOffset]::UtcNow.AddMinutes((Get-MayaQaAttemptDurationMinutes)).ToString('O');Stage='prepared';Success=$false;RequestPath=$null}
     $plan=[pscustomobject][ordered]@{TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;Stage='qa-prepared';ActiveAgent='Maya';NextAgent='Tara';NextOperation='canonical-execution-record';SideEffectsPerformed=$false}
-    $packet=[pscustomobject][ordered]@{SchemaVersion='maya-tara-qa-packet-v3';HandoffId=$handoff.HandoffId;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;TestId=$handoff.NativeTestId;RunId=$runId;AttemptId=$attemptId;ArtifactPath=$handoff.ArtifactPath;ArtifactSha256=$handoff.ArtifactSha256;ManifestPath=$handoff.ManifestPath;ManifestSha256=$handoff.ManifestSha256;ModelPath=$workflow.qaModelPath;SidecarPath=$workflow.qaSidecarPath;FixturePath=$workflow.qaModelPath;FixtureSha256=$workflow.qaFixtureSha256;RequestExpiresUtc=$attempt.RequestExpiresUtc;Stage='prepared';SideEffectsPerformed=$false;StoreRoot=$StoreRoot}
+    $packet=[pscustomobject][ordered]@{SchemaVersion='maya-tara-qa-packet-v3';HandoffId=$handoff.HandoffId;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;TestId=$handoff.NativeTestId;RunId=$runId;AttemptId=$attemptId;ArtifactPath=$handoff.ArtifactPath;ArtifactSha256=$handoff.ArtifactSha256;ManifestPath=$handoff.ManifestPath;ManifestSha256=$handoff.ManifestSha256;RunnerManifestPath=$handoff.RunnerManifestPath;RunnerManifestSha256=$handoff.RunnerManifestSha256;ModelPath=$workflow.qaModelPath;SidecarPath=$workflow.qaSidecarPath;FixturePath=$workflow.qaModelPath;FixtureSha256=$workflow.qaFixtureSha256;RequestExpiresUtc=$attempt.RequestExpiresUtc;Stage='prepared';SideEffectsPerformed=$false;StoreRoot=$StoreRoot}
     if($DryRun){return [pscustomobject]@{TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;Handoff=$handoff;Attempt=$attempt;Plan=$plan;Packet=$packet;SideEffectsPerformed=$false}}
     $result=Invoke-RepatoStoreMutation $StoreRoot {
         param($data,$preview)
