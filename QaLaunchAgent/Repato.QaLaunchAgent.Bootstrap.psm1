@@ -50,10 +50,38 @@ function New-TaskSpec {
     [pscustomobject]@{ TaskPath=$script:Contract.TaskPath; TaskName=$script:Contract.TaskName; Principal=$script:Contract.Account; Sid=$script:Contract.Sid; LogonType='Interactive'; RunLevel='Limited'; TriggerType='Logon'; TriggerUser=$script:Contract.Account; Execute=$script:Contract.Executable; Arguments=''; WorkingDirectory=$script:Contract.InstallRoot; MultipleInstances='IgnoreNew'; RestartCount=3; RestartInterval='PT1M' }
 }
 
-function Test-TaskSpec($Actual) {
+function Get-TaskSpecComparison($Actual) {
     $expected=New-TaskSpec
-    foreach($name in $expected.PSObject.Properties.Name) { if ([string]$Actual.$name -cne [string]$expected.$name) { return $false } }
-    $true
+    foreach($name in $expected.PSObject.Properties.Name) {
+        $e=[string]$expected.$name
+        $a=if($null -eq $Actual){$null}else{[string]$Actual.$name}
+        [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$e;NormalizedActual=$a;Match=($a -cne $null -and $a -ceq $e)}
+    }
+}
+
+function Test-TaskSpec($Actual) {
+    -not @(Get-TaskSpecComparison $Actual | Where-Object { -not $_.Match }).Count
+}
+
+function Get-RepatoQaLaunchAgentDiagnosticRoot {
+    $root=Join-Path $PSScriptRoot '..\QA\Reports\RepatoQaLaunchAgentBootstrap'
+    [IO.Path]::GetFullPath($root)
+}
+
+function Write-RepatoQaLaunchAgentDiagnostics($Snapshot,$Comparison,$RuntimeIntegrity,$ErrorMessage) {
+    $root=Get-RepatoQaLaunchAgentDiagnosticRoot
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $path=Join-Path $root ('failure-'+(Get-Date -Format 'yyyyMMdd-HHmmssfff')+'-'+[guid]::NewGuid().ToString('N')+'.json')
+    [pscustomobject]@{SchemaVersion=1;CapturedAtUtc=[DateTime]::UtcNow.ToString('o');TaskSnapshot=$Snapshot;ContractComparison=@($Comparison);RuntimeIntegrity=$RuntimeIntegrity;Error=$ErrorMessage} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
+    $path
+}
+
+function Get-RepatoQaLaunchAgentRuntimeIntegrity([string]$TargetRoot,$Manifest) {
+    foreach($entry in $Manifest.files) {
+        $path=Join-Path $TargetRoot $entry.name
+        $actual=if(Test-Path -LiteralPath $path -PathType Leaf){(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}else{$null}
+        [pscustomobject]@{File=$entry.name;ExpectedSha256=$entry.sha256;ActualSha256=$actual;Match=($actual -cne $null -and $actual -ceq $entry.sha256)}
+    }
 }
 
 function New-RealBootstrapContext {
@@ -73,6 +101,11 @@ function New-RealBootstrapContext {
             $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue
             if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
             [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;Principal=$t.Principal.UserId;Sid=$script:Contract.Sid;LogonType=[string]$t.Principal.LogonType;RunLevel=[string]$t.Principal.RunLevel;TriggerType=if($g.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'){'Logon'}else{$g.CimClass.CimClassName};TriggerUser=$g.UserId;Execute=$a.Execute;Arguments=[string]$a.Arguments;WorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval}
+        }
+        GetTaskSnapshot = {
+            $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue
+            if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
+            [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;State=$t.State;PrincipalUserId=$t.Principal.UserId;PrincipalLogonType=[string]$t.Principal.LogonType;PrincipalRunLevel=[string]$t.Principal.RunLevel;TriggerType=$g.CimClass.CimClassName;TriggerUserId=$g.UserId;ActionExecute=$a.Execute;ActionArguments=[string]$a.Arguments;ActionWorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval;ValidatorRepresentation=(& $Context.GetTask)}
         }
         ExportTask = { param($task) if($task){ Export-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName } }
         SetTask = { param($spec)
@@ -104,7 +137,13 @@ function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$All
         if($hadTarget){Move-Item -LiteralPath $TargetRoot -Destination $backup}
         Move-Item -LiteralPath $stage -Destination $TargetRoot
         & $Context.SetTask (New-TaskSpec)
-        if(-not (Test-TaskSpec (& $Context.GetTask))){throw 'Registered scheduled task does not match the security contract.'}
+        $actual=& $Context.GetTask
+        $snapshot=& $Context.GetTaskSnapshot
+        $comparison=@(Get-TaskSpecComparison $actual)
+        if(-not (Test-TaskSpec $actual)) {
+            $report=Write-RepatoQaLaunchAgentDiagnostics $snapshot $comparison (Get-RepatoQaLaunchAgentRuntimeIntegrity $TargetRoot $Validated.Manifest) 'Registered scheduled task does not match the security contract.'
+            throw "Registered scheduled task does not match the security contract. Diagnostic report: $report"
+        }
         foreach($e in $Validated.Manifest.files){if((Get-FileHash -LiteralPath (Join-Path $TargetRoot $e.name) -Algorithm SHA256).Hash -cne $e.sha256){throw "Installed hash mismatch: $($e.name)"}}
         if(Test-Path -LiteralPath $backup){Remove-Item -LiteralPath $backup -Recurse -Force}
         [pscustomobject]@{Installed=$true;Updated=$hadTarget;Task=(New-TaskSpec);ProductVersion=$Validated.Manifest.productVersion;ManifestSha256=$Validated.ManifestSha256}
@@ -136,4 +175,4 @@ function Uninstall-RepatoQaLaunchAgentBootstrap {
     if($PSCmdlet.ShouldProcess($script:Contract.InstallRoot,'Remove launch-agent task and runtime')){$ctx=New-RealBootstrapContext;& $ctx.RemoveTask;if(Test-Path -LiteralPath $script:Contract.InstallRoot){Remove-Item -LiteralPath $script:Contract.InstallRoot -Recurse -Force}}
 }
 
-Export-ModuleMember -Function Get-RepatoQaLaunchAgentBootstrapContract,Install-RepatoQaLaunchAgentBootstrap,Test-RepatoQaLaunchAgentBootstrap,Uninstall-RepatoQaLaunchAgentBootstrap
+Export-ModuleMember -Function Get-RepatoQaLaunchAgentBootstrapContract,Install-RepatoQaLaunchAgentBootstrap,Test-RepatoQaLaunchAgentBootstrap,Uninstall-RepatoQaLaunchAgentBootstrap,Get-TaskSpecComparison,Get-RepatoQaLaunchAgentRuntimeIntegrity
