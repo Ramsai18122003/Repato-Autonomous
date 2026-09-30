@@ -25,6 +25,9 @@ public sealed record QaLaunchResponseV2(
 
 public sealed record QaHealthRequest(int SchemaVersion, string Operation);
 public sealed record QaHealthResponse(int SchemaVersion, string Operation, bool Ready, string User, string Sid, int SessionId, bool Interactive, string? FailureCode);
+public sealed record QaPreflightRequest(int SchemaVersion, string Operation);
+public sealed record QaPreflightCheck(string Name, bool Passed, string Status, string? Path, string? Detail);
+public sealed record QaPreflightResponse(int SchemaVersion, string Operation, bool Succeeded, string ExecutionIdentity, string QaAddinRoot, string RunnerManifestPath, string ExpectedRunnerManifestSha256, IReadOnlyList<QaPreflightCheck> Checks, string? FailureCode);
 public sealed record QaStageRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
 public sealed record QaStageResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? StagingIdentity, string? QaAddinRoot, bool IsolationPassed, string? ReceiptPath, string? ErrorCode, string? ErrorMessage);
 public sealed record QaDeploymentValidationRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
@@ -36,6 +39,7 @@ public static class QaLaunchPolicy
     public const int LaunchSchemaVersion = 2;
     public const string Operation = "launch-revit-qa";
     public const string HealthOperation = "health";
+    public const string PreflightOperation = "preflight-readonly";
     public const string StageOperation = "stage-frozen-candidate-for-qa";
     public const string ValidateDeploymentOperation = "validate-qa-deployment";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";

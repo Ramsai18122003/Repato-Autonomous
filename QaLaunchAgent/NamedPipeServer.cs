@@ -29,6 +29,11 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
                 var identity = WindowsIdentity.GetCurrent();
                 response = new QaHealthResponse(1, QaLaunchPolicy.HealthOperation, true, identity.Name, identity.User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, Environment.UserInteractive, null);
             }
+            else if (operation == QaLaunchPolicy.PreflightOperation)
+            {
+                var request = JsonSerializer.Deserialize<QaPreflightRequest>(line, QaLaunchPolicy.JsonOptions);
+                response = coordinator.HandlePreflight(request);
+            }
             else if (operation == QaLaunchPolicy.StageOperation)
             {
                 var request = JsonSerializer.Deserialize<QaStageRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();

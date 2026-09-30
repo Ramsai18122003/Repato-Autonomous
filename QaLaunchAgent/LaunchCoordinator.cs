@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Security.Principal;
 
 namespace Repato.QaLaunchAgent;
 
@@ -22,6 +23,50 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
         if (request is null || request.SchemaVersion != 1 || request.Operation != QaLaunchPolicy.ValidateDeploymentOperation || !Guid.TryParse(request.RequestId, out _) || request.CandidateCommit != QaLaunchPolicy.FrozenCandidateCommit || request.ExpectedCandidateSha256 != QaLaunchPolicy.FrozenCandidateSha256 || request.QaWorkflowId != "create-plan-views-v1" || request.TestId != request.QaWorkflowId) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request?.RequestId ?? "", false, request?.CandidateCommit, request?.ExpectedCandidateSha256, request?.QaWorkflowId, request?.TestId, null, null, false, "validation-request-invalid", null);
         if (!ledger.TryReserve(request.RequestId, now)) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "validation-request-replayed", null);
         try { return StagingAdapter.ValidateDeployment(request); } catch (Exception ex) { return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "deployment-validation-failed", ex.Message); }
+    }
+
+    public QaPreflightResponse HandlePreflight(QaPreflightRequest? request)
+    {
+        var user = WindowsIdentity.GetCurrent().Name;
+        var root = Path.Combine(options.QaProfileRoot, "RepatoQA");
+        var manifest = Path.Combine(Directory.GetParent(root)!.FullName, "Repato.CreatePlanViews.TestRunner.addin");
+        var dll = Path.Combine(root, "Repato.Revit.dll");
+        var checks = new List<QaPreflightCheck>();
+        checks.Add(CheckDirectory("qa-profile-root", root));
+        checks.Add(CheckFile("runner-manifest-exists", manifest, null, false));
+        checks.Add(CheckFile("runner-manifest-readable", manifest, null, false));
+        checks.Add(CheckFile("runner-manifest-integrity", manifest, "AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F", true));
+        checks.Add(CheckFile("deployed-candidate-dll-exists", dll, null, false));
+        checks.Add(CheckFile("deployed-candidate-dll-readable", dll, null, false));
+        checks.Add(CheckFile("deployed-candidate-dll-integrity", dll, QaLaunchPolicy.FrozenCandidateSha256, true));
+        checks.Add(CheckDirectory("qa-test-runs", options.RuntimeRoot));
+        checks.Add(CheckFile("revit-executable", options.RevitExe, null, false));
+        checks.Add(CheckFile("frozen-candidate", QaLaunchPolicy.StagingCandidateDirectory + "\\Repato.Revit.dll", QaLaunchPolicy.FrozenCandidateSha256, true));
+        checks.Add(CheckFile("authoritative-fixture", @"C:\Repato-Autonomous\Source\QA\Fixtures\CreatePlanViewsEmpty.rvt", "92CC9E434E2C4DD6720A2AA564E19F4E1A30EB3DA63CEA73CF737F875B9EDD45", true));
+        checks.Add(CheckFile("isolation-policy", @"C:\Repato-Autonomous\Source\QA\MachineWideAddins.allowlist.json", null, false));
+        checks.Add(CheckDirectory("qa-reports", @"C:\Repato-Autonomous\Source\QA\Reports"));
+        checks.Add(CheckDirectory("qa-screenshots", @"C:\Repato-Autonomous\Source\QA\Screenshots"));
+        var succeeded = request is not null && request.SchemaVersion == QaLaunchPolicy.SchemaVersion && request.Operation == QaLaunchPolicy.PreflightOperation && checks.All(c => c.Passed);
+        return new(1, QaLaunchPolicy.PreflightOperation, succeeded, user, root, manifest, "AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F", checks, succeeded ? null : "preflight-failed");
+    }
+    private static QaPreflightCheck CheckDirectory(string name, string path)
+    {
+        try { return new(name, Directory.Exists(path), Directory.Exists(path) ? "exists" : "missing", path, null); }
+        catch (Exception ex) { return new(name, false, "io-failure", path, ex.GetType().Name); }
+    }
+    private static QaPreflightCheck CheckFile(string name, string path, string? expectedHash, bool hash)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (!hash) return new(name, true, "readable", path, null);
+            var actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+            return new(name, actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase), actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase) ? "hash-match" : "hash-mismatch", path, $"actual={actual};expected={expectedHash}");
+        }
+        catch (UnauthorizedAccessException ex) { return new(name, false, "access-denied", path, ex.GetType().Name); }
+        catch (FileNotFoundException ex) { return new(name, false, "missing", path, ex.GetType().Name); }
+        catch (DirectoryNotFoundException ex) { return new(name, false, "directory-missing", path, ex.GetType().Name); }
+        catch (IOException ex) { return new(name, false, "io-error", path, ex.GetType().Name); }
     }
 
     public QaLaunchResponseV2 Handle(QaLaunchRequest request, DateTimeOffset now, string? rawJson = null)
