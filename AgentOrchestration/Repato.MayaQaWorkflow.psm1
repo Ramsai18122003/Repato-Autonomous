@@ -191,6 +191,42 @@ function Recover-MayaQaTerminalLaunchFailure {
     if($DryRun){return [pscustomobject]@{Mode='DryRun';OldAttemptId=$old.AttemptId;OldRunId=$old.RunId;NewAttemptId=$newAttempt;NewRunId=$newRun;RuntimeRoot=$runtime;SideEffectsPerformed=$false}}
     Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$now=$t.mayaTaraExecution;if($t.revision -ne $task.revision -or $now.AttemptId -cne $old.AttemptId -or $now.RunId -cne $old.RunId -or $now.Stage -cne 'launch-failed' -or $now.FailureCode -cne 'native-process-start-failed'){throw 'Terminal launch-failure retry compare-and-swap failed.'};if($t.PSObject.Properties.Name -notcontains 'mayaTaraExecutionHistory'){$t|Add-Member NoteProperty mayaTaraExecutionHistory ([object[]]@()) -Force};$archived=[pscustomobject]$now;$archived|Add-Member NoteProperty ArchivedUtc (Get-RepatoUtc) -Force;$archived|Add-Member NoteProperty ReplacementAttemptId $newAttempt -Force;$archived|Add-Member NoteProperty ReplacementRunId $newRun -Force;$t.mayaTaraExecutionHistory=[object[]]@($t.mayaTaraExecutionHistory)+$archived;if($t.PSObject.Properties.Name -notcontains 'mayaTaraAttemptHistory'){$t|Add-Member NoteProperty mayaTaraAttemptHistory ([object[]]@()) -Force};$t.mayaTaraAttemptHistory=[object[]]@($t.mayaTaraAttemptHistory)+$t.mayaTaraAttempt;$t.mayaTaraAttempt=$newAttemptRecord;$newExec.TaskRevisionAtPrepare=[long]$t.revision;$t.mayaTaraExecution=[pscustomobject]$newExec;Add-RepatoHistory $t 'maya-tara-terminal-launch-failure-recovered' 'Maya' "failedAttempt=$($old.AttemptId); failedRun=$($old.RunId); replacementAttempt=$newAttempt; replacementRun=$newRun";$t.mayaTaraExecution}
 }
+
+function Complete-MayaQaTerminalLaunchFailureCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$AttemptId,
+        [Parameter(Mandatory)][string]$ClaimId,
+        [scriptblock]$ProcessInspector,
+        [switch]$DryRun
+    )
+    $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+    if(!$task){throw 'Cleanup task was not found.'};$execution=$task.mayaTaraExecution;$attempt=$task.mayaTaraAttempt
+    if(!$execution -or !$attempt){throw 'Canonical terminal execution and attempt are required.'}
+    if($execution.TaskId -cne $TaskId -or $execution.AttemptId -cne $AttemptId -or $attempt.AttemptId -cne $AttemptId){throw 'Cleanup identity mismatch.'}
+    if($execution.Stage -ceq 'rollback-verified' -and $execution.RollbackStatus -ceq 'Verified' -and $execution.ClaimStatus -ceq 'released'){
+        if($execution.PSObject.Properties.Name -notcontains 'ReleasedClaimId' -or [string]$execution.ReleasedClaimId -cne $ClaimId){throw 'Cleanup idempotency claim identity mismatch.'}
+        return [pscustomobject]@{Mode='AlreadyCompleted';TaskId=$TaskId;AttemptId=$AttemptId;ClaimId=$ClaimId;RollbackStatus='Verified';ClaimStatus='released';RequestEvidencePreserved=$true;ReplacementAttemptCreated=$false;SideEffectsPerformed=$false}
+    }
+    if($execution.ClaimId -cne $ClaimId -or $execution.ClaimOwner -ne 'Tara' -or $execution.ClaimStatus -cne 'claimed'){throw 'Cleanup claim identity mismatch.'}
+    if($execution.Stage -cne 'launch-failed' -or $execution.ExecutionStatus -cne 'LaunchFailed' -or $execution.FailureCode -cne 'native-process-start-failed' -or $execution.RollbackStatus -cne 'Required'){throw 'Execution is not an eligible terminal launch failure.'}
+    foreach($n in 'NativeProcessId','LaunchedUtc','ExecutingUtc','ResultPath','ReportPath','ReceiptPath','EvidencePath'){if($execution.PSObject.Properties.Name -contains $n -and $execution.$n){throw "Cleanup found prohibited terminal evidence: $n"}}
+    if($execution.SideEffectsPerformed){throw 'Cleanup found recorded side effects.'}
+    $live=if($ProcessInspector){& $ProcessInspector $execution}else{if($execution.NativeProcessId){try{Get-Process -Id ([int]$execution.NativeProcessId) -ErrorAction Stop}catch{$null}}else{$null}}
+    if($live){throw 'Cleanup is fail-closed while an attempt process is live or ambiguous.'}
+    $fixture=[IO.Path]::GetFullPath([string]$execution.AuthoritativeFixturePath);if(!(Test-Path -LiteralPath $fixture -PathType Leaf) -or (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash -ine [string]$execution.AuthoritativeFixtureSha256){throw 'Authoritative fixture integrity failed.'}
+    $model=[string]$execution.DisposableModelPath;$runtime=[IO.Path]::GetFullPath([string]$execution.DisposableRuntimeRoot);if(!(Test-Path -LiteralPath $model -PathType Leaf) -or !(Test-Path -LiteralPath $runtime -PathType Container)){throw 'Disposable runtime is missing.'};if((Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash -ine [string]$execution.DisposableModelSha256 -or [string]$execution.DisposableModelSha256 -ine [string]$execution.AuthoritativeFixtureSha256){throw 'Disposable model identity/hash validation failed.'}
+    $request=[string]$execution.RequestPath;if([string]::IsNullOrWhiteSpace($request) -or !(Test-Path -LiteralPath $request -PathType Leaf)){throw 'Request evidence cannot be safely preserved.'};$requestFull=[IO.Path]::GetFullPath($request);$runtimeFull=[IO.Path]::GetFullPath($runtime);if(!$requestFull.StartsWith($runtimeFull.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Request evidence is outside the disposable runtime contract.'}
+    $archiveRoot=[IO.Path]::GetFullPath((Join-Path (Join-Path $StoreRoot 'archives') ('terminal-launch-failures\'+$TaskId+'\'+$AttemptId)));if(!$archiveRoot.StartsWith([IO.Path]::GetFullPath((Join-Path $StoreRoot 'archives')).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Cleanup archive escaped the approved store archive root.'}
+    if($DryRun){return [pscustomobject]@{Mode='DryRun';TaskId=$TaskId;AttemptId=$AttemptId;ClaimId=$ClaimId;ArchiveRoot=$archiveRoot;RequestEvidencePreserved=$true;ReplacementAttemptCreated=$false;SideEffectsPerformed=$false}}
+    if(Test-Path -LiteralPath $archiveRoot){throw 'Cleanup archive already exists; refusing duplicate destructive cleanup.'}
+    New-Item -ItemType Directory -Path (Split-Path $archiveRoot -Parent) -Force|Out-Null;Move-Item -LiteralPath $runtime -Destination $archiveRoot
+    $archivedRequest=Join-Path $archiveRoot (Split-Path $request -Leaf)
+    $null=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if([long]$t.revision -ne [long]$task.revision -or $x.AttemptId -cne $AttemptId -or $x.ClaimId -cne $ClaimId -or $x.Stage -cne 'launch-failed' -or $x.RollbackStatus -cne 'Required'){throw 'Cleanup compare-and-swap failed.'};$x|Add-Member NoteProperty OriginalDisposableRuntimeRoot $runtime -Force;$x|Add-Member NoteProperty ArchivedRuntimeRoot $archiveRoot -Force;$x|Add-Member NoteProperty ReleasedClaimId $ClaimId -Force;$x.RequestPath=$archivedRequest;$x.ClaimStatus='released';$x.ClaimOwner=$null;$x.ClaimId=$null;$x.Stage='rollback-verified';$x.ExecutionStatus='RollbackVerified';$x.RollbackStatus='Verified';$x.RollbackVerifiedUtc=Get-RepatoUtc;$x|Add-Member NoteProperty CleanupCompletedUtc (Get-RepatoUtc) -Force;$x.SideEffectsPerformed=$false;Add-RepatoHistory $t 'maya-tara-terminal-launch-failure-cleanup-completed' 'Maya' "attempt=$AttemptId; archivedRuntime=$archiveRoot";$x}
+    [pscustomobject]@{Mode='Completed';TaskId=$TaskId;AttemptId=$AttemptId;ClaimId=$ClaimId;RollbackStatus='Verified';ClaimStatus='released';ArchiveRoot=$archiveRoot;RequestEvidencePath=$archivedRequest;RequestEvidencePreserved=$true;ReplacementAttemptCreated=$false;ReplacementRuntimeCreated=$false;SideEffectsPerformed=$false}
+}
 function Accept-MayaQaPreparedManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$AttemptId,[Parameter(Mandatory)][string]$RunId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
     $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId;$execution=$task.mayaTaraExecution;$attempt=$task.mayaTaraAttempt
@@ -1712,6 +1748,7 @@ Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCan
 Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Invoke-MayaQaCanonicalTransaction,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
+Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
