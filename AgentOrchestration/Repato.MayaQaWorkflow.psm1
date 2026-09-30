@@ -1005,10 +1005,16 @@ function Invoke-MayaQaCanonicalTransaction {
     }
 
     $handoff = if ($request.PSObject.Properties.Name -contains 'Handoff') { $request.Handoff } else { $request }
+    $taskData=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $taskData $request.TaskId
+    if($task.PSObject.Properties.Name -notcontains 'mayaTaraAttempt' -or !$task.mayaTaraAttempt){throw 'Canonical persisted attempt is missing.'}
+    $authoritativeAttempt=$task.mayaTaraAttempt
+    foreach($n in 'TaskId','WorkflowId','QaWorkflowId','RunId'){if($authoritativeAttempt.PSObject.Properties.Name -notcontains $n){throw "Canonical persisted attempt is missing $n."};$actual=$authoritativeAttempt.$n;$expected=if($n -eq 'TaskId'){$request.TaskId}elseif($n -eq 'WorkflowId'){$request.WorkflowId}elseif($n -eq 'QaWorkflowId'){$request.QaWorkflowId}else{$request.RunId};if([string]$actual -cne [string]$expected){throw "Canonical persisted identity mismatch: $n"}}
+    if([string]::IsNullOrWhiteSpace([string]$authoritativeAttempt.AttemptId) -or [string]$authoritativeAttempt.RunId -cne [string]$request.RunId){throw 'Canonical persisted attempt identity is missing or stale.'}
+    if($handoff.PSObject.Properties.Name -contains 'AttemptId' -and ![string]::IsNullOrWhiteSpace([string]$handoff.AttemptId) -and [string]$handoff.AttemptId -cne [string]$authoritativeAttempt.AttemptId){throw 'Handoff AttemptId does not match the persisted canonical attempt.'}
     $preflight = [pscustomobject]@{
         TaskId = $request.TaskId; WorkflowId = $request.WorkflowId
         QaWorkflowId = $request.QaWorkflowId; TestId = $handoff.NativeTestId
-        HandoffId = $handoff.HandoffId; AttemptId = $handoff.AttemptId
+        HandoffId = $handoff.HandoffId; AttemptId = $authoritativeAttempt.AttemptId
         RunId = $request.RunId; ArtifactPath = $handoff.ArtifactPath
         ArtifactSha256 = $handoff.ArtifactSha256; RunnerManifest = $(if($handoff.PSObject.Properties.Name -contains 'RunnerManifestPath'){$handoff.RunnerManifestPath}else{$handoff.ManifestPath})
         RunnerManifestSha256 = $(if($handoff.PSObject.Properties.Name -contains 'RunnerManifestSha256'){$handoff.RunnerManifestSha256}else{$handoff.ManifestSha256}); FixturePath = $handoff.ModelPath

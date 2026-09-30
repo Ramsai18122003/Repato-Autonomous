@@ -1,10 +1,12 @@
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force
 
 $task='e2e-task';$workflow='e2e-workflow';$qa='create-plan-views-v1';$attempt='e2e-attempt';$run='e2e-run';$claimId='e2e-claim'
+$syntheticStore=Join-Path ([IO.Path]::GetTempPath()) ('maya-e2e-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $syntheticStore -Force|Out-Null;New-RepatoTask $syntheticStore $task 'Maya QA request' 'Create Plan Views' 'qa/maya-qa-workflow' 'maya'|Out-Null;Invoke-RepatoStoreMutation $syntheticStore {param($d,$p)$t=Find-RepatoTask $d $task;$t|Add-Member NoteProperty mayaTaraAttempt ([pscustomobject]@{TaskId=$task;WorkflowId=$workflow;QaWorkflowId=$qa;RunId=$run;AttemptId=$attempt;RequestExpiresUtc=([DateTimeOffset]::UtcNow.AddMinutes(30).ToString('O'))}) -Force;$t}|Out-Null
 function Invoke-Case {
     param([scriptblock]$Request,[scriptblock]$Execution,[scriptblock]$Claim,[scriptblock]$Native)
-    Invoke-MayaQaCanonicalTransaction -StoreRoot ([IO.Path]::GetTempPath()) -UserRequest 'synthetic' -RequestInvoker $Request -ExecutionRecordInvoker $Execution -ClaimInvoker $Claim -NativeCoreInvoker $Native
+    Invoke-MayaQaCanonicalTransaction -StoreRoot $syntheticStore -UserRequest 'synthetic' -RequestInvoker $Request -ExecutionRecordInvoker $Execution -ClaimInvoker $Claim -NativeCoreInvoker $Native
 }
 function New-Boundaries {
     param([System.Collections.Generic.List[string]]$Events,[scriptblock]$RequestFailure,[scriptblock]$ExecutionFailure,[scriptblock]$ClaimFailure,[scriptblock]$NativeFailure)
@@ -27,4 +29,4 @@ Assert-FailureCase {throw 'Neil evidence rejected'} $null $null $null 'request'
 Assert-FailureCase $null {throw 'Execution preparation failed'} $null $null 'request|execution'
 Assert-FailureCase $null $null {throw 'Claim failed'} $null 'request|execution|claim'
 Assert-FailureCase $null $null $null {throw 'Tara result failed'} 'request|execution|claim|native-core'
-'Canonical synthetic E2E passed: success + 4 failure-stop cases; assertions=14'
+'Canonical synthetic E2E passed: success + 4 failure-stop cases; assertions=14';Remove-Item $syntheticStore -Recurse -Force -ErrorAction SilentlyContinue

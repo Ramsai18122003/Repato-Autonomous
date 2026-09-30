@@ -1,11 +1,13 @@
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force
 
 $canonical = 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin'
 $obsolete = 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA\Repato.CreatePlanViews.TestRunner.addin'
 $manifestHash = 'AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F'
 $candidateHash = '7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2'
 $qa = 'create-plan-views-v1'; $events = [System.Collections.Generic.List[string]]::new()
+$syntheticStore=Join-Path ([IO.Path]::GetTempPath()) ('maya-manifest-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $syntheticStore -Force|Out-Null;New-RepatoTask $syntheticStore 'synthetic-task' 'Maya QA request' 'Create Plan Views' 'qa/maya-qa-workflow' 'maya'|Out-Null;Invoke-RepatoStoreMutation $syntheticStore {param($d,$p)$t=Find-RepatoTask $d 'synthetic-task';$t|Add-Member NoteProperty mayaTaraAttempt ([pscustomobject]@{TaskId='synthetic-task';WorkflowId='synthetic-workflow';QaWorkflowId=$qa;RunId='synthetic-run';AttemptId='synthetic-attempt';RequestExpiresUtc=([DateTimeOffset]::UtcNow.AddMinutes(30).ToString('O'))}) -Force;$t}|Out-Null
 $captured = $null
 
 function New-SyntheticBoundaries {
@@ -22,7 +24,7 @@ function New-SyntheticBoundaries {
 }
 
 $b = New-SyntheticBoundaries $canonical
-$result = Invoke-MayaQaCanonicalTransaction -StoreRoot ([IO.Path]::GetTempPath()) -UserRequest 'synthetic' -RequestInvoker $b.Request -ExecutionRecordInvoker $b.Execution -ClaimInvoker $b.Claim -NativeCoreInvoker $b.Native
+$result = Invoke-MayaQaCanonicalTransaction -StoreRoot $syntheticStore -UserRequest 'synthetic' -RequestInvoker $b.Request -ExecutionRecordInvoker $b.Execution -ClaimInvoker $b.Claim -NativeCoreInvoker $b.Native
 $payload = $result.Result.RequestPayload
 $captured = $global:RepatoSyntheticCaptured
 if($captured.RunnerManifest -cne $canonical -or $payload.manifestPath -cne $canonical){throw 'Canonical manifest path was not preserved end-to-end.'}
@@ -36,9 +38,9 @@ $obsoleteSendCalls = 0
 $bad = New-SyntheticBoundaries $obsolete
 $bad.Native = { param($s,$id,$claimId) $obsoleteSendCalls++; throw 'send boundary must not be reached for obsolete path' }
 $rejected = $false
-try { Invoke-MayaQaCanonicalTransaction -StoreRoot ([IO.Path]::GetTempPath()) -UserRequest 'synthetic' -RequestInvoker $bad.Request -ExecutionRecordInvoker $bad.Execution -ClaimInvoker $bad.Claim -NativeCoreInvoker $bad.Native | Out-Null } catch { $rejected=$true }
+try { Invoke-MayaQaCanonicalTransaction -StoreRoot $syntheticStore -UserRequest 'synthetic' -RequestInvoker $bad.Request -ExecutionRecordInvoker $bad.Execution -ClaimInvoker $bad.Claim -NativeCoreInvoker $bad.Native | Out-Null } catch { $rejected=$true }
 if(!$rejected -or $obsoleteSendCalls -ne 0){throw 'Obsolete path was not rejected before the send boundary.'}
 
 $module = Get-Content (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Raw
 if($module -match 'Join-Path \(\[string\]\$r\.qaAddinRoot\) ''Repato\.CreatePlanViews\.TestRunner\.addin'''){throw 'Fallback qaAddinRoot runner derivation remains in production.'}
-[pscustomobject]@{SyntheticEndToEnd='PASS';DeploymentValidatedManifestPath=$canonical;MayaProcessedManifestPath=$canonical;HandoffRunnerManifestPath=$canonical;CanonicalPacketRunnerManifestPath=$canonical;TransactionPreflightManifestPath=$captured.RunnerManifest;SerializedLaunchRequestManifestPath=$payload.manifestPath;DeploymentValidatedManifestSha256=$manifestHash;SerializedLaunchRequestManifestSha256=$payload.manifestSha256;SyntheticSendBoundaryCallCount=1;ObsoletePathInjectionRejected=$rejected;MismatchSyntheticSendCallCount=$obsoleteSendCalls;LivePipeRequestSent=$false;RevitLaunched=$false;RealTaskStoreUntouched=$true}
+[pscustomobject]@{SyntheticEndToEnd='PASS';DeploymentValidatedManifestPath=$canonical;MayaProcessedManifestPath=$canonical;HandoffRunnerManifestPath=$canonical;CanonicalPacketRunnerManifestPath=$canonical;TransactionPreflightManifestPath=$captured.RunnerManifest;SerializedLaunchRequestManifestPath=$payload.manifestPath;DeploymentValidatedManifestSha256=$manifestHash;SerializedLaunchRequestManifestSha256=$payload.manifestSha256;SyntheticSendBoundaryCallCount=1;ObsoletePathInjectionRejected=$rejected;MismatchSyntheticSendCallCount=$obsoleteSendCalls;LivePipeRequestSent=$false;RevitLaunched=$false;RealTaskStoreUntouched=$true};Remove-Item $syntheticStore -Recurse -Force -ErrorAction SilentlyContinue
