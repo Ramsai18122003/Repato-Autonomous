@@ -227,6 +227,46 @@ function Complete-MayaQaTerminalLaunchFailureCleanup {
     $null=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if([long]$t.revision -ne [long]$task.revision -or $x.AttemptId -cne $AttemptId -or $x.ClaimId -cne $ClaimId -or $x.Stage -cne 'launch-failed' -or $x.RollbackStatus -cne 'Required'){throw 'Cleanup compare-and-swap failed.'};$x|Add-Member NoteProperty OriginalDisposableRuntimeRoot $runtime -Force;$x|Add-Member NoteProperty ArchivedRuntimeRoot $archiveRoot -Force;$x|Add-Member NoteProperty ReleasedClaimId $ClaimId -Force;$x.RequestPath=$archivedRequest;$x.ClaimStatus='released';$x.ClaimOwner=$null;$x.ClaimId=$null;$x.Stage='rollback-verified';$x.ExecutionStatus='RollbackVerified';$x.RollbackStatus='Verified';$x.RollbackVerifiedUtc=Get-RepatoUtc;$x|Add-Member NoteProperty CleanupCompletedUtc (Get-RepatoUtc) -Force;$x.SideEffectsPerformed=$false;Add-RepatoHistory $t 'maya-tara-terminal-launch-failure-cleanup-completed' 'Maya' "attempt=$AttemptId; archivedRuntime=$archiveRoot";$x}
     [pscustomobject]@{Mode='Completed';TaskId=$TaskId;AttemptId=$AttemptId;ClaimId=$ClaimId;RollbackStatus='Verified';ClaimStatus='released';ArchiveRoot=$archiveRoot;RequestEvidencePath=$archivedRequest;RequestEvidencePreserved=$true;ReplacementAttemptCreated=$false;ReplacementRuntimeCreated=$false;SideEffectsPerformed=$false}
 }
+
+function Complete-MayaQaPreAttemptOrphanRuntimeCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$RunId,
+        [switch]$DryRun
+    )
+    $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+    $workflows=@($task.deploymentWorkflows|Where-Object{$_.taskId -ceq $TaskId -and $_.qaRunId -ceq $RunId})
+    if($workflows.Count -ne 1){throw 'Pre-attempt cleanup RunId did not resolve to exactly one persisted QA workflow.'}
+    $workflow=$workflows[0]
+    $attempt=if($task.PSObject.Properties.Name -contains 'mayaTaraAttempt'){$task.mayaTaraAttempt}else{$null}
+    $execution=if($task.PSObject.Properties.Name -contains 'mayaTaraExecution'){$task.mayaTaraExecution}else{$null}
+    if($attempt -and (! [string]::IsNullOrWhiteSpace([string]$attempt.AttemptId) -or ($attempt.PSObject.Properties.Name -contains 'ClaimId' -and ![string]::IsNullOrWhiteSpace([string]$attempt.ClaimId)))){throw 'Pre-attempt cleanup requires no canonical AttemptId or ClaimId.'}
+    if($execution){throw 'Pre-attempt cleanup requires no canonical Maya Tara execution.'}
+    if($task.PSObject.Properties.Name -contains 'mayaTaraQaPacket' -and $task.mayaTaraQaPacket){throw 'Pre-attempt cleanup requires no QA handoff.'}
+    foreach($item in @($task.executorRuns)){
+        if($item -and (($item.PSObject.Properties.Name -contains 'RunId' -and [string]$item.RunId -ceq $RunId) -or ($item.PSObject.Properties.Name -contains 'RequestPath' -and $item.RequestPath))){throw 'Pre-attempt cleanup found native execution evidence.'}
+    }
+    foreach($p in 'qaReportPath','qaReceiptPath','qaEvidencePath','qaResultPath'){
+        if($workflow.PSObject.Properties.Name -contains $p -and ![string]::IsNullOrWhiteSpace([string]$workflow.$p)){throw "Pre-attempt cleanup found native evidence: $p."}
+    }
+    $model=[IO.Path]::GetFullPath([string]$workflow.qaModelPath);$sidecar=[IO.Path]::GetFullPath([string]$workflow.qaSidecarPath)
+    $runtime=[IO.Path]::GetFullPath((Split-Path $model -Parent));$canonical=[IO.Path]::GetFullPath((Get-MayaQaRuntimeRoot));$prefix=$canonical.TrimEnd('\')+'\'
+    if(!$runtime.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or $runtime -ieq $canonical){throw 'Persisted disposable runtime is outside the canonical QA TestRuns root.'}
+    if([IO.Path]::GetDirectoryName($sidecar) -ine $runtime -or [IO.Path]::GetFileName($model) -cne 'model.rvt' -or [IO.Path]::GetFileName($sidecar) -cne 'model.rvt.fixture.json'){throw 'Persisted model or sidecar escapes the exact disposable runtime.'}
+    $fixture=[IO.Path]::GetFullPath((Join-Path (Get-MayaQaRoot) 'Fixtures'));$candidate=[IO.Path]::GetFullPath((Join-Path (Get-MayaQaRoot) '..\DeploymentCandidates'));$source=[IO.Path]::GetFullPath((Join-Path (Get-MayaQaRoot) '..'))
+    foreach($p in @($model,$sidecar,$runtime)){if($p -ieq $fixture -or $p.StartsWith($fixture.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or $p.StartsWith($candidate.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or $p -ieq $source){throw 'Pre-attempt cleanup target overlaps fixture, candidate, or source data.'}}
+    $auditName='PreAttemptRuntimeCleanupStatus';$existingStatus=if($task.PSObject.Properties.Name -contains $auditName){[string]$task.$auditName}else{$null}
+    if($existingStatus -ceq 'Completed' -and !(Test-Path -LiteralPath $runtime)){return [pscustomobject]@{Mode='AlreadyCleaned';TaskId=$TaskId;RunId=$RunId;RuntimePath=$runtime;SideEffectsPerformed=$false}}
+    if($DryRun){return [pscustomobject]@{Mode='DryRun';TaskId=$TaskId;RunId=$RunId;RuntimePath=$runtime;RuntimeExists=(Test-Path -LiteralPath $runtime -PathType Container);SideEffectsPerformed=$false}}
+    $revision=[long]$task.revision
+    $pending=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;if([long]$t.revision -ne $revision){throw 'Pre-attempt cleanup compare-and-swap failed.'};if($t.PSObject.Properties.Name -contains 'PreAttemptRuntimeCleanupStatus' -and $t.PreAttemptRuntimeCleanupStatus -ceq 'Completed'){return $t};$t|Add-Member NoteProperty PreAttemptRuntimeCleanupStatus 'Pending' -Force;$t|Add-Member NoteProperty PreAttemptRuntimeCleanupUtc (Get-RepatoUtc) -Force;$t|Add-Member NoteProperty CleanedRunId $RunId -Force;$t|Add-Member NoteProperty CleanedRuntimePath $runtime -Force;Add-RepatoHistory $t 'maya-qa-pre-attempt-runtime-cleanup-started' 'Maya' "run=$RunId; runtime=$runtime";$t}
+    if(Test-Path -LiteralPath $runtime){Remove-Item -LiteralPath $runtime -Recurse -Force}
+    if(Test-Path -LiteralPath $runtime){throw 'Pre-attempt disposable runtime could not be removed.'}
+    Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;if([string]$t.PreAttemptRuntimeCleanupStatus -cne 'Pending' -or [string]$t.CleanedRunId -cne $RunId -or [string]$t.CleanedRuntimePath -ine $runtime){throw 'Pre-attempt cleanup completion compare-and-swap failed.'};$t.PreAttemptRuntimeCleanupStatus='Completed';$t.PreAttemptRuntimeCleanupUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-qa-pre-attempt-runtime-cleanup-completed' 'Maya' "run=$RunId; runtime=$runtime";$t}|Out-Null
+    [pscustomobject]@{Mode='Completed';TaskId=$TaskId;RunId=$RunId;RuntimePath=$runtime;RuntimeRemoved=$true;SideEffectsPerformed=$false}
+}
 function Accept-MayaQaPreparedManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$AttemptId,[Parameter(Mandatory)][string]$RunId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
     $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId;$execution=$task.mayaTaraExecution;$attempt=$task.mayaTaraAttempt
@@ -1787,6 +1827,7 @@ Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWork
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
 Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
+Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
