@@ -860,7 +860,7 @@ function Resolve-MayaQaRequestWorkflow {
 function Invoke-MayaQaRequest {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,
-        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[switch]$StageFrozenCandidateForQa,[scriptblock]$QaStagingInvoker,[switch]$DryRun)
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[switch]$StageFrozenCandidateForQa,[switch]$ValidateExistingDeployment,[scriptblock]$QaStagingInvoker,[scriptblock]$DeploymentValidationInvoker,[switch]$DryRun)
     $qaId=Resolve-MayaQaRequestWorkflow $UserRequest
     $def=Get-MayaQaWorkflowDefinition $qaId
     $qaStaging=$null
@@ -896,7 +896,7 @@ function Invoke-MayaQaRequest {
     $intake=Invoke-MayaQaIntake $taskId $workflowId $qaId $UserRequest
     $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath
     $deploymentEvidence=$null
-    if($ArtifactMode -ceq 'FrozenCandidate' -and $StageFrozenCandidateForQa -and !$DryRun){$deploymentEvidence=Invoke-MayaQaLaunchAgentDeploymentValidation -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $qaId -TestId (Get-MayaQaNativeTestId $def)}
+    if($ArtifactMode -ceq 'FrozenCandidate' -and ($StageFrozenCandidateForQa -or $ValidateExistingDeployment) -and !$DryRun){$deploymentEvidence=if($DeploymentValidationInvoker){& $DeploymentValidationInvoker $ExpectedCandidateSourceCommit $ExpectedCandidateSha256 $qaId (Get-MayaQaNativeTestId $def)}else{Invoke-MayaQaLaunchAgentDeploymentValidation -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $qaId -TestId (Get-MayaQaNativeTestId $def)}}
     if($ArtifactMode -ceq 'FrozenCandidate'){
         $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -DeploymentEvidence $deploymentEvidence
     }else{
@@ -1004,13 +1004,14 @@ function Invoke-MayaQaSingleCanonicalAttempt {
         [string]$CandidateDirectory,[string]$CandidateDllPath,
         [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,
         [switch]$StageFrozenCandidateForQa,
+        [scriptblock]$DeploymentValidationInvoker,
         [scriptblock]$RequestInvoker,[scriptblock]$ApprovalInvoker,
         [scriptblock]$PreparationInvoker,[scriptblock]$TransactionInvoker,
         [switch]$DryRun
     )
     if($ApprovalDecision -eq 'approve' -and [string]::IsNullOrWhiteSpace($ApprovalReason)){throw 'Approval reason is required.'}
     $request = if($RequestInvoker){& $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath}else{
-        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -DryRun:$DryRun
+        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -ValidateExistingDeployment:($ArtifactMode -ceq 'FrozenCandidate') -DeploymentValidationInvoker $DeploymentValidationInvoker -DryRun:$DryRun
     }
     if(!$request){throw 'Canonical request returned no result.'}
     if($request.Stage -eq 'handoff-ready' -or $request.Stage -eq 'execution-ready'){throw 'Single-attempt wrapper received an already-prepared request; refusing to risk reuse.'}
@@ -1128,10 +1129,10 @@ function Invoke-MayaQaFrozenCandidateEvidence {
     $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
     if($workflow.PSObject.Properties.Name -notcontains 'qaBuildRequest' -or !$workflow.qaBuildRequest){throw 'Persisted Neil build request is missing.'}
     if($workflow.qaWorkflowId -cne $QaWorkflowId){throw 'QA workflow identity mismatch.'}
-    $now=(Get-Date).ToUniversalTime().ToString('O');$data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+    $now=(Get-Date).ToUniversalTime().ToString('O');$deploymentRunnerManifestPath=if($DeploymentEvidence){$DeploymentEvidence.runnerManifestPath}else{$null};$deploymentRunnerManifestSha256=if($DeploymentEvidence){$DeploymentEvidence.runnerManifestSha256}else{$null};$deploymentValidation=if($DeploymentEvidence){[bool]$DeploymentEvidence.succeeded}else{$false};$deploymentManifestIntegrity=if($DeploymentEvidence){if($DeploymentEvidence.manifestIntegrityEvidenceAvailable){[bool]$DeploymentEvidence.manifestIntegrityPassed}else{'Unavailable'}}else{$false};$deploymentQaIsolation=if($DeploymentEvidence){[bool]$DeploymentEvidence.isolationPassed}else{$false};$data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
     $mutation=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $workflow.workflowRevision $task.revision {
         param($current)
-        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId;RunnerManifestPath=$(if($DeploymentEvidence){$DeploymentEvidence.runnerManifestPath}else{$null});RunnerManifestSha256=$(if($DeploymentEvidence){$DeploymentEvidence.runnerManifestSha256}else{$null});DeploymentValidation=$(if($DeploymentEvidence){[bool]$DeploymentEvidence.succeeded}else{$false});ManifestIntegrityValidation=$(if($DeploymentEvidence){if($DeploymentEvidence.manifestIntegrityEvidenceAvailable){[bool]$DeploymentEvidence.manifestIntegrityPassed}else{'Unavailable'}}else{$false});QaIsolation=$(if($DeploymentEvidence){[bool]$DeploymentEvidence.isolationPassed}else{$false})}
+        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId;RunnerManifestPath=$deploymentRunnerManifestPath;RunnerManifestSha256=$deploymentRunnerManifestSha256;DeploymentValidation=$deploymentValidation;ManifestIntegrityValidation=$deploymentManifestIntegrity;QaIsolation=$deploymentQaIsolation}
         $current|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force
         $current|Add-Member NoteProperty qaBuildEvidence $e -Force
         return $current
