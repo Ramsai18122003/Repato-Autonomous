@@ -990,6 +990,43 @@ function Invoke-MayaQaCanonicalTransaction {
     }
     [pscustomobject]@{TaskId=$request.TaskId;WorkflowId=$request.WorkflowId;QaWorkflowId=$request.QaWorkflowId;Execution=$execution;Claim=$claimed;Result=$result}
 }
+
+function Invoke-MayaQaSingleCanonicalAttempt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$UserRequest,
+        [ValidateSet('approve','reject')][string]$ApprovalDecision = 'reject',
+        [string]$ApprovalReason = 'Explicit single-attempt QA authorization',
+        [string]$SourceBranch = 'current',
+        [string]$ProjectPath = 'Forma.RevitConnector.csproj',
+        [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode = 'Build',
+        [string]$CandidateDirectory,[string]$CandidateDllPath,
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,
+        [switch]$StageFrozenCandidateForQa,
+        [scriptblock]$RequestInvoker,[scriptblock]$ApprovalInvoker,
+        [scriptblock]$PreparationInvoker,[scriptblock]$TransactionInvoker,
+        [switch]$DryRun
+    )
+    if($ApprovalDecision -eq 'approve' -and [string]::IsNullOrWhiteSpace($ApprovalReason)){throw 'Approval reason is required.'}
+    $request = if($RequestInvoker){& $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath}else{
+        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -DryRun:$DryRun
+    }
+    if(!$request){throw 'Canonical request returned no result.'}
+    if($request.Stage -eq 'handoff-ready' -or $request.Stage -eq 'execution-ready'){throw 'Single-attempt wrapper received an already-prepared request; refusing to risk reuse.'}
+    if($request.Stage -ne 'approval-required'){throw "Expected approval-required state, received '$($request.Stage)' without creating a continuation."}
+    if($ApprovalDecision -ne 'approve'){return [pscustomobject]@{Success=$false;Stage='approval-required';TaskId=$request.TaskId;WorkflowId=$request.WorkflowId;RunId=$request.RunId;QaWorkflowId=$request.QaWorkflowId;QaApprovalId=$request.QaApprovalId;AttemptId=$null;NativeRequestCount=0;ReplacementAttemptCreated=$false;Error=$null}}
+    $approval = if($ApprovalInvoker){& $ApprovalInvoker $StoreRoot $request.TaskId 'approve' 'user' $ApprovalReason}else{Resolve-RepatoTaskApproval $StoreRoot $request.TaskId 'approve' 'user' $ApprovalReason}
+    if(!$approval){throw 'Approval resolution returned no result.'}
+    $canonical = if($PreparationInvoker){& $PreparationInvoker $StoreRoot $request.TaskId $request.WorkflowId $request.QaWorkflowId}else{New-MayaQaCanonicalPreparation -StoreRoot $StoreRoot -TaskId $request.TaskId -WorkflowId $request.WorkflowId -QaWorkflowId $request.QaWorkflowId}
+    if(!$canonical -or !$canonical.Attempt){throw 'Canonical preparation returned no attempt.'}
+    $preparedRequest=[pscustomobject]@{Stage='handoff-ready';TaskId=$request.TaskId;WorkflowId=$request.WorkflowId;QaWorkflowId=$request.QaWorkflowId;RunId=$request.RunId;Handoff=$canonical.Handoff}
+    $tx = if($TransactionInvoker){& $TransactionInvoker $preparedRequest $StoreRoot}else{
+        Invoke-MayaQaCanonicalTransaction -StoreRoot $StoreRoot -UserRequest $UserRequest -RequestInvoker { param($s,$u,$b,$p) $preparedRequest }
+    }
+    if(!$tx){throw 'Canonical transaction returned no result.'}
+    [pscustomobject]@{Success=$true;Stage='native-started';TaskId=$request.TaskId;WorkflowId=$request.WorkflowId;QaWorkflowId=$request.QaWorkflowId;RunId=$request.RunId;AttemptId=$canonical.Attempt.AttemptId;ClaimId=$tx.Claim.ClaimId;Approval=$approval;Preparation=$canonical;Transaction=$tx;NativeRequestCount=1;ReplacementAttemptCreated=$false;Error=$null}
+}
 function Invoke-MayaQaBuildExecute {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[string]$SourceBranch='current',[string]$ProjectPath='Forma.RevitConnector.csproj',[switch]$DryRun)
     $QaWorkflowId = Resolve-MayaQaWorkflowId $QaWorkflowId
@@ -1745,7 +1782,7 @@ function Invoke-MayaQaOverview { param([Parameter(Mandatory)][ValidateSet('qa-ca
 }
 Export-ModuleMember -Function Prepare-MayaQaCanonicalLaunchPhase,Start-MayaQaCanonicalProcessPhase,Accept-MayaQaCanonicalEvidencePhase,Verify-MayaQaCanonicalRollbackPhase,Verify-MayaQaCanonicalExecutionPhase
 Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCanonicalExecutionPhase
-Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Invoke-MayaQaCanonicalTransaction,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
+Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Invoke-MayaQaCanonicalTransaction,Invoke-MayaQaSingleCanonicalAttempt,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
 Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
