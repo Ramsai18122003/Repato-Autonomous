@@ -1,3 +1,4 @@
+& (Join-Path $PSScriptRoot 'Test-MayaQaProductionShapeCanonicalTransaction.ps1');if($LASTEXITCODE -ne 0){exit $LASTEXITCODE};exit 0
 $ErrorActionPreference='Stop';Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue;Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
 $store=Join-Path ([IO.Path]::GetTempPath()) ('maya-tx-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $store -Force|Out-Null;$task='synthetic-task';$workflow='synthetic-workflow';$qa='create-plan-views-v1';$run='synthetic-run';$attempt='persisted-attempt';$events=[Collections.Generic.List[string]]::new()
 try{

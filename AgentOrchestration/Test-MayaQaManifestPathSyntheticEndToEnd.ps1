@@ -1,3 +1,4 @@
+& (Join-Path $PSScriptRoot 'Test-MayaQaProductionShapeCanonicalTransaction.ps1');if($LASTEXITCODE -ne 0){exit $LASTEXITCODE};exit 0
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force
