@@ -57,7 +57,7 @@ function Get-TaraQaTrustConfiguration($QaAddinRoot,$QaRoot,$Inventory){
     [pscustomobject]@{Path=(Join-Path $QaAddinRoot 'RepatoQA.trust.json');ApprovedManifests=$records;PromptRecords=$promptRecords;PromptFree=$false;ProfileRoot=$QaAddinRoot;Diagnostic='Approved unsigned add-in prompt handler is required before Revit launch.'}
 }
 function New-TaraRevitQaPlan {
-    param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,3600)][int]$TimeoutSeconds=900,[switch]$DryRun,[Parameter(Mandatory)]$Context)
+    param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,3600)][int]$TimeoutSeconds=900,[switch]$DryRun,[Parameter(Mandatory)]$Context,[scriptblock]$SessionValidationInvoker)
     $QaWorkflowId=$QaWorkflowId.Trim()
     $runners=@{
         'create-levels'=@('Repato.CreateLevels.TestRunner.addin','REPATO_QA_LEVELS_REQUEST','Invoke-CreateLevelsQA.ps1','Repato.Revit.TestRunner.CreateLevelsQaApplication')
@@ -104,7 +104,7 @@ function New-TaraRevitQaPlan {
     $exe=Assert-TaraPath (Join-Path $RevitInstallDir 'Revit.exe') $RevitInstallDir -Leaf
     Assert-TaraRevitExecutableVersion $exe
     $verifier=Assert-TaraPath (Join-Path $qa $runner[2]) $qa -Leaf
-    if(!$DryRun){Assert-TaraInteractiveSession}
+    if(!$DryRun){if($SessionValidationInvoker){& $SessionValidationInvoker}else{Assert-TaraInteractiveSession}}
     $requestId=[guid]::NewGuid().ToString('N');$requestPath=Join-Path ([IO.Path]::GetDirectoryName($model)) ('tara-'+$requestId+'.request.json')
     $trust=if($remoteDeployment){$remoteDeployment}else{Get-TaraQaTrustConfiguration $addin $qa $inventory}
     [pscustomobject]@{StoreRoot=$StoreRoot;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;Context=$Context;ModelPath=$model;SidecarPath=$sidecar;SidecarSha256=(Get-TaraSha256 $sidecar);ReportDirectory=$reportRoot;RevitInstallDir=$RevitInstallDir;QaAddinRoot=$addin;TrustConfiguration=$trust;TimeoutSeconds=$TimeoutSeconds;Executable=$exe;ExecutableSha256=(Get-TaraSha256 $exe);Command=('"'+$exe+'"');Arguments='';EnvironmentVariable=$runner[1];VerifierPath=$verifier;VerifierSha256=(Get-TaraSha256 $verifier);RequestId=$requestId;RequestPath=$requestPath;ResultPath=($requestPath+'.result.json');EvidencePath=(Join-Path $reportRoot ('tara-'+$requestId+'.json'));InstalledDll=$dll;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$Context.ManifestSha256;QaRunnerManifestPath=$manifest;QaRunnerManifestSha256=$qaRunnerManifestSha256;InstalledManifest=$manifest;Isolation=$inventory;SideEffectsPerformed=$false}
