@@ -28,9 +28,14 @@ public sealed record QaHealthResponse(int SchemaVersion, string Operation, bool 
 public sealed record QaPreflightRequest(int SchemaVersion, string Operation);
 public sealed record QaPreflightCheck(string Name, bool Passed, string Status, string? Path, string? Detail);
 public sealed record QaPreflightResponse(int SchemaVersion, string Operation, bool Succeeded, string ExecutionIdentity, string QaAddinRoot, string RunnerManifestPath, string ExpectedRunnerManifestSha256, IReadOnlyList<QaPreflightCheck> Checks, string? FailureCode);
-public sealed record QaStageRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
+public sealed record QaCandidateEvidence(
+    int SchemaVersion, string TaskId, string WorkflowId, string QaWorkflowId, string TestId,
+    string CandidateSourceCommit, string CandidateDirectory, string CandidateDllPath,
+    string CandidateDllSha256, string NeilBuildArtifactSha256, string RunnerManifestPath,
+    string RunnerManifestSha256, string CandidateProvenancePath);
+public sealed record QaStageRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId, string? TaskId = null, string? WorkflowId = null, QaCandidateEvidence? CandidateEvidence = null);
 public sealed record QaStageResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? StagingIdentity, string? QaAddinRoot, bool IsolationPassed, string? ReceiptPath, string? ErrorCode, string? ErrorMessage);
-public sealed record QaDeploymentValidationRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId);
+public sealed record QaDeploymentValidationRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId, string? TaskId = null, string? WorkflowId = null, QaCandidateEvidence? CandidateEvidence = null);
 public sealed record QaDeploymentValidationResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? ValidationIdentity, string? QaAddinRoot, bool IsolationPassed, string? ErrorCode, string? ErrorMessage);
 
 public static class QaLaunchPolicy
@@ -42,6 +47,8 @@ public static class QaLaunchPolicy
     public const string PreflightOperation = "preflight-readonly";
     public const string StageOperation = "stage-frozen-candidate-for-qa";
     public const string ValidateDeploymentOperation = "validate-qa-deployment";
+    public const string ApprovedCandidateRoot = @"C:\Repato-Autonomous\Source\DeploymentCandidates\AgentBuilds";
+    public const string ApprovedRunnerManifestRoot = @"C:\Repato-Autonomous\Source\QA";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
     public const string ExpectedUserSid = "S-1-5-21-1031246752-3872016183-2454652381-1015";
     public const string ClientAccount = "RAMSAI\\rsgud";
@@ -72,6 +79,26 @@ public static class QaLaunchPolicy
         }
         return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
     }
+    public static bool IsValidCandidateEvidence(QaCandidateEvidence? e, string taskId, string workflowId, string qaWorkflowId, string testId)
+    {
+        if (e is null || e.SchemaVersion != 1 || string.IsNullOrWhiteSpace(e.TaskId) || string.IsNullOrWhiteSpace(e.WorkflowId) ||
+            string.IsNullOrWhiteSpace(e.QaWorkflowId) || string.IsNullOrWhiteSpace(e.TestId) || e.TaskId != taskId || e.WorkflowId != workflowId ||
+            e.QaWorkflowId != qaWorkflowId || e.TestId != testId || e.TestId != e.QaWorkflowId || !IsSha256(e.CandidateDllSha256) ||
+            !IsSha256(e.NeilBuildArtifactSha256) || !IsSha256(e.RunnerManifestSha256) || !e.CandidateSourceCommit.All(Uri.IsHexDigit) || e.CandidateSourceCommit.Length != 40 ||
+            string.IsNullOrWhiteSpace(e.CandidateDirectory) || string.IsNullOrWhiteSpace(e.CandidateDllPath) || string.IsNullOrWhiteSpace(e.RunnerManifestPath) || string.IsNullOrWhiteSpace(e.CandidateProvenancePath) ||
+            !e.CandidateDllSha256.Equals(e.NeilBuildArtifactSha256, StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            var directory = Path.GetFullPath(e.CandidateDirectory); var dll = Path.GetFullPath(e.CandidateDllPath); var provenance = Path.GetFullPath(e.CandidateProvenancePath); var runner = Path.GetFullPath(e.RunnerManifestPath);
+            if (!Under(directory, ApprovedCandidateRoot) || !Under(dll, directory) || !Under(provenance, directory) || !Under(runner, ApprovedRunnerManifestRoot) ||
+                !File.Exists(dll) || !File.Exists(provenance) || !File.Exists(runner) || Hash(dll) != e.CandidateDllSha256 || Hash(runner) != e.RunnerManifestSha256) return false;
+            using var json = JsonDocument.Parse(File.ReadAllText(provenance)); var root = json.RootElement;
+            return root.TryGetProperty("SourceCommit", out var source) && source.GetString() == e.CandidateSourceCommit && root.TryGetProperty("FrozenArtifactSha256", out var artifact) && artifact.GetString()?.Equals(e.CandidateDllSha256, StringComparison.OrdinalIgnoreCase) == true;
+        }
+        catch { return false; }
+    }
+    private static bool Under(string path, string root) => path.StartsWith(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
     public static bool IsValidRequest(QaLaunchRequest r, DateTimeOffset now) =>
         r is not null && r.SchemaVersion == LaunchSchemaVersion && r.Operation == Operation &&
         Guid.TryParse(r.RequestId, out _) &&

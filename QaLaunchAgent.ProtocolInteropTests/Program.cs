@@ -1,6 +1,36 @@
 using System.Text.Json;
 using System.Text;
 using Repato.QaLaunchAgent;
+if (args.Length == 2 && args[0] == "--candidate-evidence")
+{
+    using var input = JsonDocument.Parse(File.ReadAllText(args[1]));
+    foreach (var item in input.RootElement.EnumerateArray())
+    {
+        var operation = item.GetProperty("operation").GetString();
+        var json = item.GetRawText();
+        if (operation == QaLaunchPolicy.StageOperation)
+        {
+            var stageRequest = JsonSerializer.Deserialize<QaStageRequest>(json, QaLaunchPolicy.JsonOptions) ?? throw new Exception("Stage deserialization failed.");
+            AssertEvidence(stageRequest.CandidateEvidence, stageRequest.TaskId!, stageRequest.WorkflowId!, stageRequest.QaWorkflowId, stageRequest.TestId);
+            Console.WriteLine(JsonSerializer.Serialize(stageRequest, QaLaunchPolicy.JsonOptions));
+        }
+        else if (operation == QaLaunchPolicy.ValidateDeploymentOperation)
+        {
+            var validationRequest = JsonSerializer.Deserialize<QaDeploymentValidationRequest>(json, QaLaunchPolicy.JsonOptions) ?? throw new Exception("Deployment validation deserialization failed.");
+            AssertEvidence(validationRequest.CandidateEvidence, validationRequest.TaskId!, validationRequest.WorkflowId!, validationRequest.QaWorkflowId, validationRequest.TestId);
+            Console.WriteLine(JsonSerializer.Serialize(validationRequest, QaLaunchPolicy.JsonOptions));
+        }
+        else throw new Exception("Unexpected operation.");
+    }
+    return;
+}
+
+static void AssertEvidence(QaCandidateEvidence? e, string task, string workflow, string qa, string test)
+{
+    if (e is null || e.SchemaVersion != 1 || e.TaskId != task || e.WorkflowId != workflow || e.QaWorkflowId != qa || e.TestId != test || string.IsNullOrWhiteSpace(e.CandidateSourceCommit) || string.IsNullOrWhiteSpace(e.CandidateDirectory) || string.IsNullOrWhiteSpace(e.CandidateDllPath) || string.IsNullOrWhiteSpace(e.CandidateDllSha256) || string.IsNullOrWhiteSpace(e.NeilBuildArtifactSha256) || string.IsNullOrWhiteSpace(e.RunnerManifestPath) || string.IsNullOrWhiteSpace(e.RunnerManifestSha256) || string.IsNullOrWhiteSpace(e.CandidateProvenancePath)) throw new Exception("CandidateEvidence validation failed.");
+    if (e.CandidateDllPath is null || e.RunnerManifestPath is null || e.CandidateProvenancePath is null) throw new Exception("CandidateEvidence path was lost.");
+}
+
 if (args.Length == 1)
 {
     var fixtureJson = File.ReadAllText(args[0]);
