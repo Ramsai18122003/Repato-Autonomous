@@ -1242,6 +1242,44 @@ function Invoke-MayaQaFrozenCandidateEvidence {
     })[-1]
     [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus='succeeded';Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ArtifactManifestPath=$verified.ManifestPath;ArtifactManifestSha256=$verified.ManifestSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;WarningCount=0;ErrorCount=0;EvidenceSource='FrozenCandidate';CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;SideEffectsPerformed=$true}
 }
+
+function New-MayaQaCanonicalCandidate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$TestId
+    )
+    $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if($workflow.PSObject.Properties.Name -contains 'qaWorkflowId' -and [string]$workflow.qaWorkflowId -cne $QaWorkflowId){throw 'QA workflow identity mismatch.'}
+    if($TestId -cne $QaWorkflowId){throw 'QA test identity mismatch.'}
+    if($workflow.PSObject.Properties.Name -notcontains 'qaBuildEvidence' -or $workflow.PSObject.Properties.Name -notcontains 'qaBuildStatus' -or $workflow.qaBuildStatus -cne 'succeeded'){throw 'Successful authenticated Neil build evidence is required.'}
+    $e=$workflow.qaBuildEvidence
+    foreach($n in 'BuildRequestId','SourceCommit','ArtifactPath','ArtifactSha256','ManifestPath','ManifestSha256'){if($e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Authenticated build evidence is missing $n."}}
+    if([string]$e.SourceCommit -notmatch '^[A-Fa-f0-9]{40}$' -or [string]$e.ArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$e.ManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Authenticated build evidence identity or hash is invalid.'}
+    $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$artifact=[IO.Path]::GetFullPath([string]$e.ArtifactPath);$expected=[IO.Path]::GetFullPath((Join-Path $repo 'bin\Release\net8.0-windows\Repato.Revit.dll'))
+    if($artifact -ine $expected -or [IO.Path]::GetFileName($artifact) -cne 'Repato.Revit.dll'){throw 'Authenticated artifact is not the approved Release Repato.Revit.dll.'}
+    if(!(Test-Path -LiteralPath $artifact -PathType Leaf)){throw 'Authenticated Neil artifact is missing.'}
+    $actual=(Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash;if($actual -ine [string]$e.ArtifactSha256){throw 'Authenticated Neil artifact hash mismatch.'}
+    $manifest=[IO.Path]::GetFullPath([string]$e.ManifestPath);$expectedManifest=[IO.Path]::GetFullPath((Join-Path $repo 'Repato.addin'))
+    if($manifest -ine $expectedManifest -or !(Test-Path -LiteralPath $manifest -PathType Leaf) -or (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ine [string]$e.ManifestSha256){throw 'Authenticated add-in manifest hash mismatch.'}
+    $root=[IO.Path]::GetFullPath((Join-Path $repo 'DeploymentCandidates\AgentBuilds'));$name='ReleaseCandidate-'+([string]$e.SourceCommit).Substring(0,12);$dir=[IO.Path]::GetFullPath((Join-Path $root $name));$prefix=$root.TrimEnd('\')+'\'
+    if(!$dir.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($dir) -ne $name){throw 'Canonical candidate path escaped the approved root.'}
+    $dll=Join-Path $dir 'Repato.Revit.dll';$addin=Join-Path $dir 'Repato.addin';$prov=Join-Path $dir 'release-manifest.json'
+    if(Test-Path -LiteralPath $dir){
+        if(!(Test-Path -LiteralPath $dll -PathType Leaf) -or !(Test-Path -LiteralPath $addin -PathType Leaf) -or !(Test-Path -LiteralPath $prov -PathType Leaf)){throw 'Conflicting canonical candidate is incomplete.'}
+        $p=try{Get-Content -LiteralPath $prov -Raw|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Conflicting canonical candidate provenance is invalid.'}
+        if((Get-FileHash $dll -Algorithm SHA256).Hash -ine [string]$e.ArtifactSha256 -or (Get-FileHash $addin -Algorithm SHA256).Hash -ine [string]$e.ManifestSha256 -or [string]$p.SourceCommit -cne [string]$e.SourceCommit -or [string]$p.FrozenArtifactSha256 -ine [string]$e.ArtifactSha256 -or [string]$p.ManifestSha256 -ine [string]$e.ManifestSha256 -or [string]$p.TaskId -cne $TaskId -or [string]$p.WorkflowId -cne $WorkflowId -or [string]$p.QaWorkflowId -cne $QaWorkflowId -or [string]$p.TestId -cne $TestId -or [string]$p.BuildRequestId -cne [string]$e.BuildRequestId){throw 'Conflicting canonical candidate identity or provenance.'}
+        return [pscustomobject]@{CandidateDirectory=$dir;CandidateDllPath=$dll;CandidateProvenancePath=$prov;CandidateSourceCommit=$e.SourceCommit;NeilArtifactSha256=$e.ArtifactSha256;CandidateSha256=(Get-FileHash $dll -Algorithm SHA256).Hash;Reused=$true;SideEffectsPerformed=$false}
+    }
+    $tmp=$dir+'.tmp-'+[guid]::NewGuid().ToString('N');New-Item -ItemType Directory -Path $tmp -Force|Out-Null
+    try { Copy-Item -LiteralPath $artifact -Destination (Join-Path $tmp 'Repato.Revit.dll');Copy-Item -LiteralPath $manifest -Destination (Join-Path $tmp 'Repato.addin');$p=[ordered]@{SchemaVersion=1;CandidateType='SyntheticReleaseCandidate';TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;TestId=$TestId;BuildRequestId=$e.BuildRequestId;SourceCommit=$e.SourceCommit;NeilArtifactSha256=$e.ArtifactSha256;ManifestSha256=$e.ManifestSha256;FrozenArtifactSha256=(Get-FileHash (Join-Path $tmp 'Repato.Revit.dll') -Algorithm SHA256).Hash;CandidateDllSha256=(Get-FileHash (Join-Path $tmp 'Repato.Revit.dll') -Algorithm SHA256).Hash;CandidateDirectory=$dir;CandidateDllPath=$dll;SupportedQaWorkflows=@($QaWorkflowId)};$p|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $tmp 'release-manifest.json') -Encoding UTF8;Move-Item -LiteralPath $tmp -Destination $dir
+    } catch {Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue;throw}
+    $candidateHash=(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash;if($candidateHash -ine [string]$e.ArtifactSha256){throw 'Created candidate hash mismatch.'}
+    [pscustomobject]@{CandidateDirectory=$dir;CandidateDllPath=$dll;CandidateProvenancePath=$prov;CandidateSourceCommit=$e.SourceCommit;NeilArtifactSha256=$e.ArtifactSha256;CandidateSha256=$candidateHash;Reused=$false;SideEffectsPerformed=$true}
+}
 function Resolve-MayaQaSourceRunnerManifestEvidence {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$TestId)
     $names=@{'create-plan-views-v1'='Repato.CreatePlanViews.TestRunner.addin';'create-levels-elevations-v1'='Repato.CreateLevels.TestRunner.addin';'create-grids-world-axis-v1'='Repato.CreateGrids.TestRunner.addin';'grid-bubble-visibility-v1'='Repato.GridBubbleVisibility.TestRunner.addin';'grid-bubble-offset-v1'='Repato.GridBubbleOffset.TestRunner.addin';'grid-resequence-v1'='Repato.GridResequence.TestRunner.addin'}
@@ -1928,7 +1966,7 @@ Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup
 Export-ModuleMember -Function Complete-MayaQaPreparedAttemptCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
 Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
-Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit
+Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
 
 function Accept-MayaQaLegacyManifestAttestation {
