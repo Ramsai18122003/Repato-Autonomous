@@ -939,6 +939,49 @@ function Resolve-MayaQaRequestWorkflow {
     }
     throw 'User request does not identify a supported QA workflow.'
 }
+function New-MayaQaRequestFoundation {
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$UserRequest,
+        [string]$SourceBranch='main',
+        [string]$ProjectPath,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [object]$AuthenticatedBuildSource
+    )
+    $qaId=Resolve-MayaQaRequestWorkflow $UserRequest
+    if($qaId -cne (Resolve-MayaQaWorkflowId $QaWorkflowId)){throw 'QA workflow identity mismatch.'}
+    $def=Get-MayaQaWorkflowDefinition $qaId
+    $taskId='task-'+[guid]::NewGuid().ToString('N');$workflowId='workflow-'+[guid]::NewGuid().ToString('N')
+    if([string]::IsNullOrWhiteSpace($ProjectPath)){$ProjectPath='Forma.RevitConnector.csproj'}
+    $null=Initialize-RepatoTaskStore $StoreRoot
+    New-RepatoTask $StoreRoot $taskId 'Maya QA request' $UserRequest 'qa/maya-qa-workflow' 'maya'|Out-Null
+    $taskNow=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId
+    if($taskNow.workflowStage -eq 'queued'){Claim-RepatoTask $StoreRoot $taskId 'Neil'|Out-Null;Update-RepatoTask $StoreRoot $taskId 'in-progress' 'implementation' 'Neil' $null $null|Out-Null;Update-RepatoTask $StoreRoot $taskId 'in-progress' 'build-checks' 'Neil' $null $null|Out-Null}
+    $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$plan=New-DeployPlan $StoreRoot $taskId (Join-Path $root 'bin\Release\net8.0-windows\Repato.Revit.dll') (Join-Path $root 'Repato.addin');$workflow=New-DeployWorkflow $StoreRoot $plan
+    $intake=Invoke-MayaQaIntake $taskId $workflow.workflowId $qaId $UserRequest
+    $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflow.workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -AuthenticatedBuildSource $AuthenticatedBuildSource
+    [pscustomobject]@{TaskId=$taskId;WorkflowId=$workflow.workflowId;QaWorkflowId=$qaId;NativeTestId=(Get-MayaQaNativeTestId $def);Intake=$intake;BuildRequest=$buildRequest}
+}
+
+function New-MayaQaPersistentPreBuildRequest {
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$UserRequest,
+        [string]$SourceBranch='main',
+        [string]$ProjectPath='Forma.RevitConnector.csproj',
+        [Parameter(Mandatory)][object]$AuthenticatedBuildSource
+    )
+    $foundation=New-MayaQaRequestFoundation -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -QaWorkflowId (Resolve-MayaQaRequestWorkflow $UserRequest) -AuthenticatedBuildSource $AuthenticatedBuildSource
+    $taskData=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $taskData $foundation.TaskId
+    Update-RepatoTask $StoreRoot $foundation.TaskId 'in-progress' 'qa' 'Tara' $null $null|Out-Null
+    Update-RepatoTask $StoreRoot $foundation.TaskId 'passed' 'qa' 'Tara' $null $null|Out-Null
+    Request-RepatoTaskApproval $StoreRoot $foundation.TaskId 'qa-run' 'maya'|Out-Null
+    $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $foundation.TaskId
+    $approval=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})[-1]
+    if(!$approval){throw 'Persisted qa-run approval request is missing requestId.'}
+    [pscustomobject]@{Success=$false;Mode='Real';TaskId=$foundation.TaskId;WorkflowId=$foundation.WorkflowId;QaWorkflowId=$foundation.QaWorkflowId;NativeTestId=$foundation.NativeTestId;Stage='approval-required';NextOperation='Resolve-RepatoTaskApproval';QaApprovalId=$approval.requestId;QaApprovalStatus=$approval.status;BuildRequest=$foundation.BuildRequest;Intake=$foundation.Intake;SideEffectsPerformed=$true;Error=$null}
+}
+
 function Invoke-MayaQaRequest {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,
@@ -952,19 +995,8 @@ function Invoke-MayaQaRequest {
     }
     $taskId='task-'+[guid]::NewGuid().ToString('N');$workflowId='workflow-'+[guid]::NewGuid().ToString('N');$runId=[guid]::NewGuid().ToString('N')
     if($DryRun){return [pscustomobject]@{Success=$true;Mode='DryRun';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaId;RunId=$runId;FixtureId=$def.FixtureId;NativeTestId=(Get-MayaQaNativeTestId $def);QaStaging=$qaStaging;Stages=@('frozen-candidate-validation','qa-only-staging','isolation','intake','build-request','build-execute','handoff','tara-execute','report-verify','complete','receipt','dashboard');SideEffectsPerformed=$false;Error=$null}}
-    if([string]::IsNullOrWhiteSpace($ProjectPath)){$ProjectPath='Forma.RevitConnector.csproj'}
-    $null=Initialize-RepatoTaskStore $StoreRoot
-    $existing=$null; try{$existing=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId}catch{}
-    if($null -eq $existing){ New-RepatoTask $StoreRoot $taskId 'Maya QA request' $UserRequest 'qa/maya-qa-workflow' 'maya' | Out-Null }
-    $taskNow=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId
-    if($taskNow.workflowStage -eq 'queued'){ Claim-RepatoTask $StoreRoot $taskId 'Neil' | Out-Null; Update-RepatoTask $StoreRoot $taskId 'in-progress' 'implementation' 'Neil' $null $null | Out-Null; Update-RepatoTask $StoreRoot $taskId 'in-progress' 'build-checks' 'Neil' $null $null | Out-Null }
-    $workflowExisting=$null; try{$workflowExisting=Get-DeployWorkflow $StoreRoot $taskId $workflowId}catch{}
-    if($null -eq $workflowExisting){
-        $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$plan=New-DeployPlan $StoreRoot $taskId (Join-Path $root 'bin\Release\net8.0-windows\Repato.Revit.dll') (Join-Path $root 'Repato.addin');
-        $created=New-DeployWorkflow $StoreRoot $plan; $workflowId=$created.workflowId
-    }
-    $intake=Invoke-MayaQaIntake $taskId $workflowId $qaId $UserRequest
-    $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -AuthenticatedBuildSource $AuthenticatedBuildSource
+    $foundation=New-MayaQaRequestFoundation -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -QaWorkflowId $qaId -AuthenticatedBuildSource $AuthenticatedBuildSource
+    $taskId=$foundation.TaskId;$workflowId=$foundation.WorkflowId;$intake=$foundation.Intake;$buildRequest=$foundation.BuildRequest
     $deploymentEvidence=$null
     if($ArtifactMode -ceq 'FrozenCandidate'){
         $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -DeploymentEvidence $deploymentEvidence
@@ -1987,7 +2019,7 @@ function Invoke-MayaQaOverview { param([Parameter(Mandatory)][ValidateSet('qa-ca
 }
 Export-ModuleMember -Function Prepare-MayaQaCanonicalLaunchPhase,Start-MayaQaCanonicalProcessPhase,Accept-MayaQaCanonicalEvidencePhase,Verify-MayaQaCanonicalRollbackPhase,Verify-MayaQaCanonicalExecutionPhase
 Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCanonicalExecutionPhase
-Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,Invoke-MayaQaCanonicalTransaction,Invoke-MayaQaSingleCanonicalAttempt,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
+Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,New-MayaQaPersistentPreBuildRequest,Invoke-MayaQaCanonicalTransaction,Invoke-MayaQaSingleCanonicalAttempt,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
 Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
