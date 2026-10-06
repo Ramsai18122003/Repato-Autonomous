@@ -134,11 +134,12 @@ function New-RealBootstrapContext {
     }
 }
 
-function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$AllowTestRoot) {
+function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$AllowTestRoot,[scriptblock]$ProcessDetector) {
     & $Context.IsAdministrator
     & $Context.ResolveIdentity $script:Contract.Account $script:Contract.Sid
     if (-not $AllowTestRoot -and [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\') -cne $script:Contract.InstallRoot) { throw 'Install root must be the fixed protected Program Files path.' }
-    if (Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue) { throw 'Refusing update while the launch agent is running.' }
+    if (-not $ProcessDetector) { $ProcessDetector = { Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue } }
+    if (& $ProcessDetector) { throw 'Refusing update while the launch agent is running.' }
     $parent=Split-Path $TargetRoot -Parent; New-Item -ItemType Directory -Path $parent -Force|Out-Null
     $stage=Join-Path $parent ('.QaLaunchAgent.stage.'+[guid]::NewGuid().ToString('N')); $backup=Join-Path $parent ('.QaLaunchAgent.backup.'+[guid]::NewGuid().ToString('N'))
     $oldTask=& $Context.GetTask; $oldXml=& $Context.ExportTask $oldTask
