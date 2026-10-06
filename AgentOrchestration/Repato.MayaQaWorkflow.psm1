@@ -1141,6 +1141,7 @@ function Invoke-MayaQaBuildExecute {
     $artifactManifest = [IO.Path]::GetFullPath((Join-Path $root 'Repato.addin'))
     $requestedArtifact = if($workflow.qaBuildRequest.PSObject.Properties.Name -contains 'RequestedArtifact') { & $normalize ([string]$workflow.qaBuildRequest.RequestedArtifact) $root } else { $artifact }
     if($requestedArtifact -ine $artifact){throw 'Normalized requested artifact is outside the approved Release artifact path.'}
+    $sourceCommit=Get-MayaQaTrustedBuildSourceCommit -RepositoryRoot $root -ProjectPath $persistedProject
     $command = 'dotnet build "' + $project + '" -c Release -p:RevitInstallDir="E:\revit\Revit 2025"'
     if ($DryRun) { return [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus='planned';Command=$command;Configuration='Release';ArtifactPath=$artifact;SideEffectsPerformed=$false} }
     $started = (Get-Date).ToUniversalTime().ToString('O')
@@ -1159,11 +1160,22 @@ function Invoke-MayaQaBuildExecute {
     $mutation = @(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $workflow.workflowRevision $task.revision {
         param($current)
         $current | Add-Member -NotePropertyName qaBuildStatus -NotePropertyValue $status -Force
-        $current | Add-Member -NotePropertyName qaBuildEvidence -NotePropertyValue ([pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$started;FinishedUtc=$finished;Command=$command;Configuration='Release';ExitCode=$exit;ArtifactPath=$artifact;ArtifactSha256=$(if(Test-Path $artifact){(Get-FileHash $artifact -Algorithm SHA256).Hash}else{$null});ManifestPath=$artifactManifest;ManifestSha256=$(if(Test-Path $artifactManifest){(Get-FileHash $artifactManifest -Algorithm SHA256).Hash}else{$null});BuildStatus=$status;WarningCount=$warningCount;ErrorCount=$errorCount;ErrorLines=$errorLines}) -Force
+        $current | Add-Member -NotePropertyName qaBuildEvidence -NotePropertyValue ([pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$started;FinishedUtc=$finished;Command=$command;Configuration='Release';SourceCommit=$sourceCommit;ExitCode=$exit;ArtifactPath=$artifact;ArtifactSha256=$(if(Test-Path $artifact){(Get-FileHash $artifact -Algorithm SHA256).Hash}else{$null});ManifestPath=$artifactManifest;ManifestSha256=$(if(Test-Path $artifactManifest){(Get-FileHash $artifactManifest -Algorithm SHA256).Hash}else{$null});BuildStatus=$status;WarningCount=$warningCount;ErrorCount=$errorCount;ErrorLines=$errorLines}) -Force
         return $current
     })[-1]
     if ($status -ne 'succeeded') { throw "Release build failed with exit code $exit." }
-    [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus=$status;Command=$command;Configuration='Release';ExitCode=$exit;ArtifactPath=$artifact;ArtifactSha256=$mutation.Workflow.qaBuildEvidence.ArtifactSha256;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$mutation.Workflow.qaBuildEvidence.ManifestSha256;ManifestPath=$artifactManifest;ManifestSha256=$mutation.Workflow.qaBuildEvidence.ManifestSha256;WarningCount=$warningCount;ErrorCount=$errorCount;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;SideEffectsPerformed=$true}
+    [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus=$status;Command=$command;Configuration='Release';SourceCommit=$mutation.Workflow.qaBuildEvidence.SourceCommit;ExitCode=$exit;ArtifactPath=$artifact;ArtifactSha256=$mutation.Workflow.qaBuildEvidence.ArtifactSha256;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$mutation.Workflow.qaBuildEvidence.ManifestSha256;ManifestPath=$artifactManifest;ManifestSha256=$mutation.Workflow.qaBuildEvidence.ManifestSha256;WarningCount=$warningCount;ErrorCount=$errorCount;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;SideEffectsPerformed=$true}
+}
+
+function Get-MayaQaTrustedBuildSourceCommit {
+    param([Parameter(Mandatory)][string]$RepositoryRoot,[Parameter(Mandatory)][string]$ProjectPath)
+    $root=[IO.Path]::GetFullPath($RepositoryRoot);$project=[IO.Path]::GetFullPath($ProjectPath)
+    $commit=(& git -C $root rev-parse HEAD 2>$null).Trim();if($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$'){throw 'Trusted build source commit could not be resolved.'}
+    $excluded=@('\\QaLaunchAgent\\','\\QaLaunchAgent.ProtocolInteropTests\\','\\bin\\','\\obj\\')
+    $dirty=@(& git -C $root status --porcelain --untracked-files=all 2>$null);if($LASTEXITCODE -ne 0){throw 'Build input cleanliness could not be established.'}
+    $inputs=@($dirty|ForEach-Object { $line=[string]$_;if($line.Length -lt 4){return};$path=$line.Substring(3).Trim('"');if($path -match ' -> '){$path=($path -split ' -> ')[-1]};$full=[IO.Path]::GetFullPath((Join-Path $root $path));$isExcluded=$false;foreach($x in $excluded){if($full -match [regex]::Escape($x)){$isExcluded=$true;break}};if(!$isExcluded -and $full -match '(?i)\.(cs|csproj|props|targets|resx)$|(?i)(^|\\)Directory\.Build\.(props|targets)$'){$full}})
+    if($inputs.Count){throw ('Dirty build inputs prevent source-commit binding: '+($inputs -join '; '))}
+    $commit
 }
 
 function Test-MayaQaFrozenCandidate {
@@ -1216,10 +1228,12 @@ function Invoke-MayaQaFrozenCandidateEvidence {
     $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
     if($workflow.PSObject.Properties.Name -notcontains 'qaBuildRequest' -or !$workflow.qaBuildRequest){throw 'Persisted Neil build request is missing.'}
     if($workflow.qaWorkflowId -cne $QaWorkflowId){throw 'QA workflow identity mismatch.'}
+    if($workflow.PSObject.Properties.Name -notcontains 'qaBuildEvidence' -or $workflow.qaBuildEvidence.PSObject.Properties.Name -notcontains 'SourceCommit' -or [string]::IsNullOrWhiteSpace([string]$workflow.qaBuildEvidence.SourceCommit)){throw 'Source-bound Neil build evidence is required.'}
+    if([string]$verified.SourceCommit -cne [string]$workflow.qaBuildEvidence.SourceCommit){throw 'Frozen candidate source commit does not match Neil build evidence.'}
     $now=(Get-Date).ToUniversalTime().ToString('O');$deploymentRunnerManifestPath=if($DeploymentEvidence){$DeploymentEvidence.runnerManifestPath}else{$null};$deploymentRunnerManifestSha256=if($DeploymentEvidence){$DeploymentEvidence.runnerManifestSha256}else{$null};$deploymentValidation=if($DeploymentEvidence){[bool]$DeploymentEvidence.succeeded}else{$false};$deploymentManifestIntegrity=if($DeploymentEvidence){if($DeploymentEvidence.PSObject.Properties.Name -contains 'manifestIntegrityEvidenceAvailable' -and $DeploymentEvidence.manifestIntegrityEvidenceAvailable){[bool]$DeploymentEvidence.manifestIntegrityPassed}else{'Unavailable'}}else{$false};$deploymentIsolation=$null;if($DeploymentEvidence){if($DeploymentEvidence.PSObject.Properties.Name -contains 'Isolation'){$deploymentIsolation=$DeploymentEvidence.Isolation}elseif($DeploymentEvidence.PSObject.Properties.Name -contains 'isolationPassed'){$deploymentIsolation=[pscustomobject]@{Allowed=[bool]$DeploymentEvidence.isolationPassed}}else{throw 'Deployment validation isolation evidence is missing.'};if(!$deploymentIsolation -or $deploymentIsolation.PSObject.Properties.Name -notcontains 'Allowed'){throw 'Deployment validation isolation evidence is malformed.'};if(!$deploymentIsolation.Allowed){throw 'Deployment validation isolation failed.'}};$deploymentQaIsolation=if($deploymentIsolation){[bool]$deploymentIsolation.Allowed}else{$false};$data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
     $mutation=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $workflow.workflowRevision $task.revision {
         param($current)
-        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId;RunnerManifestPath=$deploymentRunnerManifestPath;RunnerManifestSha256=$deploymentRunnerManifestSha256;DeploymentValidation=$deploymentValidation;ManifestIntegrityValidation=$deploymentManifestIntegrity;QaIsolation=$deploymentQaIsolation;QaAddinRoot=$(if($DeploymentEvidence){$DeploymentEvidence.qaAddinRoot}else{$null});Isolation=$deploymentIsolation}
+        $e=[pscustomobject]@{BuildRequestId=$current.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';SourceCommit=$current.qaBuildEvidence.SourceCommit;ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId;RunnerManifestPath=$deploymentRunnerManifestPath;RunnerManifestSha256=$deploymentRunnerManifestSha256;DeploymentValidation=$deploymentValidation;ManifestIntegrityValidation=$deploymentManifestIntegrity;QaIsolation=$deploymentQaIsolation;QaAddinRoot=$(if($DeploymentEvidence){$DeploymentEvidence.qaAddinRoot}else{$null});Isolation=$deploymentIsolation}
         $current|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force
         $current|Add-Member NoteProperty qaBuildEvidence $e -Force
         return $current
@@ -1249,8 +1263,8 @@ function Resolve-MayaQaSourceRunnerManifestEvidence {
 function New-MayaQaPersistedCandidateEvidence {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$TestId)
     $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId;$e=$w.qaBuildEvidence
-    foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','CandidateSourceCommit','CandidateDirectory','ArtifactPath','ArtifactSha256','RunnerManifestPath','RunnerManifestSha256','CandidateProvenancePath'){if(!$e -or $e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Authenticated candidate evidence is missing $n."}}
-    if($w.qaBuildStatus -cne 'succeeded' -or [string]$e.EvidenceSource -cne 'FrozenCandidate' -or [string]$e.TaskId -cne $TaskId -or [string]$e.WorkflowId -cne $WorkflowId -or [string]$e.QaWorkflowId -cne $QaWorkflowId -or [string]$e.TestId -cne $TestId){throw 'Persisted candidate evidence identity or status is invalid.'}
+    foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','CandidateSourceCommit','SourceCommit','CandidateDirectory','ArtifactPath','ArtifactSha256','RunnerManifestPath','RunnerManifestSha256','CandidateProvenancePath'){if(!$e -or $e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Authenticated candidate evidence is missing $n."}}
+    if($w.qaBuildStatus -cne 'succeeded' -or [string]$e.EvidenceSource -cne 'FrozenCandidate' -or [string]$e.SourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$e.TaskId -cne $TaskId -or [string]$e.WorkflowId -cne $WorkflowId -or [string]$e.QaWorkflowId -cne $QaWorkflowId -or [string]$e.TestId -cne $TestId){throw 'Persisted candidate evidence identity or status is invalid.'}
     $candidate=New-RepatoCandidateEvidence -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateSourceCommit $e.CandidateSourceCommit -CandidateDirectory $e.CandidateDirectory -CandidateDllPath $e.ArtifactPath -CandidateDllSha256 $e.ArtifactSha256 -NeilBuildArtifactSha256 $e.ArtifactSha256 -RunnerManifestPath $e.RunnerManifestPath -RunnerManifestSha256 $e.RunnerManifestSha256 -CandidateProvenancePath $e.CandidateProvenancePath
     $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\DeploymentCandidates\AgentBuilds'));$runnerRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\QA'))
     $null=Resolve-RepatoCandidateEvidence -Evidence $candidate -AuthenticatedEvidence $candidate -ApprovedCandidateRoot $root -ApprovedRunnerManifestRoot $runnerRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
@@ -1284,7 +1298,7 @@ function New-MayaQaHandoff {
     if ($properties -notcontains 'qaBuildRequest' -or $null -eq $workflow.qaBuildRequest) {
         throw 'Completed Neil build request is missing.'
     }
-    if ($properties -notcontains 'qaBuildEvidence' -or $properties -notcontains 'qaBuildStatus' -or $workflow.qaBuildStatus -ne 'succeeded') {
+    if ($properties -notcontains 'qaBuildEvidence' -or $properties -notcontains 'qaBuildStatus' -or $workflow.qaBuildStatus -ne 'succeeded' -or $workflow.qaBuildEvidence.PSObject.Properties.Name -notcontains 'SourceCommit' -or [string]::IsNullOrWhiteSpace([string]$workflow.qaBuildEvidence.SourceCommit)) {
         throw 'Successful Neil build execution is required.'
     }
     if ($properties -contains 'qaHandoffId' -and $workflow.qaHandoffId) {
@@ -1912,7 +1926,7 @@ Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup
 Export-ModuleMember -Function Complete-MayaQaPreparedAttemptCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
 Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
-Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence
+Export-ModuleMember -Function Test-MayaQaFrozenCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
 
 function Accept-MayaQaLegacyManifestAttestation {

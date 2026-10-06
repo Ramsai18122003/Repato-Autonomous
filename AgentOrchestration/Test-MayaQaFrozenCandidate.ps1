@@ -26,12 +26,6 @@ try{
   $source=Get-Content $module -Raw
   Check ($source -match "ArtifactMode='Build'" -and $source -match "ArtifactMode -ceq 'FrozenCandidate'" -and $source -match 'Invoke-MayaQaBuildExecute') 'default build and explicit frozen paths preserved'
   $store=Join-Path $scratch 'controller-store'
-  $request=Invoke-MayaQaRequest -StoreRoot $store -UserRequest 'Create floor plan views for Levels 0, 1, and 2 at 1:100 using the architectural template, named by level' -ArtifactMode FrozenCandidate -CandidateDirectory $candidate -ExpectedCandidateSha256 $hash -ExpectedCandidateSourceCommit $commit
-  Check ($request.Stage -ceq 'approval-required' -and $request.TaskId -and $request.WorkflowId -and $request.RunId) 'controller generated fresh canonical identities'
-  $workflow=Get-DeployWorkflow $store $request.TaskId $request.WorkflowId
-  Check ($workflow.qaBuildEvidence.EvidenceSource -ceq 'FrozenCandidate') 'controller persisted frozen candidate evidence'
-  Check ($workflow.qaBuildEvidence.ArtifactSha256 -ceq $hash) 'downstream evidence bound to verified DLL hash'
-  Check ($workflow.qaBuildEvidence.BuildStatus -ceq 'succeeded' -and $workflow.qaBuildEvidence.ExitCode -eq 0 -and $workflow.qaBuildEvidence.Configuration -ceq 'Release') 'Neil evidence contract preserved'
-  if($workflow.qaModelPath){$runRoot=Split-Path $workflow.qaModelPath -Parent;$approvedRoot=[IO.Path]::GetFullPath((Join-Path (Split-Path $PSScriptRoot -Parent) 'QA\TestRuns')).TrimEnd('\')+'\';$resolved=[IO.Path]::GetFullPath($runRoot);if($resolved.StartsWith($approvedRoot,[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $resolved -Recurse -Force}}
+  Reject {Invoke-MayaQaRequest -StoreRoot $store -UserRequest 'Create floor plan views for Levels 0, 1, and 2 at 1:100 using the architectural template, named by level' -ArtifactMode FrozenCandidate -CandidateDirectory $candidate -ExpectedCandidateSha256 $hash -ExpectedCandidateSourceCommit $commit} 'legacy frozen flow without source-bound build evidence rejected'
   [pscustomobject]@{Status='PASS';AssertionsPassed=$passed;AssertionsFailed=0;VerifiedArtifactSha256=$v.ArtifactSha256;BuildSkipped=$true;StateCreatedOnFailure=$false}|ConvertTo-Json -Compress
 }finally{Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue}
