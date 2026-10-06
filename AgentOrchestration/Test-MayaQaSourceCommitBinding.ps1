@@ -7,5 +7,7 @@ try{
   Set-Content (Join-Path $root 'unrelated.txt') x;Check ((Get-MayaQaTrustedBuildSourceCommit $root (Join-Path $root 'Test.csproj')) -ceq $commit) 'unrelated dirty file allowed'
   Set-Content (Join-Path $root 'dirty.cs') 'class Dirty {}';Check (Reject {Get-MayaQaTrustedBuildSourceCommit $root (Join-Path $root 'Test.csproj')}) 'dirty build input rejected'
   Remove-Item (Join-Path $root 'dirty.cs');Set-Content (Join-Path $root 'app.cs') 'class Changed {}';Check (Reject {Get-MayaQaTrustedBuildSourceCommit $root (Join-Path $root 'Test.csproj')}) 'tracked build input rejected'
+  Check (Reject {Get-MayaQaTrustedBuildSourceCommit (Join-Path $root 'missing') (Join-Path $root 'Test.csproj')}) 'genuine git failure rejected'
+  Check ((Get-MayaQaTrustedBuildSourceCommit (Split-Path $PSScriptRoot -Parent) (Join-Path (Split-Path $PSScriptRoot -Parent) 'Forma.RevitConnector.csproj')) -match '^[0-9a-f]{40}$') 'known unrelated permission warning handled safely'
   [pscustomobject]@{Status='PASS';AssertionsPassed=$passed;AssertionsFailed=0;SourceCommit=$commit}|ConvertTo-Json -Compress
 }finally{Pop-Location -ErrorAction SilentlyContinue;Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue}

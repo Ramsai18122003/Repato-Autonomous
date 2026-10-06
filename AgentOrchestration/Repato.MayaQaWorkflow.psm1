@@ -1172,7 +1172,9 @@ function Get-MayaQaTrustedBuildSourceCommit {
     $root=[IO.Path]::GetFullPath($RepositoryRoot);$project=[IO.Path]::GetFullPath($ProjectPath)
     $commit=(& git -C $root rev-parse HEAD 2>$null).Trim();if($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$'){throw 'Trusted build source commit could not be resolved.'}
     $excluded=@('\\QaLaunchAgent\\','\\QaLaunchAgent.ProtocolInteropTests\\','\\bin\\','\\obj\\')
-    $dirty=@(& git -C $root status --porcelain --untracked-files=all 2>$null);if($LASTEXITCODE -ne 0){throw 'Build input cleanliness could not be established.'}
+    $oldErrorAction=$ErrorActionPreference;$ErrorActionPreference='Continue';try{$statusOutput=@(& git -C $root status --porcelain --untracked-files=all 2>&1);$statusExit=$LASTEXITCODE}finally{$ErrorActionPreference=$oldErrorAction};if($statusExit -ne 0){throw 'Build input cleanliness could not be established.'}
+    $diagnostics=@($statusOutput|Where-Object {[string]$_ -notmatch '^[ MADRCU?!]{2}\s'});foreach($diagnostic in $diagnostics){if([string]$diagnostic -notmatch '(?i)warning:\s+could not open directory .*QA[/\\]Quarantine[/\\].*Permission denied'){throw 'Build input cleanliness could not be established.'}}
+    $dirty=@($statusOutput|Where-Object {[string]$_ -match '^[ MADRCU?!]{2}\s'})
     $inputs=@($dirty|ForEach-Object { $line=[string]$_;if($line.Length -lt 4){return};$path=$line.Substring(3).Trim('"');if($path -match ' -> '){$path=($path -split ' -> ')[-1]};$full=[IO.Path]::GetFullPath((Join-Path $root $path));$isExcluded=$false;foreach($x in $excluded){if($full -match [regex]::Escape($x)){$isExcluded=$true;break}};if(!$isExcluded -and $full -match '(?i)\.(cs|csproj|props|targets|resx)$|(?i)(^|\\)Directory\.Build\.(props|targets)$'){$full}})
     if($inputs.Count){throw ('Dirty build inputs prevent source-commit binding: '+($inputs -join '; '))}
     $commit
