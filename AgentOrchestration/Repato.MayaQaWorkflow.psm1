@@ -803,6 +803,7 @@ function Invoke-MayaQaIntake {
         [string]$SourceBranch = 'current',
 
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
+        [object]$AuthenticatedBuildSource,
 
         [switch]$DryRun
     )
@@ -814,6 +815,7 @@ function Invoke-MayaQaIntake {
     if ([string]::IsNullOrWhiteSpace($ProjectPath)) {
         $ProjectPath = 'Forma.RevitConnector.csproj'
     }
+    if ($AuthenticatedBuildSource) { $null = Resolve-MayaQaAuthenticatedBuildSource $AuthenticatedBuildSource }
 
     if ([string]::IsNullOrWhiteSpace($UserRequest)) {
         $UserRequest = "Please run QA workflow $QaWorkflowId"
@@ -885,6 +887,7 @@ function Invoke-MayaQaIntake {
                 BuildRequestId = $requestId
                 SourceBranch = $SourceBranch
                 ProjectPath = $ProjectPath
+                AuthenticatedBuildSource = $AuthenticatedBuildSource
                 RequestedArtifact = $requestedArtifact
                 BuildStatus = 'requested'
                 RequestedUtc = (Get-Date).ToUniversalTime().ToString('O')
@@ -903,6 +906,7 @@ function Invoke-MayaQaIntake {
         BuildStatus = 'requested'
         SourceBranch = $SourceBranch
         ProjectPath = $ProjectPath
+        AuthenticatedBuildSource = $AuthenticatedBuildSource
         RequestedArtifact = $requestedArtifact
         WorkflowRevision = $mutation.Workflow.workflowRevision
         TaskRevision = $mutation.TaskRevision
@@ -938,7 +942,7 @@ function Resolve-MayaQaRequestWorkflow {
 function Invoke-MayaQaRequest {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,
-        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[switch]$StageFrozenCandidateForQa,[switch]$ValidateExistingDeployment,[scriptblock]$QaStagingInvoker,[scriptblock]$DeploymentValidationInvoker,[switch]$DryRun)
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,[switch]$StageFrozenCandidateForQa,[switch]$ValidateExistingDeployment,[scriptblock]$QaStagingInvoker,[scriptblock]$DeploymentValidationInvoker,[switch]$DryRun)
     $qaId=Resolve-MayaQaRequestWorkflow $UserRequest
     $def=Get-MayaQaWorkflowDefinition $qaId
     $qaStaging=$null
@@ -960,7 +964,7 @@ function Invoke-MayaQaRequest {
         $created=New-DeployWorkflow $StoreRoot $plan; $workflowId=$created.workflowId
     }
     $intake=Invoke-MayaQaIntake $taskId $workflowId $qaId $UserRequest
-    $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath
+    $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -AuthenticatedBuildSource $AuthenticatedBuildSource
     $deploymentEvidence=$null
     if($ArtifactMode -ceq 'FrozenCandidate'){
         $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -DeploymentEvidence $deploymentEvidence
@@ -1014,7 +1018,7 @@ function Invoke-MayaQaCanonicalTransaction {
         [string]$SourceBranch = 'current',
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',
-        [string]$CandidateDirectory,[string]$CandidateDllPath,[string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,
+        [string]$CandidateDirectory,[string]$CandidateDllPath,[string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,
         [switch]$StageFrozenCandidateForQa,
         [scriptblock]$RequestInvoker,
         [scriptblock]$ExecutionRecordInvoker,
@@ -1028,7 +1032,7 @@ function Invoke-MayaQaCanonicalTransaction {
     if ($RequestInvoker) {
         $request = & $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath
     } else {
-        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -StageFrozenCandidateForQa:$StageFrozenCandidateForQa
+        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -AuthenticatedBuildSource $AuthenticatedBuildSource -StageFrozenCandidateForQa:$StageFrozenCandidateForQa
     }
     if (!$request -or $request.Stage -notin @('handoff-ready','execution-ready')) {
         throw 'Canonical transaction requires an approved Tara handoff.'
@@ -1089,7 +1093,7 @@ function Invoke-MayaQaSingleCanonicalAttempt {
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode = 'Build',
         [string]$CandidateDirectory,[string]$CandidateDllPath,
-        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,
         [switch]$StageFrozenCandidateForQa,
         [scriptblock]$DeploymentValidationInvoker,
         [scriptblock]$RequestInvoker,[scriptblock]$ApprovalInvoker,
@@ -1098,7 +1102,7 @@ function Invoke-MayaQaSingleCanonicalAttempt {
     )
     if($ApprovalDecision -eq 'approve' -and [string]::IsNullOrWhiteSpace($ApprovalReason)){throw 'Approval reason is required.'}
     $request = if($RequestInvoker){& $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath}else{
-        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -ValidateExistingDeployment:($ArtifactMode -ceq 'FrozenCandidate') -DeploymentValidationInvoker $DeploymentValidationInvoker -DryRun:$DryRun
+        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -AuthenticatedBuildSource $AuthenticatedBuildSource -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -ValidateExistingDeployment:($ArtifactMode -ceq 'FrozenCandidate') -DeploymentValidationInvoker $DeploymentValidationInvoker -DryRun:$DryRun
     }
     if(!$request){throw 'Canonical request returned no result.'}
     if($request.Stage -eq 'handoff-ready' -or $request.Stage -eq 'execution-ready'){throw 'Single-attempt wrapper received an already-prepared request; refusing to risk reuse.'}
@@ -1116,7 +1120,7 @@ function Invoke-MayaQaSingleCanonicalAttempt {
     [pscustomobject]@{Success=$true;Stage='native-started';TaskId=$request.TaskId;WorkflowId=$request.WorkflowId;QaWorkflowId=$request.QaWorkflowId;RunId=$request.RunId;AttemptId=$canonical.Attempt.AttemptId;ClaimId=$tx.Claim.ClaimId;Approval=$approval;Preparation=$canonical;Transaction=$tx;NativeRequestCount=1;ReplacementAttemptCreated=$false;Error=$null}
 }
 function Invoke-MayaQaBuildExecute {
-    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[string]$SourceBranch='current',[string]$ProjectPath='Forma.RevitConnector.csproj',[switch]$DryRun)
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[string]$SourceBranch='current',[string]$ProjectPath='Forma.RevitConnector.csproj',[object]$AuthenticatedBuildSource,[scriptblock]$BuildProcessRunner,[switch]$DryRun)
     $QaWorkflowId = Resolve-MayaQaWorkflowId $QaWorkflowId
     if ([string]::IsNullOrWhiteSpace($SourceBranch)) { $SourceBranch = 'current' }
     if ([string]::IsNullOrWhiteSpace($ProjectPath)) { $ProjectPath = 'Forma.RevitConnector.csproj' }
@@ -1132,10 +1136,13 @@ function Invoke-MayaQaBuildExecute {
         if([IO.Path]::IsPathRooted($clean)){[IO.Path]::GetFullPath($clean)}else{[IO.Path]::GetFullPath((Join-Path $Base $clean))}
     }
     $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    if ($workflow.qaBuildRequest.PSObject.Properties.Name -contains 'AuthenticatedBuildSource' -and $workflow.qaBuildRequest.AuthenticatedBuildSource) { $AuthenticatedBuildSource = $workflow.qaBuildRequest.AuthenticatedBuildSource }
+    $sourceBoundary = Resolve-MayaQaAuthenticatedBuildSource $AuthenticatedBuildSource
+    $root = $sourceBoundary.RepositoryRoot
     $persistedProject = & $normalize ([string]$workflow.qaBuildRequest.ProjectPath) $root
     $requestedProjectInput = & $normalize $ProjectPath $root
     if ($workflow.qaBuildRequest.SourceBranch -cne $SourceBranch -or $persistedProject -ine $requestedProjectInput) { throw 'Build request parameters do not match the persisted request.' }
-    $project = [IO.Path]::GetFullPath((Join-Path $root 'Forma.RevitConnector.csproj'))
+    $project = $sourceBoundary.ProjectPath
     if ($persistedProject -ine $project -or !(Test-Path -LiteralPath $persistedProject -PathType Leaf)) { throw 'Normalized project path is missing or outside the approved workspace.' }
     $artifact = [IO.Path]::GetFullPath((Join-Path $root 'bin\Release\net8.0-windows\Repato.Revit.dll'))
     $artifactManifest = [IO.Path]::GetFullPath((Join-Path $root 'Repato.addin'))
@@ -1145,8 +1152,9 @@ function Invoke-MayaQaBuildExecute {
     $command = 'dotnet build "' + $project + '" -c Release -p:RevitInstallDir="E:\revit\Revit 2025"'
     if ($DryRun) { return [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus='planned';Command=$command;Configuration='Release';ArtifactPath=$artifact;SideEffectsPerformed=$false} }
     $started = (Get-Date).ToUniversalTime().ToString('O')
-    Push-Location $root
-    try { $lines = @(& dotnet build $project -c Release '-p:RevitInstallDir=E:\revit\Revit 2025' 2>&1); $exit = $LASTEXITCODE } finally { Pop-Location }
+    if($BuildProcessRunner){$processResult=& $BuildProcessRunner $project $root}else{Push-Location $root;try{$processResult=[pscustomobject]@{Lines=@(& dotnet build $project -c Release '-p:RevitInstallDir=E:\revit\Revit 2025' 2>&1);ExitCode=$LASTEXITCODE}}finally{Pop-Location}}
+    if(!$processResult -or $processResult.PSObject.Properties.Name -notcontains 'Lines' -or $processResult.PSObject.Properties.Name -notcontains 'ExitCode'){throw 'Build process runner returned an invalid result.'}
+    $lines=@($processResult.Lines);$exit=[int]$processResult.ExitCode
     $finished = (Get-Date).ToUniversalTime().ToString('O')
     # Count compiler/MSBuild diagnostics only. Summary text such as "0 Error(s)" is not an error diagnostic.
     $warningLines = @($lines | Where-Object { [string]$_ -match '(?i):\s*warning\s+[A-Z]+\d+\b' })
@@ -1178,6 +1186,27 @@ function Get-MayaQaTrustedBuildSourceCommit {
     $inputs=@($dirty|ForEach-Object { $line=[string]$_;if($line.Length -lt 4){return};$path=$line.Substring(3).Trim('"');if($path -match ' -> '){$path=($path -split ' -> ')[-1]};$full=[IO.Path]::GetFullPath((Join-Path $root $path));$isExcluded=$false;foreach($x in $excluded){if($full -match [regex]::Escape($x)){$isExcluded=$true;break}};if(!$isExcluded -and $full -match '(?i)\.(cs|csproj|props|targets|resx)$|(?i)(^|\\)Directory\.Build\.(props|targets)$'){$full}})
     if($inputs.Count){throw ('Dirty build inputs prevent source-commit binding: '+($inputs -join '; '))}
     $commit
+}
+
+function Resolve-MayaQaAuthenticatedBuildSource {
+    param([object]$AuthenticatedBuildSource)
+    $primary=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    if($null -eq $AuthenticatedBuildSource){return [pscustomobject]@{RepositoryRoot=$primary;ProjectPath=[IO.Path]::GetFullPath((Join-Path $primary 'Forma.RevitConnector.csproj'));ExpectedSourceCommit=$null;Isolated=$false}}
+    foreach($n in 'RepositoryRoot','ExpectedSourceCommit','ProjectRelativePath'){
+        if($AuthenticatedBuildSource.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$AuthenticatedBuildSource.$n)){throw "AuthenticatedBuildSource is missing $n."}
+    }
+    $root=[IO.Path]::GetFullPath([string]$AuthenticatedBuildSource.RepositoryRoot);$approved=[IO.Path]::GetFullPath('C:\Repato-Autonomous\Worktrees').TrimEnd('\')+'\'
+    if(!$root.StartsWith($approved,[StringComparison]::OrdinalIgnoreCase)){throw 'Authenticated build source is outside the approved worktree root.'}
+    if([string]$AuthenticatedBuildSource.ExpectedSourceCommit -notmatch '^[0-9a-fA-F]{40}$'){throw 'Authenticated build source commit must be a 40-character SHA.'}
+    if(!(Test-Path -LiteralPath $root -PathType Container)){throw 'Authenticated build source worktree is missing.'}
+    $cursor=$root;while($cursor -and $cursor -ne [IO.Path]::GetPathRoot($cursor).TrimEnd('\')){if((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Authenticated build source contains a reparse point.'};$cursor=[IO.Path]::GetDirectoryName($cursor)}
+    $top=(& git -C $root rev-parse --show-toplevel 2>$null).Trim();if($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($top) -ine $root){throw 'Authenticated build source is not a Git worktree.'}
+    $common=(& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null).Trim();$primaryGit=[IO.Path]::GetFullPath((Join-Path $primary '.git'));if($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($common) -ine $primaryGit){throw 'Authenticated build source belongs to another repository.'}
+    $head=(& git -C $root rev-parse HEAD 2>$null).Trim();if($LASTEXITCODE -ne 0 -or $head -ine [string]$AuthenticatedBuildSource.ExpectedSourceCommit){throw 'Authenticated build source HEAD does not match the requested commit.'}
+    $projectRel=([string]$AuthenticatedBuildSource.ProjectRelativePath).TrimStart('\','/');if([IO.Path]::IsPathRooted($projectRel) -or $projectRel -match '(^|[\\/])\.\.([\\/]|$)'){throw 'Authenticated project path must remain relative to the worktree.'}
+    $project=[IO.Path]::GetFullPath((Join-Path $root $projectRel));$prefix=$root.TrimEnd('\')+'\';if(!$project.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $project -PathType Leaf)){throw 'Authenticated project path is outside or missing from the worktree.'}
+    if((Get-Item -LiteralPath $project -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Authenticated project path is a reparse point.'}
+    [pscustomobject]@{RepositoryRoot=$root;ProjectPath=$project;ExpectedSourceCommit=[string]$AuthenticatedBuildSource.ExpectedSourceCommit;Isolated=$true}
 }
 
 function Test-MayaQaFrozenCandidate {
@@ -1966,7 +1995,7 @@ Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup
 Export-ModuleMember -Function Complete-MayaQaPreparedAttemptCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
 Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
-Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit
+Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit,Resolve-MayaQaAuthenticatedBuildSource
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
 
 function Accept-MayaQaLegacyManifestAttestation {

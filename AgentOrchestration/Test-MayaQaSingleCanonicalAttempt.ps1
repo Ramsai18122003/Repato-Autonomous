@@ -1,70 +1,33 @@
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force
-
-$root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$storeRoot=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('maya-single-attempt-'+[guid]::NewGuid().ToString('N'))))
-$qaRuns=[IO.Path]::GetFullPath((Join-Path $root 'QA\TestRuns'))
-$before=@(Get-ChildItem -LiteralPath $qaRuns -Force -ErrorAction SilentlyContinue|Select-Object -ExpandProperty FullName)
-$fixture=Join-Path $root 'QA\Fixtures\CreatePlanViewsEmpty.rvt'
-$candidateDir=Join-Path $root 'DeploymentCandidates\AgentBuilds\ReleaseCandidate-fcf624ee3ed1'
-$candidateDll=Join-Path $candidateDir 'Repato.Revit.dll'
-$fixtureHash=(Get-FileHash $fixture -Algorithm SHA256).Hash
-$candidateHash=(Get-FileHash $candidateDll -Algorithm SHA256).Hash
-$manifestPath='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin'
-$manifestHash='AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F'
-$candidateExpected='7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2'
-if($candidateHash -ine $candidateExpected){throw 'Frozen candidate precondition hash mismatch.'}
-$results=[Collections.Generic.List[object]]::new();$syntheticIds=[Collections.Generic.List[string]]::new()
-
-function Invoke-BoundaryCase {
- param([string]$Name,[object]$Validation)
- $caseStore=Join-Path $storeRoot $Name;New-Item -ItemType Directory -Path $caseStore -Force|Out-Null
- $injectedValidation=$Validation
- $validationInvoker={param($commit,$hash,$qa,$test)$callState.Count++|Out-Null;$injectedValidation}.GetNewClosure()
- if($Name -eq 'positive'){
-  if($Validation.GetType().FullName -ne 'System.Management.Automation.PSCustomObject' -or @($Validation).Count -ne 1){throw "Positive validation fixture is not a scalar PSCustomObject: type=$($Validation.GetType().FullName); count=$(@($Validation).Count)"}
-  foreach($property in @('runnerManifestPath','runnerManifestSha256','succeeded','isolationPassed','manifestIntegrityEvidenceAvailable','manifestIntegrityPassed')){if($Validation.PSObject.Properties.Name -notcontains $property){throw "Positive validation fixture is missing $property."}}
-  $direct=@(& $validationInvoker fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3 7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2 create-plan-views-v1 create-plan-views-v1)
-  if($direct.Count -ne 1 -or $direct[0].GetType().FullName -ne 'System.Management.Automation.PSCustomObject'){throw 'Positive validation closure did not return exactly one PSCustomObject.'}
-  foreach($property in @('runnerManifestPath','runnerManifestSha256','succeeded','isolationPassed','manifestIntegrityEvidenceAvailable','manifestIntegrityPassed')){if($direct[0].PSObject.Properties.Name -notcontains $property){throw "Positive closure result is missing $property."}}
-  $callState.Count=0
- }
- $beforeTasks=0;$attempt=$null;$claim=$null;$native=0;$revit=0;$handoff=$null;$request=$null;$error=$null
- try {
-  $request=Invoke-MayaQaRequest -StoreRoot $caseStore -UserRequest 'Create Plan Views' -ArtifactMode FrozenCandidate -CandidateDirectory $candidateDir -CandidateDllPath $candidateDll -ExpectedCandidateSha256 $candidateExpected -ExpectedCandidateSourceCommit 'fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3' -ValidateExistingDeployment -DeploymentValidationInvoker $validationInvoker
-  if($request.Stage -ne 'approval-required'){throw 'Expected approval-required result.'}
-  $taskData=Read-RepatoTaskStore $caseStore;$task=Find-RepatoTask $taskData $request.TaskId
-  $beforeTasks=@($taskData.tasks).Count
-  if($Name -eq 'positive'){$null=Resolve-RepatoTaskApproval $caseStore $request.TaskId approve user 'synthetic approval';$handoff=New-MayaQaCanonicalPreparation -StoreRoot $caseStore -TaskId $request.TaskId -WorkflowId $request.WorkflowId -QaWorkflowId $request.QaWorkflowId;$attempt=$handoff.Attempt.AttemptId;$claim='not-claimed';$native=0;if($handoff.Handoff.RunnerManifestPath -cne $manifestPath -or $handoff.Handoff.RunnerManifestSha256 -cne $manifestHash){throw 'Validated manifest evidence did not reach the real handoff.'};$persisted=(Read-RepatoTaskStore $caseStore).tasks[0].mayaTaraAttempt;if($persisted.QaWorkflowId -cne $request.QaWorkflowId){throw 'Canonical persisted attempt did not retain QaWorkflowId.'}}
- } catch {$error=$_.Exception.Message}
- $d=Read-RepatoTaskStore $caseStore;$t=if(@($d.tasks).Count){@($d.tasks)[0]}else{$null};if($t){foreach($w in @($t.deploymentWorkflows)){if($w.PSObject.Properties.Name -contains 'qaModelPath' -and $w.qaModelPath){$syntheticRuntimePaths.Add([IO.Path]::GetDirectoryName([string]$w.qaModelPath))|Out-Null}}};if($t -and $t.PSObject.Properties.Name -contains 'mayaTaraAttempt'){$attempt=$t.mayaTaraAttempt.AttemptId};if($t -and $t.PSObject.Properties.Name -contains 'mayaTaraExecution'){$claim=$t.mayaTaraExecution.ClaimId}
- [pscustomobject]@{Name=$Name;Request=$request;Handoff=$handoff;Attempt=$attempt;Claim=$claim;Native=$native;Revit=$revit;Error=$error;TaskCount=@($d.tasks).Count;Store=$caseStore}
+$root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$passed=0
+function Check([bool]$ok,[string]$name){if(!$ok){throw "FAILED: $name"};$script:passed++}
+function Reject([scriptblock]$x,[string]$name){$ok=$false;try{&$x|Out-Null}catch{$ok=$true};Check $ok $name}
+function New-Case {
+ param([string]$Store,[string]$Worktree,[string]$Candidate,[string]$Commit,[object]$DeploymentEvidence)
+ New-Item $Candidate -ItemType Directory -Force|Out-Null
+ & git -C $root worktree add --detach $Worktree $Commit|Out-Null
+ $dll=Join-Path $Candidate 'Repato.Revit.dll';$addin=Join-Path $Candidate 'Repato.addin';[IO.File]::WriteAllText($dll,'single canonical synthetic artifact');Set-Content $addin '<RevitAddIns></RevitAddIns>'
+ $hash=(Get-FileHash $dll).Hash;$mh=(Get-FileHash $addin).Hash;@{CandidateType='SyntheticReleaseCandidate';SourceCommit=$Commit;FrozenArtifactSha256=$hash;ManifestSha256=$mh;SupportedQaWorkflows=@('create-plan-views-v1')}|ConvertTo-Json|Set-Content (Join-Path $Candidate 'release-manifest.json')
+ $source=[pscustomobject]@{RepositoryRoot=$Worktree;ExpectedSourceCommit=$Commit;ProjectRelativePath='Forma.RevitConnector.csproj'}
+ $b=New-MayaQaBootstrap -StoreRoot $Store -QaWorkflowId create-plan-views-v1 -RunId ('run-'+[guid]::NewGuid().ToString('N'))
+ $null=New-MayaQaBuildRequest -StoreRoot $Store -TaskId $b.TaskId -WorkflowId $b.WorkflowId -QaWorkflowId create-plan-views-v1 -UserRequest 'Create Plan Views' -SourceBranch current -ProjectPath 'Forma.RevitConnector.csproj' -AuthenticatedBuildSource $source
+ $runner={param($project,$buildRoot) $out=Join-Path $buildRoot 'bin\Release\net8.0-windows';New-Item $out -ItemType Directory -Force|Out-Null;Copy-Item $dll (Join-Path $out 'Repato.Revit.dll');Set-Content (Join-Path $buildRoot 'Repato.addin') '<RevitAddIns></RevitAddIns>';[pscustomobject]@{Lines=@('synthetic build');ExitCode=0}}.GetNewClosure()
+ $null=Invoke-MayaQaBuildExecute -StoreRoot $Store -TaskId $b.TaskId -WorkflowId $b.WorkflowId -QaWorkflowId create-plan-views-v1 -SourceBranch current -ProjectPath 'Forma.RevitConnector.csproj' -AuthenticatedBuildSource $source -BuildProcessRunner $runner
+ $null=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $Store -TaskId $b.TaskId -WorkflowId $b.WorkflowId -QaWorkflowId create-plan-views-v1 -CandidateDirectory $Candidate -ExpectedSha256 $hash -ExpectedSourceCommit $Commit -DeploymentEvidence $DeploymentEvidence
+ [pscustomobject]@{Bootstrap=$b;Hash=$hash;CandidateHash=(Get-FileHash $dll).Hash}
 }
-
-$callState=[pscustomobject]@{Count=0}
-$syntheticRuntimePaths=[Collections.Generic.List[string]]::new()
-$valid=[pscustomobject]@{succeeded=$true;validationIdentity='RAMSAI\RepatoQA';qaWorkflowId='create-plan-views-v1';testId='create-plan-views-v1';candidateSha256=$candidateExpected;isolationPassed=$true;qaAddinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA';runnerManifestPath=$manifestPath;runnerManifestSha256=$manifestHash;manifestIntegrityEvidenceAvailable=$true;manifestIntegrityPassed=$true;Isolation=[pscustomobject]@{PolicyPath='C:\synthetic\MachineWideAddins.allowlist.json';PolicySha256=('a'*64);Allowed=$true}}
-$missing=[pscustomobject]@{succeeded=$true;candidateSha256=$candidateExpected;isolationPassed=$true}
-$wrongPath=[pscustomobject]@{succeeded=$true;candidateSha256=$candidateExpected;isolationPassed=$true;qaAddinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA';runnerManifestPath='C:\wrong.addin';runnerManifestSha256=$manifestHash;manifestIntegrityEvidenceAvailable=$true;manifestIntegrityPassed=$true}
-$wrongHash=[pscustomobject]@{succeeded=$true;candidateSha256=$candidateExpected;isolationPassed=$true;qaAddinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA';runnerManifestPath=$manifestPath;runnerManifestSha256=('0'*64);manifestIntegrityEvidenceAvailable=$true;manifestIntegrityPassed=$true}
-$validationFailure=[pscustomobject]@{succeeded=$false;errorCode='synthetic-validation-failure'}
-$cases=@(
- Invoke-BoundaryCase -Name 'positive' -Validation $valid
- Invoke-BoundaryCase -Name 'missing' -Validation $missing
- Invoke-BoundaryCase -Name 'wrong-path' -Validation $wrongPath
- Invoke-BoundaryCase -Name 'wrong-hash' -Validation $wrongHash
- Invoke-BoundaryCase -Name 'validation-failure' -Validation $validationFailure
-)
-$positive=$cases|? Name -eq positive
-if(!$positive.Attempt){throw "Positive case did not create canonical attempt: $($positive.Error)"}
-if($callState.Count -ne 5){throw "Expected five injected validation calls, got $($callState.Count)"}
-foreach($bad in @($cases|? Name -ne positive)){if($bad.Attempt -or $bad.Claim -or $bad.Native -ne 0 -or $bad.Revit -ne 0){throw "Negative case crossed execution boundary: $($bad.Name)"}}
-$new=@(Get-ChildItem -LiteralPath $qaRuns -Force -ErrorAction SilentlyContinue|? {$before -notcontains $_.FullName})
-foreach($path in @($syntheticRuntimePaths|Select-Object -Unique)){if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Recurse -Force}}
-$unowned=@($new|? {$syntheticRuntimePaths -notcontains $_.FullName});foreach($item in $unowned){throw "Unowned synthetic runtime artifact: $($item.FullName)"}
-$after=@(Get-ChildItem -LiteralPath $qaRuns -Force -ErrorAction SilentlyContinue|Select-Object -ExpandProperty FullName)
-if((Compare-Object $before $after).Count){throw 'Pre-existing QA TestRuns inventory changed.'}
-if((Get-FileHash $fixture -Algorithm SHA256).Hash -ine $fixtureHash){throw 'Fixture hash changed.'}
-if((Get-FileHash $candidateDll -Algorithm SHA256).Hash -ine $candidateHash){throw 'Candidate hash changed.'}
-Write-Output 'Real frozen-candidate evidence/handoff boundary synthetic checks passed: positive + 4 negative cases'
+$beforeRuns=@(Get-ChildItem (Join-Path $root 'QA\TestRuns') -Force -ErrorAction SilentlyContinue|% FullName);$fixture=Join-Path $root 'QA\Fixtures\CreatePlanViewsEmpty.rvt';$fixtureHash=(Get-FileHash $fixture).Hash
+$runnerPath='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$runnerHash='AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F';$valid=[pscustomobject]@{succeeded=$true;runnerManifestPath=$runnerPath;runnerManifestSha256=$runnerHash;qaAddinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA';isolationPassed=$true;manifestIntegrityEvidenceAvailable=$true;manifestIntegrityPassed=$true}
+$store=Join-Path ([IO.Path]::GetTempPath()) ('maya-single-attempt-'+[guid]::NewGuid().ToString('N'));$worktree=Join-Path 'C:\Repato-Autonomous\Worktrees' ('test-'+[guid]::NewGuid().ToString('N'));$candidate=Join-Path $store 'candidate';$negativeStores=[Collections.Generic.List[string]]::new();$commit=(& git -C $root rev-parse HEAD).Trim();$candidateHash=$null
+try {
+ $case=New-Case $store $worktree $candidate $commit $valid;$candidateHash=$case.CandidateHash;$b=$case.Bootstrap
+ $d=Read-RepatoTaskStore $store;$t=Find-RepatoTask $d $b.TaskId;$w=@($t.deploymentWorkflows|Where-Object workflowId -eq $b.WorkflowId)[0]
+ Check ($w.qaBuildEvidence.SourceCommit -ceq $commit) 'source-bound Neil evidence persisted';Check ($w.qaBuildEvidence.RunnerManifestPath -eq $runnerPath) 'runner manifest path persisted';Check ($w.qaBuildEvidence.RunnerManifestSha256 -eq $runnerHash) 'runner manifest hash persisted';Check ($w.qaBuildEvidence.DeploymentValidation) 'deployment validation persisted';Check ($w.qaBuildEvidence.ManifestIntegrityValidation) 'manifest integrity persisted';Check ($w.qaBuildEvidence.QaIsolation) 'isolation persisted'
+ $run=New-MayaQaRun -StoreRoot $store -TaskId $b.TaskId -WorkflowId $b.WorkflowId -QaWorkflowId create-plan-views-v1 -RunId $b.RunId;$prep=New-MayaQaCanonicalPreparation -StoreRoot $store -TaskId $b.TaskId -WorkflowId $b.WorkflowId -QaWorkflowId create-plan-views-v1;$t=Find-RepatoTask (Read-RepatoTaskStore $store) $b.TaskId
+ Check ($prep.Attempt.AttemptId -eq $t.mayaTaraAttempt.AttemptId) 'approval-to-handoff attempt linkage';Check (@($t.mayaTaraAttempt).Count -eq 1) 'exactly one canonical attempt';Check ($prep.Handoff.RunnerManifestPath -eq $runnerPath) 'handoff runner manifest path';Check ($prep.Handoff.RunnerManifestSha256 -eq $runnerHash) 'handoff runner manifest hash';Check ($t.mayaTaraAttempt.QaWorkflowId -eq 'create-plan-views-v1') 'persisted QA workflow identity';Reject {New-MayaQaCanonicalPreparation -StoreRoot $store -TaskId $b.TaskId -WorkflowId $b.WorkflowId -QaWorkflowId create-plan-views-v1} 'duplicate canonical attempt rejected'
+ $negative=@([pscustomobject]@{Name='missing';Evidence=[pscustomobject]@{succeeded=$true;isolationPassed=$true}};[pscustomobject]@{Name='wrong-path';Evidence=[pscustomobject]@{succeeded=$true;runnerManifestPath='C:\wrong.addin';runnerManifestSha256=$runnerHash;qaAddinRoot=$valid.qaAddinRoot;isolationPassed=$true;manifestIntegrityEvidenceAvailable=$true;manifestIntegrityPassed=$true}};[pscustomobject]@{Name='wrong-hash';Evidence=[pscustomobject]@{succeeded=$true;runnerManifestPath=$runnerPath;runnerManifestSha256=('0'*64);qaAddinRoot=$valid.qaAddinRoot;isolationPassed=$true;manifestIntegrityEvidenceAvailable=$true;manifestIntegrityPassed=$true}};[pscustomobject]@{Name='validation-failure';Evidence=[pscustomobject]@{succeeded=$false;errorCode='synthetic-validation-failure'}})
+ foreach($n in $negative){$s=Join-Path ([IO.Path]::GetTempPath()) ('maya-single-negative-'+[guid]::NewGuid().ToString('N'));$negativeStores.Add($s)|Out-Null;$wt=Join-Path 'C:\Repato-Autonomous\Worktrees' ('test-'+[guid]::NewGuid().ToString('N'));$c=Join-Path $s 'candidate';try{$x=New-Case $s $wt $c $commit $valid;Reject {Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $s -TaskId $x.Bootstrap.TaskId -WorkflowId $x.Bootstrap.WorkflowId -QaWorkflowId create-plan-views-v1 -CandidateDirectory $c -ExpectedSha256 $x.Hash -ExpectedSourceCommit $commit -DeploymentEvidence $n.Evidence} "$($n.Name) validation rejected";$nt=Find-RepatoTask (Read-RepatoTaskStore $s) $x.Bootstrap.TaskId;Check (-not ($nt.PSObject.Properties.Name -contains 'mayaTaraAttempt')) "$($n.Name) no Tara attempt";Check (-not ($nt.PSObject.Properties.Name -contains 'mayaTaraExecution')) "$($n.Name) no native claim"}finally{if(Test-Path $wt){& git -C $root worktree remove --force $wt 2>$null|Out-Null};Remove-Item $s -Recurse -Force -ErrorAction SilentlyContinue}}
+ Check ((Get-FileHash $fixture).Hash -ceq $fixtureHash) 'fixture immutable';Check ((Get-FileHash (Join-Path $candidate 'Repato.Revit.dll')).Hash -ceq $candidateHash) 'candidate immutable';$afterRuns=@(Get-ChildItem (Join-Path $root 'QA\TestRuns') -Force -ErrorAction SilentlyContinue|% FullName);$newRuns=@($afterRuns|Where-Object{$beforeRuns -notcontains $_});foreach($r in $newRuns){Remove-Item $r -Recurse -Force -ErrorAction SilentlyContinue};$afterRuns=@(Get-ChildItem (Join-Path $root 'QA\TestRuns') -Force -ErrorAction SilentlyContinue|% FullName);Check ((Compare-Object $beforeRuns $afterRuns).Count -eq 0) 'QA TestRuns inventory stable';[pscustomobject]@{Status='PASS';AssertionsPassed=$passed;AssertionsFailed=0;AttemptCount=1;NativeRequestCount=0;RevitLaunched=$false}|ConvertTo-Json -Compress
+}finally{if(Test-Path $worktree){& git -C $root worktree remove --force $worktree 2>$null|Out-Null};Remove-Item $store -Recurse -Force -ErrorAction SilentlyContinue;foreach($s in $negativeStores){Remove-Item $s -Recurse -Force -ErrorAction SilentlyContinue}}
