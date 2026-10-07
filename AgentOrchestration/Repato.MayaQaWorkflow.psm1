@@ -962,6 +962,61 @@ function New-MayaQaRequestFoundation {
     $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflow.workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -AuthenticatedBuildSource $AuthenticatedBuildSource
     [pscustomobject]@{TaskId=$taskId;WorkflowId=$workflow.workflowId;QaWorkflowId=$qaId;NativeTestId=(Get-MayaQaNativeTestId $def);Intake=$intake;BuildRequest=$buildRequest}
 }
+function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$TestId,
+        [Parameter(Mandatory)][string]$ExpectedBuildRequestId,
+        [Parameter(Mandatory)][string]$ExpectedCandidateSourceCommit,
+        [Parameter(Mandatory)][string]$ExpectedCandidateSha256,
+        [Parameter(Mandatory)][string]$ExpectedRunnerManifestPath,
+        [Parameter(Mandatory)][string]$ExpectedRunnerManifestSha256,
+        [scriptblock]$HealthInvoker,
+        [scriptblock]$PreflightInvoker,
+        [scriptblock]$StagingInvoker,
+        [scriptblock]$DeploymentValidationInvoker,
+        [scriptblock]$PersistenceInvoker,
+        [scriptblock]$RevitProcessProvider
+    )
+    $state={
+        $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+        if(!$task){throw 'Canonical task was not found.'}
+        $workflows=@($task.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId)
+        if($workflows.Count -ne 1 -or $workflows[0].taskId -cne $TaskId){throw 'Canonical task/workflow identity mismatch.'}
+        [pscustomobject]@{Task=$task;Workflow=$workflows[0]}
+    }
+    $s=& $state;$w=$s.Workflow;$e=$w.qaBuildEvidence
+    if($w.qaBuildStatus -cne 'succeeded'){throw 'Authenticated build status is not succeeded.'}
+    if(!$e -or $e.BuildRequestId -cne $ExpectedBuildRequestId -or $e.SourceCommit -cne $ExpectedCandidateSourceCommit -or $e.CandidateSourceCommit -cne $ExpectedCandidateSourceCommit){throw 'Authenticated build evidence identity is invalid.'}
+    if($e.EvidenceSource -cne 'FrozenCandidate' -or [string]::IsNullOrWhiteSpace([string]$e.CandidateProvenancePath)){throw 'Frozen candidate evidence is missing or not adopted.'}
+    if($e.ArtifactSha256 -ine $ExpectedCandidateSha256){throw 'Frozen candidate hash is invalid.'}
+    if($e.PSObject.Properties.Name -contains 'DeploymentValidation' -and $e.DeploymentValidation){throw 'Historical deployment validation evidence is already present.'}
+    $approval=@($s.Task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})
+    if($approval.Count -ne 1){throw 'QA approval is not exactly pending.'}
+    foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($s.Task.PSObject.Properties.Name -contains $n){throw 'Tara state already exists.'}}
+    $revit=if($RevitProcessProvider){@(& $RevitProcessProvider)}else{@(Get-Process Revit -ErrorAction SilentlyContinue)}
+    if(@($revit).Count){throw 'Revit is running.'}
+    $null=Resolve-MayaQaSourceRunnerManifestEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
+    $candidate=New-MayaQaPersistedCandidateEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
+    if($candidate.RunnerManifestPath -ine $ExpectedRunnerManifestPath -or $candidate.RunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Authenticated runner source evidence is invalid.'}
+    $health=if($HealthInvoker){& $HealthInvoker}else{Invoke-MayaQaLaunchAgentHealth}
+    if(!$health.Ready -or $health.User -ine 'RAMSAI\RepatoQA' -or $health.SID -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or [int]$health.SessionId -le 0 -or !$health.UserInteractive){throw 'Launch Agent health contract failed.'}
+    $pre=if($PreflightInvoker){& $PreflightInvoker}else{Invoke-MayaQaLaunchAgentPreflightReadonly}
+    if(!$pre.Succeeded -or $pre.ExecutionIdentity -ine 'RAMSAI\RepatoQA' -or [IO.Path]::GetFullPath($pre.RunnerManifestPath) -ine [IO.Path]::GetFullPath($ExpectedRunnerManifestPath) -or $pre.ExpectedRunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Launch Agent preflight contract failed.'}
+    $stage=if($StagingInvoker){& $StagingInvoker $candidate}else{Invoke-MayaQaLaunchAgentFrozenCandidateStaging -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateEvidence $candidate -TaskId $TaskId -WorkflowId $WorkflowId}
+    if(!$stage.succeeded -or $stage.candidateCommit -cne $ExpectedCandidateSourceCommit -or $stage.candidateSha256 -ine $ExpectedCandidateSha256 -or $stage.qaWorkflowId -cne $QaWorkflowId -or $stage.testId -cne $TestId -or !$stage.isolationPassed -or ($stage.PSObject.Properties.Name -contains 'taskId' -and $stage.taskId -cne $TaskId) -or ($stage.PSObject.Properties.Name -contains 'workflowId' -and $stage.workflowId -cne $WorkflowId)){throw 'Fresh staging response failed canonical validation.'}
+    $validation=if($DeploymentValidationInvoker){& $DeploymentValidationInvoker $candidate}else{Invoke-MayaQaLaunchAgentDeploymentValidation -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateEvidence $candidate -TaskId $TaskId -WorkflowId $WorkflowId}
+    if(!$validation.succeeded -or $validation.qaWorkflowId -cne $QaWorkflowId -or $validation.testId -cne $TestId -or $validation.candidateSha256 -ine $ExpectedCandidateSha256 -or !$validation.isolationPassed -or ($validation.PSObject.Properties.Name -contains 'taskId' -and $validation.taskId -cne $TaskId) -or ($validation.PSObject.Properties.Name -contains 'workflowId' -and $validation.workflowId -cne $WorkflowId) -or ($validation.PSObject.Properties.Name -contains 'runnerManifestPath' -and [IO.Path]::GetFullPath($validation.runnerManifestPath) -ine [IO.Path]::GetFullPath($ExpectedRunnerManifestPath)) -or ($validation.PSObject.Properties.Name -contains 'runnerManifestSha256' -and $validation.runnerManifestSha256 -ine $ExpectedRunnerManifestSha256)){throw 'Deployment validation response failed canonical validation.'}
+    $persisted=if($PersistenceInvoker){& $PersistenceInvoker $validation $candidate}else{Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -CandidateDirectory $e.CandidateDirectory -CandidateDllPath $e.ArtifactPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -DeploymentEvidence $validation}
+    $after=& $state;$afterE=$after.Workflow.qaBuildEvidence
+    if($afterE.BuildRequestId -cne $ExpectedBuildRequestId -or $afterE.CandidateSourceCommit -cne $ExpectedCandidateSourceCommit -or $afterE.ArtifactSha256 -ine $ExpectedCandidateSha256 -or !$afterE.DeploymentValidation -or @($after.Task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count -ne 1){throw 'Persisted deployment evidence failed canonical verification.'}
+    $revitAfter=if($RevitProcessProvider){@(& $RevitProcessProvider)}else{@(Get-Process Revit -ErrorAction SilentlyContinue)};if(@($revitAfter).Count){throw 'Revit started during boundary.'}
+    [pscustomobject]@{Succeeded=$true;TaskId=$TaskId;WorkflowId=$WorkflowId;BuildRequestId=$ExpectedBuildRequestId;QaWorkflowId=$QaWorkflowId;TestId=$TestId;CandidateSourceCommit=$ExpectedCandidateSourceCommit;CandidateSha256=$ExpectedCandidateSha256;RunnerManifestPath=$ExpectedRunnerManifestPath;RunnerManifestSha256=$ExpectedRunnerManifestSha256;Staging=$stage;DeploymentValidation=$validation;PersistedEvidence=$persisted;Approval='pending';TaraState='absent';RevitLaunched=$false;StoppedBeforeApproval=$true;StoppedBeforeTara=$true;StoppedBeforeRevit=$true}
+}
 
 function New-MayaQaPersistentPreBuildRequest {
     param(
@@ -2026,6 +2081,7 @@ Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
 Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup
 Export-ModuleMember -Function Complete-MayaQaPreparedAttemptCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
+Export-ModuleMember -Function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation
 Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit,Resolve-MayaQaAuthenticatedBuildSource
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
