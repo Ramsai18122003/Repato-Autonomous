@@ -56,6 +56,21 @@ function Get-TaraQaTrustConfiguration($QaAddinRoot,$QaRoot,$Inventory){
     $dllHash=Get-TaraSha256 (Join-Path $QaAddinRoot 'Repato.Revit.dll');$promptRecords=@();foreach($file in $installed){$match=$records|Where-Object Name -ceq $file.Name;if($null -eq $match){throw "Unexpected RepatoQA manifest installed: $($file.Name)"};$promptRecords+=[pscustomobject]@{ManifestName=$file.Name;ManifestPath=$file.FullName;ManifestSha256=$match.Sha256;DllPath=(Join-Path $QaAddinRoot 'Repato.Revit.dll');DllSha256=$dllHash;Approved=$true;PromptDetected=$false;PromptAction='Pending';Timestamp=(Get-Date).ToUniversalTime().ToString('O')}}
     [pscustomobject]@{Path=(Join-Path $QaAddinRoot 'RepatoQA.trust.json');ApprovedManifests=$records;PromptRecords=$promptRecords;PromptFree=$false;ProfileRoot=$QaAddinRoot;Diagnostic='Approved unsigned add-in prompt handler is required before Revit launch.'}
 }
+function Test-TaraLegacyDeploymentManifestCompatibility {
+    param([Parameter(Mandatory)]$Deployment,[Parameter(Mandatory)][string]$ExpectedCandidateSha256,[Parameter(Mandatory)][string]$ExpectedQaAddinRoot,[Parameter(Mandatory)][string]$ExpectedRunnerManifestPath,[Parameter(Mandatory)][string]$ExpectedRunnerManifestSha256)
+    $integrity=$Deployment.PSObject.Properties['manifestIntegrityPassed']
+    if($integrity -and $null -ne $integrity.Value){ return [bool]$integrity.Value }
+    $available=$Deployment.PSObject.Properties['manifestIntegrityEvidenceAvailable']
+    if($available -and [bool]$available.Value){ return $false }
+    if($Deployment.PSObject.Properties.Name -contains 'failureCode' -and -not [string]::IsNullOrWhiteSpace([string]$Deployment.failureCode)){ return $false }
+    if($Deployment.PSObject.Properties.Name -contains 'errorCode' -and -not [string]::IsNullOrWhiteSpace([string]$Deployment.errorCode)){ return $false }
+    foreach($name in 'succeeded','candidateSha256','isolationPassed','validationIdentity','qaAddinRoot','runnerManifestPath','runnerManifestSha256') { if($Deployment.PSObject.Properties.Name -notcontains $name){ return $false } }
+    if(!$Deployment.succeeded -or [string]$Deployment.candidateSha256 -ine $ExpectedCandidateSha256 -or !$Deployment.isolationPassed -or [string]$Deployment.validationIdentity -ine 'RAMSAI\RepatoQA'){ return $false }
+    if([IO.Path]::GetFullPath([string]$Deployment.qaAddinRoot) -ine [IO.Path]::GetFullPath($ExpectedQaAddinRoot)){ return $false }
+    if([IO.Path]::GetFullPath([string]$Deployment.runnerManifestPath) -ine [IO.Path]::GetFullPath($ExpectedRunnerManifestPath)){ return $false }
+    if([string]$Deployment.runnerManifestSha256 -ine $ExpectedRunnerManifestSha256){ return $false }
+    $true
+}
 function New-TaraRevitQaPlan {
     param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,3600)][int]$TimeoutSeconds=900,[switch]$DryRun,[Parameter(Mandatory)]$Context,[scriptblock]$SessionValidationInvoker)
     $QaWorkflowId=$QaWorkflowId.Trim()
@@ -93,7 +108,7 @@ function New-TaraRevitQaPlan {
     $artifactPairs=@(@($dll,$Context.ArtifactSha256),@($Context.ArtifactPath,$Context.ArtifactSha256),@($artifactManifest,$Context.ManifestSha256))
     foreach($pair in $artifactPairs){$null=if($pair[0] -eq $dll -and $remoteDeployment){$pair[0]}else{Assert-TaraPath $pair[0] -Leaf};if($pair[1] -notmatch '^[a-fA-F0-9]{64}$' -or (!$remoteDeployment -and (Get-TaraSha256 $pair[0]) -ine $pair[1])){throw 'Artifact or artifact-manifest hash mismatch.'}}
     $qaRunnerManifestSha256=Get-TaraSha256 $qaRunnerSourceManifest
-    if($remoteDeployment){if(!$remoteDeployment.manifestIntegrityPassed){throw 'RepatoQA deployment manifest integrity validation failed.'}}elseif((Get-TaraSha256 $manifest) -ine $qaRunnerManifestSha256){throw 'QA runner manifest hash mismatch.'}
+    if($remoteDeployment){if(-not (Test-TaraLegacyDeploymentManifestCompatibility $remoteDeployment $Context.ArtifactSha256 $addin $manifest $qaRunnerManifestSha256)){throw 'RepatoQA deployment manifest integrity validation failed.'}}elseif((Get-TaraSha256 $manifest) -ine $qaRunnerManifestSha256){throw 'QA runner manifest hash mismatch.'}
     $xml=[xml](Get-Content -LiteralPath $(if($remoteDeployment){$qaRunnerSourceManifest}else{$manifest}) -Raw)
     if(@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application').Count -ne 1){throw 'QA startup application manifest is required.'}
     $appEntries=@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application')
