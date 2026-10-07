@@ -1593,6 +1593,36 @@ function Request-MayaQaCanonicalApprovalRefresh {
     }
 }
 
+function Repair-MayaQaCanonicalRunIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$ExpectedBuildRequestId,[string]$RuntimeRoot
+    )
+    $qaId=Resolve-MayaQaWorkflowId $QaWorkflowId;$w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if([string]$w.qaWorkflowId -cne $qaId -or [string]$w.qaBuildRequest.BuildRequestId -cne $ExpectedBuildRequestId){throw 'Canonical QA identity mismatch.'}
+    if([string]$w.qaBuildStatus -cne 'succeeded' -or !$w.qaBuildEvidence -or [string]$w.qaBuildEvidence.BuildRequestId -cne $ExpectedBuildRequestId -or [string]$w.qaBuildEvidence.BuildStatus -cne 'succeeded' -or [string]$w.qaBuildEvidence.EvidenceSource -cne 'FrozenCandidate'){throw 'Canonical build evidence is invalid.'}
+    $e=$w.qaBuildEvidence;foreach($n in 'SourceCommit','CandidateSourceCommit','ArtifactPath','ArtifactSha256','CandidateProvenancePath','RunnerManifestPath','RunnerManifestSha256'){if($e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Canonical evidence is missing $n."}}
+    if([string]$e.SourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$e.CandidateSourceCommit -notmatch '^[A-Fa-f0-9]{40}$' -or [string]$e.ArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$e.RunnerManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Canonical evidence identity or hash is invalid.'}
+    if(!$e.DeploymentValidation -or !$e.QaIsolation -or !$e.ManifestIntegrityValidation){throw 'Canonical staging or deployment evidence is missing or failed.'}
+    $d=Read-RepatoTaskStore $StoreRoot;$t=Find-RepatoTask $d $TaskId
+    if($t.status -cne 'passed' -or $t.workflowStage -cne 'approval'){throw 'Canonical task is not approved for QA run recovery.'}
+    $approved=@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})
+    if($approved.Count -ne 1 -or [long]$approved[0].approvedRevision -ne [long]$t.revision){throw 'Canonical QA approval is missing or stale.'}
+    if($w.PSObject.Properties.Name -contains 'qaRunId' -and -not [string]::IsNullOrWhiteSpace([string]$w.qaRunId)){throw 'Canonical qaRunId already exists.'}
+    if($w.PSObject.Properties.Name -notcontains 'qaHandoff' -or !$w.qaHandoff -or [string]$w.qaHandoffId -cne [string]$w.qaHandoff.HandoffId -or [string]$w.qaHandoff.TaskId -cne $TaskId -or [string]$w.qaHandoff.QaWorkflowId -cne $qaId){throw 'Canonical partial handoff is missing or inconsistent.'}
+    if($w.qaHandoff.PSObject.Properties.Name -contains 'WorkflowId'){if([string]::IsNullOrWhiteSpace([string]$w.qaHandoff.WorkflowId) -or [string]$w.qaHandoff.WorkflowId -cne $WorkflowId){throw 'Canonical partial handoff WorkflowId is inconsistent.'}}
+    if($w.qaHandoff.PSObject.Properties.Name -contains 'BuildRequestId' -and [string]$w.qaHandoff.BuildRequestId -cne [string]$ExpectedBuildRequestId){throw 'Canonical partial handoff BuildRequestId is inconsistent.'}
+    if([string]$w.qaHandoff.ArtifactSha256 -ine [string]$e.ArtifactSha256 -or [string]$w.qaHandoff.ManifestSha256 -ine [string]$e.ManifestSha256 -or [string]$w.qaHandoff.RunnerManifestSha256 -ine [string]$e.RunnerManifestSha256){throw 'Canonical partial handoff evidence is inconsistent.'}
+    if([string]$w.qaApprovalId -cne [string]$approved[0].requestId -or [string]$w.qaApprovalStatus -cne 'approved' -or [string]$w.qaHandoff.QaApprovalId -cne [string]$approved[0].requestId){throw 'Canonical partial approval is missing or inconsistent.'}
+    if($t.PSObject.Properties.Name -contains 'mayaTaraQaPacket' -or $t.PSObject.Properties.Name -contains 'mayaTaraAttempt' -or $t.PSObject.Properties.Name -contains 'mayaTaraExecution'){throw 'Tara preparation has already begun.'}
+    if($t.PSObject.Properties.Name -contains 'nativeAttemptCount' -and [int]$t.nativeAttemptCount -gt 0){throw 'Native QA has already begun.'}
+    if($t.PSObject.Properties.Name -contains 'taraRuns' -and @($t.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Native QA has already begun.'}
+    if($t.PSObject.Properties.Name -contains 'finishedUtc' -and $t.finishedUtc){throw 'Canonical task is terminal.'}
+    $runId='MAYA-'+[guid]::NewGuid().ToString('N');New-MayaQaRun -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $qaId -RunId $runId -RuntimeRoot $RuntimeRoot
+}
+
 function New-MayaQaCanonicalPreparation {
     [CmdletBinding()]
     param(
@@ -2117,6 +2147,7 @@ Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit,Resolve-MayaQaAuthenticatedBuildSource
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
 Export-ModuleMember -Function Request-MayaQaCanonicalApprovalRefresh
+Export-ModuleMember -Function Repair-MayaQaCanonicalRunIdentity
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
