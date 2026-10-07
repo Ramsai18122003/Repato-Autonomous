@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Stop'
+$ErrorActionPreference='Stop'
 $here=$PSScriptRoot
 Import-Module (Join-Path $here 'Repato.AgentOrchestration.psm1') -Force
 Import-Module (Join-Path $here 'Repato.Deployment.psm1') -Force
@@ -58,8 +58,3 @@ foreach($m in $mutations){
     Check $m.Name {try{Refresh $x|Out-Null;throw 'unexpected acceptance'}catch{}}
 }
 Write-Output "Maya canonical approval refresh checks passed: $passed/$total"
-
-
-
-
-
