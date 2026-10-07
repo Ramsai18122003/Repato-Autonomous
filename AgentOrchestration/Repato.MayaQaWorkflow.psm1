@@ -1605,7 +1605,16 @@ function Repair-MayaQaCanonicalRunIdentity {
     if([string]$w.qaBuildStatus -cne 'succeeded' -or !$w.qaBuildEvidence -or [string]$w.qaBuildEvidence.BuildRequestId -cne $ExpectedBuildRequestId -or [string]$w.qaBuildEvidence.BuildStatus -cne 'succeeded' -or [string]$w.qaBuildEvidence.EvidenceSource -cne 'FrozenCandidate'){throw 'Canonical build evidence is invalid.'}
     $e=$w.qaBuildEvidence;foreach($n in 'SourceCommit','CandidateSourceCommit','ArtifactPath','ArtifactSha256','CandidateProvenancePath','RunnerManifestPath','RunnerManifestSha256'){if($e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Canonical evidence is missing $n."}}
     if([string]$e.SourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$e.CandidateSourceCommit -notmatch '^[A-Fa-f0-9]{40}$' -or [string]$e.ArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$e.RunnerManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Canonical evidence identity or hash is invalid.'}
-    if(!$e.DeploymentValidation -or !$e.QaIsolation -or !$e.ManifestIntegrityValidation){throw 'Canonical staging or deployment evidence is missing or failed.'}
+    $legacyUnavailable=[string]$e.ManifestIntegrityValidation -ceq 'Unavailable'
+    if(!$e.DeploymentValidation -or !$e.QaIsolation -or (!$legacyUnavailable -and $e.ManifestIntegrityValidation -ne $true)){throw 'Canonical staging or deployment evidence is missing or failed.'}
+    if($legacyUnavailable){
+        if(!(Test-Path -LiteralPath $e.ManifestPath -PathType Leaf) -or (Get-FileHash -LiteralPath $e.ManifestPath -Algorithm SHA256).Hash -ine [string]$e.ManifestSha256){throw 'Legacy manifest integrity evidence is invalid.'}
+        if(!(Test-Path -LiteralPath $e.CandidateProvenancePath -PathType Leaf)){throw 'Legacy candidate provenance is missing.'}
+        $provenance=Get-Content -LiteralPath $e.CandidateProvenancePath -Raw|ConvertFrom-Json
+        $supportedQa=@(if($provenance.PSObject.Properties.Name -contains 'SupportedQaWorkflows'){$provenance.SupportedQaWorkflows})
+        $eQa=if($e.PSObject.Properties.Name -contains 'QaWorkflowId'){[string]$e.QaWorkflowId}else{$qaId}
+        if([string]$provenance.SourceCommit -cne [string]$e.SourceCommit -or [string]$provenance.FrozenArtifactSha256 -ine [string]$e.ArtifactSha256 -or ($supportedQa.Count -and $eQa -notin $supportedQa)){throw 'Legacy candidate provenance binding is invalid.'}
+    }
     $d=Read-RepatoTaskStore $StoreRoot;$t=Find-RepatoTask $d $TaskId
     if($t.status -cne 'passed' -or $t.workflowStage -cne 'approval'){throw 'Canonical task is not approved for QA run recovery.'}
     $approved=@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})
