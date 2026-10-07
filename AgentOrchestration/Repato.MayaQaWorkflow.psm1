@@ -1562,6 +1562,37 @@ function New-MayaQaHandoff {
     }
 }
 
+function Request-MayaQaCanonicalApprovalRefresh {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$BuildRequestId,[int]$ExpiryMinutes=30
+    )
+    $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if([string]$workflow.qaWorkflowId -cne $QaWorkflowId -or [string]$workflow.qaBuildRequest.BuildRequestId -cne $BuildRequestId){throw 'Canonical QA identity mismatch.'}
+    $e=$workflow.qaBuildEvidence
+    if([string]$workflow.qaBuildStatus -cne 'succeeded' -or !$e -or [string]$e.BuildRequestId -cne $BuildRequestId -or [string]$e.BuildStatus -cne 'succeeded' -or [string]$e.EvidenceSource -cne 'FrozenCandidate'){throw 'Canonical build evidence is invalid.'}
+    foreach($n in 'SourceCommit','CandidateSourceCommit','ArtifactSha256','CandidateProvenancePath','RunnerManifestPath','RunnerManifestSha256'){if($e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Canonical candidate evidence is missing $n."}}
+    if([string]$e.SourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$e.CandidateSourceCommit -notmatch '^[A-Fa-f0-9]{40}$' -or [string]$e.ArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$e.RunnerManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Canonical candidate evidence identity or hash is invalid.'}
+    if(!$e.DeploymentValidation -or !$e.ManifestIntegrityValidation -or !$e.QaIsolation){throw 'Canonical deployment evidence is missing or failed.'}
+    $d=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $d $TaskId
+    if($task.status -cne 'awaiting-approval' -or $task.workflowStage -cne 'approval'){throw 'Canonical task is not awaiting approval.'}
+    if($task.PSObject.Properties.Name -contains 'mayaTaraExecution' -and $task.mayaTaraExecution){throw 'Tara execution has begun.'}
+    if($task.PSObject.Properties.Name -contains 'mayaTaraAttempt' -and $task.mayaTaraAttempt){throw 'Tara attempt already exists.'}
+    if($task.PSObject.Properties.Name -contains 'taraRuns' -and @($task.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Native QA has already begun.'}
+    $pending=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})
+    if($pending.Count -ne 1){throw 'Exactly one pending QA approval is required.'}
+    $old=$pending[0];$expired=[DateTimeOffset]::Parse($old.expiresUtc) -le [DateTimeOffset]::UtcNow;$stale=[long]$old.requestedRevision -ne [long]$task.revision
+    if(!$expired -and !$stale){throw 'Current QA approval request is still valid.'}
+    Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)
+        $t=Find-RepatoTask $data $TaskId;$current=@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})
+        if($current.Count -ne 1){throw 'Approval changed during refresh.'};$current[0].status='superseded';$current[0].reason='Replaced by canonical approval refresh.'
+        $q=[pscustomobject]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='maya';status='pending';bindingHash='';previousStatus='passed';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason=$null;consumedUtc=$null}
+        $t.approvalRequests=[object[]]@($t.approvalRequests)+$q;$t.status='awaiting-approval';$t.workflowStage='approval';Add-RepatoHistory $t 'approval-refreshed' 'Maya' 'qa-run';$q.requestedRevision=[long]$t.revision;$t
+    }
+}
+
 function New-MayaQaCanonicalPreparation {
     [CmdletBinding()]
     param(
@@ -2085,6 +2116,7 @@ Export-ModuleMember -Function Invoke-MayaQaCanonicalFrozenCandidateStagingValida
 Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit,Resolve-MayaQaAuthenticatedBuildSource
 Export-ModuleMember -Function New-MayaQaCanonicalPreparation
+Export-ModuleMember -Function Request-MayaQaCanonicalApprovalRefresh
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
