@@ -41,4 +41,3 @@ try {
     foreach($x in @('task','workflow','buildid','buildstatus','missingbuild','invalidevidence','commit','provenance','candidatehash','runnerpath','runnerhash','approval','tara','revit','historical','health','identity','preflight','prepath','prehash','stageidentity','stageisolation','validationidentity','validationhash','validationrunner','persist')){Case $x {$result=InvokeSynthetic (NewSynthetic) $x;if($null -ne $result){throw "accepted $x"}}}
     [pscustomobject]@{Passed=$passed;Total=$total}|ConvertTo-Json -Compress
 }finally{Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue}
-
