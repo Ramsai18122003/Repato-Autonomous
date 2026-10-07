@@ -51,8 +51,8 @@ public static class QaLaunchPolicy
     public const string ApprovedRunnerManifestRoot = @"C:\Repato-Autonomous\Source\QA";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
     public const string ExpectedUserSid = "S-1-5-21-1031246752-3872016183-2454652381-1015";
-    public const string ClientAccount = "RAMSAI\\rsgud";
-    public const string ClientSid = "S-1-5-21-1031246752-3872016183-2454652381-1001";
+    public const string ClientAccount = ExpectedUser;
+    public const string ClientSid = ExpectedUserSid;
     public const string FrozenCandidateCommit = "fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3";
     public const string FrozenCandidateSha256 = "7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2";
     public const string StagingAdapterPath = @"C:\Repato-Autonomous\Source\AgentOrchestration\Invoke-RepatoQaFrozenCandidateStaging.ps1";
