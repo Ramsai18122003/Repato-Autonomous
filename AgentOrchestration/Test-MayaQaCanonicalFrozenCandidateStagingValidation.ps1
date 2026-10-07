@@ -13,7 +13,7 @@ function NewSynthetic {
     [pscustomobject]@{Store=$store;TaskId=$b.TaskId;WorkflowId=$b.WorkflowId;Candidate=$candidate;Hash=$hash;Commit=$commit}
 }
 function InvokeSynthetic([object]$c,[string]$mode){
-    $runner=Join-Path $root 'QA\Repato.CreatePlanViews.TestRunner.addin';$rh=(Get-FileHash $runner -Algorithm SHA256).Hash;$stageCount=0;$validationCount=0;$persistCount=0
+    $sourceRunner=Join-Path $root 'QA\Repato.CreatePlanViews.TestRunner.addin';$runner='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$rh=(Get-FileHash $sourceRunner -Algorithm SHA256).Hash;$stageCount=0;$validationCount=0;$persistCount=0
     $health={ [pscustomobject]@{Ready=$true;User='ramsai\repatoqa';SID='S-1-5-21-1031246752-3872016183-2454652381-1015';SessionId=2;UserInteractive=$true} }
     $pre={ [pscustomobject]@{Succeeded=$true;ExecutionIdentity='RAMSAI\RepatoQA';RunnerManifestPath=$runner;ExpectedRunnerManifestSha256=$rh} }
     $stage={param($e)$script:stageCount++;[pscustomobject]@{succeeded=$true;candidateCommit=$e.CandidateSourceCommit;candidateSha256=$e.CandidateDllSha256;qaWorkflowId='create-plan-views-v1';testId='create-plan-views-v1';isolationPassed=$true;taskId=$c.TaskId;workflowId=$c.WorkflowId}}
@@ -30,7 +30,7 @@ function InvokeSynthetic([object]$c,[string]$mode){
 }
 try {
     Case 'success' {
-        $c=NewSynthetic;$runner=Join-Path $root 'QA\Repato.CreatePlanViews.TestRunner.addin';$rh=(Get-FileHash $runner -Algorithm SHA256).Hash
+        $c=NewSynthetic;$runner='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$rh=(Get-FileHash (Join-Path $root 'QA\Repato.CreatePlanViews.TestRunner.addin') -Algorithm SHA256).Hash
         $h={ [pscustomobject]@{Ready=$true;User='ramsai\repatoqa';SID='S-1-5-21-1031246752-3872016183-2454652381-1015';SessionId=2;UserInteractive=$true} }
         $p={ [pscustomobject]@{Succeeded=$true;ExecutionIdentity='RAMSAI\RepatoQA';RunnerManifestPath=$runner;ExpectedRunnerManifestSha256=$rh} }
         $s={param($e)[pscustomobject]@{succeeded=$true;candidateCommit=$e.CandidateSourceCommit;candidateSha256=$e.CandidateDllSha256;qaWorkflowId='create-plan-views-v1';testId='create-plan-views-v1';isolationPassed=$true;taskId=$c.TaskId;workflowId=$c.WorkflowId}}

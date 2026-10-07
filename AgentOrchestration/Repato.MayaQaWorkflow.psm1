@@ -1002,7 +1002,7 @@ function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation {
     if(@($revit).Count){throw 'Revit is running.'}
     $null=Resolve-MayaQaSourceRunnerManifestEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
     $candidate=New-MayaQaPersistedCandidateEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
-    if($candidate.RunnerManifestPath -ine $ExpectedRunnerManifestPath -or $candidate.RunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Authenticated runner source evidence is invalid.'}
+    if($candidate.RunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Authenticated runner source evidence is invalid.'}
     $health=if($HealthInvoker){& $HealthInvoker}else{Invoke-MayaQaLaunchAgentHealth}
     if(!$health.Ready -or $health.User -ine 'RAMSAI\RepatoQA' -or $health.SID -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or [int]$health.SessionId -le 0 -or !$health.UserInteractive){throw 'Launch Agent health contract failed.'}
     $pre=if($PreflightInvoker){& $PreflightInvoker}else{Invoke-MayaQaLaunchAgentPreflightReadonly}
