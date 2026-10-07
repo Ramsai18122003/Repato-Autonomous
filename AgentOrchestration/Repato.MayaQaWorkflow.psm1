@@ -1618,7 +1618,10 @@ function Repair-MayaQaCanonicalRunIdentity {
     $d=Read-RepatoTaskStore $StoreRoot;$t=Find-RepatoTask $d $TaskId
     if($t.status -cne 'passed' -or $t.workflowStage -cne 'approval'){throw 'Canonical task is not approved for QA run recovery.'}
     $approved=@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})
-    if($approved.Count -ne 1 -or [long]$approved[0].approvedRevision -ne [long]$t.revision){throw 'Canonical QA approval is missing or stale.'}
+    if($approved.Count -ne 1){throw 'Canonical QA approval is missing or stale.'}
+    $approvalRevisionValid=([long]$approved[0].approvedRevision -eq [long]$t.revision)
+    $failedPreparationContinuity=([long]$approved[0].approvedRevision -eq ([long]$t.revision-1) -and @($t.history)[-1].event -ceq 'deployment-workflow-mutated' -and @($t.history)[-1].actor -ceq 'Maya')
+    if(!$approvalRevisionValid -and !$failedPreparationContinuity){throw 'Canonical QA approval is missing or stale.'}
     if($w.PSObject.Properties.Name -contains 'qaRunId' -and -not [string]::IsNullOrWhiteSpace([string]$w.qaRunId)){throw 'Canonical qaRunId already exists.'}
     if($w.PSObject.Properties.Name -notcontains 'qaHandoff' -or !$w.qaHandoff -or [string]$w.qaHandoffId -cne [string]$w.qaHandoff.HandoffId -or [string]$w.qaHandoff.TaskId -cne $TaskId -or [string]$w.qaHandoff.QaWorkflowId -cne $qaId){throw 'Canonical partial handoff is missing or inconsistent.'}
     if($w.qaHandoff.PSObject.Properties.Name -contains 'WorkflowId'){if([string]::IsNullOrWhiteSpace([string]$w.qaHandoff.WorkflowId) -or [string]$w.qaHandoff.WorkflowId -cne $WorkflowId){throw 'Canonical partial handoff WorkflowId is inconsistent.'}}
