@@ -59,6 +59,9 @@ function Invoke-MayaQaTaraExecute {
             if($canonical.Stage -ceq 'executing') { return Resume-MayaQaCanonicalExecution -StoreRoot $StoreRoot -TaskId $TaskId -ClaimId $canonical.ClaimId -ResultPath $canonical.ResultPath -TimeoutSeconds $TimeoutSeconds }
             return Invoke-MayaQaCanonicalNativeCore -StoreRoot $StoreRoot -TaskId $TaskId -ClaimId $canonical.ClaimId -Executable $exe -Arguments '' -ProcessLauncher $CanonicalProcessLauncher -Result $CanonicalResult
         }
+        if ($canonicalTask.PSObject.Properties.Name -contains 'mayaTaraAttempt' -and $canonicalTask.mayaTaraAttempt) {
+            throw 'Canonical Maya Tara attempt exists without an execution record; legacy Tara dispatch is forbidden.'
+        }
     }
     $definition = Get-MayaQaWorkflowDefinition $QaWorkflowId
     $workflow = Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
@@ -193,5 +196,4 @@ function Invoke-MayaQaTaraExecute {
     catch { throw "Tara execution finished but store persistence failed: $($_.Exception.Message). Preserve bridge evidence; do not retry execution." }
     $result
 }
-
 
