@@ -1054,6 +1054,7 @@ function Invoke-MayaQaRequest {
     $taskId=$foundation.TaskId;$workflowId=$foundation.WorkflowId;$intake=$foundation.Intake;$buildRequest=$foundation.BuildRequest
     $deploymentEvidence=$null
     if($ArtifactMode -ceq 'FrozenCandidate'){
+        $null=Bind-MayaQaFrozenCandidateBuildEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit
         $build=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedCandidateSha256 -ExpectedSourceCommit $ExpectedCandidateSourceCommit -DeploymentEvidence $deploymentEvidence
     }else{
         $build=Invoke-MayaQaBuildExecute -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -SourceBranch $SourceBranch -ProjectPath $ProjectPath
@@ -1357,6 +1358,34 @@ function Invoke-MayaQaFrozenCandidateEvidence {
         return $current
     })[-1]
     [pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;BuildStatus='succeeded';Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ArtifactManifestPath=$verified.ManifestPath;ArtifactManifestSha256=$verified.ManifestSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;WarningCount=0;ErrorCount=0;EvidenceSource='FrozenCandidate';CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;SideEffectsPerformed=$true}
+}
+
+function Bind-MayaQaFrozenCandidateBuildEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$CandidateDirectory,
+        [string]$CandidateDllPath,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{7,40}$')][string]$ExpectedSourceCommit
+    )
+    $verified=Test-MayaQaFrozenCandidate -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedSha256 $ExpectedSha256 -ExpectedSourceCommit $ExpectedSourceCommit -QaWorkflowId $QaWorkflowId
+    $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId;$workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if($workflow.qaWorkflowId -cne $QaWorkflowId){throw 'QA workflow identity mismatch.'}
+    if($workflow.PSObject.Properties.Name -notcontains 'qaBuildRequest' -or !$workflow.qaBuildRequest.BuildRequestId){throw 'Persisted Neil build request is missing.'}
+    $existing=if($workflow.PSObject.Properties.Name -contains 'qaBuildEvidence'){$workflow.qaBuildEvidence}else{$null}
+    if($existing){
+        foreach($n in 'BuildRequestId','SourceCommit','ArtifactPath','ArtifactSha256','ManifestPath','ManifestSha256'){
+            if([string]$existing.$n -cne [string]$(if($n -eq 'BuildRequestId'){$workflow.qaBuildRequest.BuildRequestId}elseif($n -eq 'SourceCommit'){$verified.SourceCommit}elseif($n -eq 'ArtifactPath'){$verified.ArtifactPath}elseif($n -eq 'ArtifactSha256'){$verified.ArtifactSha256}elseif($n -eq 'ManifestPath'){$verified.ManifestPath}else{$verified.ManifestSha256})){throw "Frozen candidate evidence conflict: $n"}
+        }
+        return $existing
+    }
+    $now=(Get-Date).ToUniversalTime().ToString('O');$bound=[pscustomobject]@{BuildRequestId=$workflow.qaBuildRequest.BuildRequestId;StartedUtc=$now;FinishedUtc=$now;Command='FrozenCandidate integrity and provenance validation (no compilation)';Configuration='Release';SourceCommit=$verified.SourceCommit;ExitCode=0;ArtifactPath=$verified.ArtifactPath;ArtifactSha256=$verified.ArtifactSha256;ManifestPath=$verified.ManifestPath;ManifestSha256=$verified.ManifestSha256;BuildStatus='succeeded';WarningCount=0;ErrorCount=0;ErrorLines=@();EvidenceSource='FrozenCandidate';CandidateDirectory=$verified.CandidateDirectory;CandidateProvenancePath=$verified.ProvenancePath;CandidateProvenanceSha256=$verified.ProvenanceSha256;CandidateSourceCommit=$verified.SourceCommit;QaWorkflowId=$verified.QaWorkflowId}
+    $mutation=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $workflow.workflowRevision $task.revision {param($current)$current|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force;$current|Add-Member NoteProperty qaBuildEvidence $bound -Force;return $current})[-1]
+    $mutation.Workflow.qaBuildEvidence
 }
 
 function New-MayaQaCanonicalCandidate {
