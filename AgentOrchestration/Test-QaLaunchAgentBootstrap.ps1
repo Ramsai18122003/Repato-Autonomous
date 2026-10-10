@@ -42,17 +42,17 @@ try {
   }
   $target=Join-Path $temp 'install'
   $ctx=& $newContext $state
-  $one=& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot} $validated $ctx $target
+  $one=& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot -ProcessDetector { @() }} $validated $ctx $target
   Pass ($one.Installed -and -not $one.Updated) 'valid fresh install'
   Pass ((Get-FileHash (Join-Path $target 'Repato.QaLaunchAgent.dll') -Algorithm SHA256).Hash -eq $validated.Manifest.files[1].sha256) 'installed runtime integrity'
-  $two=& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot} $validated $ctx $target
+  $two=& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot -ProcessDetector { @() }} $validated $ctx $target
   Pass ($two.Installed -and $two.Updated) 'idempotent upgrade'
   $state.Task=[pscustomobject]@{Wrong=$true}
-  $three=& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot} $validated $ctx $target
+  $three=& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot -ProcessDetector { @() }} $validated $ctx $target
   Pass ($three.Task.Principal -eq 'RAMSAI\RepatoQA' -and $three.Task.Arguments -eq '') 'wrong or duplicate task reconciled'
   Set-Content -LiteralPath (Join-Path $target 'marker.txt') -Value 'previous'
   $state.FailSet=$true
-  Reject {& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot} $validated $ctx $target} 'failed upgrade rejected'
+  Reject {& $module {param($v,$c,$t) Invoke-InstallCore $v $c $t -AllowTestRoot -ProcessDetector { @() }} $validated $ctx $target} 'failed upgrade rejected'
   Pass (Test-Path (Join-Path $target 'marker.txt')) 'failed upgrade restored previous install'
   Pass ([bool]$state.Task.Restored) 'failed upgrade restored previous task'
   $state.FailSet=$false
