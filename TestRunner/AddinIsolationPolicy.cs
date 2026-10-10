@@ -26,11 +26,20 @@ public static class AddinIsolationPolicy
     {
         string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         return Inspect(PolicyPath, MachineWideRoot,
-            string.IsNullOrWhiteSpace(appData) ? "" : Path.Combine(appData, "Autodesk", "Revit", "Addins", "2025"), SourceRoot);
+            string.IsNullOrWhiteSpace(appData) ? "" : Path.Combine(appData, "Autodesk", "Revit", "Addins", "2025"), SourceRoot, null, null);
+    }
+
+    public static AddinInventory Inspect(string selectedManifestPath, string selectedManifestSha256)
+    {
+        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        return Inspect(PolicyPath, MachineWideRoot,
+            string.IsNullOrWhiteSpace(appData) ? "" : Path.Combine(appData, "Autodesk", "Revit", "Addins", "2025"),
+            SourceRoot, selectedManifestPath, selectedManifestSha256);
     }
 
     // Injectable paths are internal and used only by the standalone no-Revit checks.
-    internal static AddinInventory Inspect(string policyPath, string machineRoot, string userRoot, string sourceRoot)
+    internal static AddinInventory Inspect(string policyPath, string machineRoot, string userRoot, string sourceRoot,
+        string? selectedManifestPath = null, string? selectedManifestSha256 = null)
     {
         var result = new AddinInventory { PolicyPath = policyPath };
         var approved = new Dictionary<string, (string Hash, string Reason)>(StringComparer.OrdinalIgnoreCase);
@@ -66,9 +75,9 @@ public static class AddinIsolationPolicy
             result.Errors.Add("Policy rejected: " + ex.Message);
         }
 
-        Scan(machineRoot, "MachineWide", approved, result, sourceRoot);
+        Scan(machineRoot, "MachineWide", approved, result, sourceRoot, selectedManifestPath, selectedManifestSha256);
         if (string.IsNullOrWhiteSpace(userRoot)) result.Errors.Add("Current user APPDATA is unavailable.");
-        else Scan(userRoot, "UserProfile", approved, result, sourceRoot);
+        else Scan(userRoot, "UserProfile", approved, result, sourceRoot, selectedManifestPath, selectedManifestSha256);
         return result;
     }
 
@@ -80,7 +89,16 @@ public static class AddinIsolationPolicy
             throw new InvalidOperationException("Add-in isolation failed. Review AddinIsolation inventory and errors; do not run QA.");
     }
 
-    private static void Scan(string directory, string scope, Dictionary<string, (string Hash, string Reason)> approved, AddinInventory result, string sourceRoot)
+    public static void RequireAllowed(TestRunReport report, string selectedManifestPath, string selectedManifestSha256)
+    {
+        report.AddinIsolation = Inspect(selectedManifestPath, selectedManifestSha256);
+        report.Assert("addin-isolation", report.AddinIsolation.Allowed, "Only approved manifest hashes", report.AddinIsolation);
+        if (!report.AddinIsolation.Allowed)
+            throw new InvalidOperationException("Add-in isolation failed. Review AddinIsolation inventory and errors; do not run QA.");
+    }
+
+    private static void Scan(string directory, string scope, Dictionary<string, (string Hash, string Reason)> approved, AddinInventory result, string sourceRoot,
+        string? selectedManifestPath, string? selectedManifestSha256)
     {
         string[] files;
         try
@@ -110,7 +128,19 @@ public static class AddinIsolationPolicy
                 else
                 {
                     string name = Path.GetFileName(path);
-                if (name.Equals("Repato.CreateLevels.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleVisibility.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleOffset.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridResequence.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.WelcomeSmoke.TestRunner.addin", StringComparison.OrdinalIgnoreCase))
+                    bool selectedPlanViewsManifest = name.Equals("Repato.CreatePlanViews.TestRunner.addin", StringComparison.OrdinalIgnoreCase) &&
+                        selectedManifestPath is not null && selectedManifestSha256 is not null &&
+                        Path.GetFullPath(path).Equals(Path.GetFullPath(selectedManifestPath), StringComparison.OrdinalIgnoreCase);
+                    if (selectedPlanViewsManifest)
+                    {
+                        string source = Path.Combine(sourceRoot, name);
+                        CheckPath(source);
+                        allowed = Regex.IsMatch(selectedManifestSha256!, @"\A[0-9a-fA-F]{64}\z") &&
+                            hash.Equals(selectedManifestSha256, StringComparison.OrdinalIgnoreCase) &&
+                            hash.Equals(Hash(source), StringComparison.OrdinalIgnoreCase);
+                        reason = allowed ? "Selected Create Plan Views manifest matches request and trusted source SHA-256." : "Selected Create Plan Views manifest does not match request or trusted source.";
+                    }
+                    else if (name.Equals("Repato.CreateLevels.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleVisibility.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleOffset.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridResequence.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.WelcomeSmoke.TestRunner.addin", StringComparison.OrdinalIgnoreCase))
                     {
                         string source = Path.Combine(sourceRoot, name);
                         CheckPath(source);

@@ -31,6 +31,8 @@
     <Compile Remove="FormaEventHandler.cs" />
     <Compile Remove="QaLaunchAgent\**\*.cs" />
     <Compile Remove="QaLaunchAgent.ProtocolInteropTests\**\*.cs" />
+    <Compile Remove="TestRunner.ContractTests\**\*.cs" />
+    <Compile Remove="CandidateRunnerBindingCheck\**\*.cs" />
   </ItemGroup>
 
   <Target Name="CheckRevitApi" BeforeTargets="ResolveReferences">

@@ -36,6 +36,33 @@ function Get-TaraQaWorkflowContract {
     $contracts[$QaWorkflowId]
 }
 
+function Test-TaraCandidateRunnerBinding {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CandidateDllPath,
+        [Parameter(Mandatory)][string]$TrustedManifestPath,
+        [string]$RevitInstallDir = 'E:\revit\Revit 2025'
+    )
+    if(!(Test-Path -LiteralPath $CandidateDllPath -PathType Leaf) -or !(Test-Path -LiteralPath $TrustedManifestPath -PathType Leaf)) { throw 'Candidate binding inputs are missing.' }
+    foreach($api in @('RevitAPI.dll','RevitAPIUI.dll')) { if(!(Test-Path -LiteralPath (Join-Path $RevitInstallDir $api) -PathType Leaf)) { throw "Required Revit API dependency is missing: $api" } }
+    try { $manifest=[xml](Get-Content -LiteralPath $TrustedManifestPath -Raw) } catch { throw 'Trusted runner manifest is malformed.' }
+    $contract=Get-TaraQaWorkflowContract 'create-plan-views-v1'
+    $entries=@($manifest.RevitAddIns.AddIn | Where-Object { $_.Type -ceq 'Application' })
+    if($entries.Count -ne 1 -or [string]$entries[0].FullClassName -cne $contract.Class) { throw 'Trusted manifest does not name the exact Create Plan Views application class.' }
+    $checker=Join-Path $PSScriptRoot '..\CandidateRunnerBindingCheck\CandidateRunnerBindingCheck.csproj'
+    if(!(Test-Path -LiteralPath $checker -PathType Leaf)) { throw 'Metadata-only candidate binding checker is missing.' }
+    $buildOutput=@(& dotnet build $checker -c Release --nologo -v:q 2>&1)
+    if($LASTEXITCODE -ne 0) { throw ('Candidate binding checker build failed: '+($buildOutput -join ' ')) }
+    $checkerDll=Join-Path (Split-Path -Parent $checker) 'bin\Release\net8.0\CandidateRunnerBindingCheck.dll'
+    $output=@(& dotnet $checkerDll $CandidateDllPath $TrustedManifestPath $contract.Class '.\RepatoQA\Repato.Revit.dll' 2>&1)
+    if($LASTEXITCODE -ne 0) { throw ('Compiled candidate runner binding check failed: '+($output -join ' ')) }
+    $check=($output | Where-Object { [string]$_ -match '^\{' } | Select-Object -Last 1)
+    if(!$check) { throw 'Compiled candidate runner binding checker returned no evidence.' }
+    $evidence=$check | ConvertFrom-Json
+    if(!$evidence.Passed -or $evidence.Class -cne $contract.Class -or $evidence.Interface -cne 'Autodesk.Revit.UI.IExternalApplication') { throw 'Compiled candidate runner binding evidence did not satisfy the manifest contract.' }
+    [pscustomobject]@{Passed=$true;Class=$evidence.Class;CandidateDll=[IO.Path]::GetFullPath($CandidateDllPath);CandidateSha256=$evidence.CandidateSha256;ManifestPath=[IO.Path]::GetFullPath($TrustedManifestPath);ManifestSha256=(Get-FileHash -LiteralPath $TrustedManifestPath -Algorithm SHA256).Hash;Interface=$evidence.Interface}
+}
+
 function Test-TaraFrozenCandidateQaIsolation {
     [CmdletBinding()]
     param(
@@ -156,6 +183,7 @@ function Install-TaraFrozenCandidateForQa {
     try{$xml=[xml](Get-Content $sourceManifest -Raw)}catch{throw 'Trusted QA workflow manifest is malformed.'}
     $apps=@($xml.RevitAddIns.AddIn|Where-Object Type -eq 'Application')
     if($apps.Count -ne 1 -or [string]$apps[0].FullClassName -cne $contract.Class -or [string]$apps[0].Assembly -cne '.\RepatoQA\Repato.Revit.dll'){throw 'Trusted QA workflow manifest contract is incompatible.'}
+      $binding=Test-TaraCandidateRunnerBinding -CandidateDllPath $dll -TrustedManifestPath $sourceManifest
     $testMode=![string]::IsNullOrWhiteSpace($TestTargetRoot)
     if($testMode){
         $target=[IO.Path]::GetFullPath($TestTargetRoot);$manifestBase=[IO.Path]::GetFullPath($TestManifestRoot);$machine=[IO.Path]::GetFullPath($TestMachineRoot)
@@ -201,4 +229,4 @@ function Install-TaraFrozenCandidateForQa {
         throw
     }finally{Remove-Item $stageRoot -Recurse -Force -ErrorAction SilentlyContinue}
 }
-Export-ModuleMember -Function Get-QaAddinDeploymentTarget,Test-QaAddinTarget,Invoke-QaAddinDeployment,Install-TaraFrozenCandidateForQa,Test-TaraFrozenCandidateQaIsolation
+Export-ModuleMember -Function Get-QaAddinDeploymentTarget,Test-QaAddinTarget,Invoke-QaAddinDeployment,Install-TaraFrozenCandidateForQa,Test-TaraFrozenCandidateQaIsolation,Test-TaraCandidateRunnerBinding
