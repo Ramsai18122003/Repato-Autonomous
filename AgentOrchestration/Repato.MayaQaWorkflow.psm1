@@ -962,6 +962,53 @@ function New-MayaQaRequestFoundation {
     $buildRequest=New-MayaQaBuildRequest -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflow.workflowId -QaWorkflowId $qaId -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -AuthenticatedBuildSource $AuthenticatedBuildSource
     [pscustomobject]@{TaskId=$taskId;WorkflowId=$workflow.workflowId;QaWorkflowId=$qaId;NativeTestId=(Get-MayaQaNativeTestId $def);Intake=$intake;BuildRequest=$buildRequest}
 }
+function New-MayaQaDeploymentValidationOperation {
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][long]$ExpectedTaskRevision,[Parameter(Mandatory)][string]$BuildRequestId,[Parameter(Mandatory)][string]$CandidateSourceCommit,[Parameter(Mandatory)][string]$CandidateSha256,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$TestId)
+    $id=[guid]::NewGuid().ToString('N');$now=Get-RepatoUtc
+    $op=[pscustomobject][ordered]@{SchemaVersion=1;OperationId=$id;TaskId=$TaskId;WorkflowId=$WorkflowId;ExpectedTaskRevision=$ExpectedTaskRevision;BuildRequestId=$BuildRequestId;CandidateSourceCommit=$CandidateSourceCommit;CandidateSha256=$CandidateSha256;QaWorkflowId=$QaWorkflowId;TestId=$TestId;RequestDisposition='confirmed-unsent';CreatedUtc=$now;Response=$null}
+    $null=Invoke-RepatoStoreMutation $StoreRoot {param($d,$preview)$t=Find-RepatoTask $d $TaskId;if(!$t){throw 'Continuation task was not found.'};if([long]$t.revision -ne $ExpectedTaskRevision){throw 'Cannot create deployment-validation operation for a stale task revision.'};$w=@($t.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId);if($w.Count -ne 1 -or $w[0].taskId -cne $TaskId){throw 'Cannot create deployment-validation operation for an unbound workflow.'};if($t.PSObject.Properties.Name -notcontains 'deploymentValidationOperations'){$t|Add-Member NoteProperty deploymentValidationOperations ([object[]]@()) -Force};if(@($t.deploymentValidationOperations|Where-Object OperationId -ceq $id).Count){throw 'Deployment-validation operation already exists.'};$t.deploymentValidationOperations=[object[]]@($t.deploymentValidationOperations)+$op;$t}
+    $op
+}
+function Continue-MayaQaDeploymentValidation {
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$OperationId,
+        [Parameter(Mandatory)][long]$ExpectedTaskRevision,
+        [Parameter(Mandatory)][string]$ExpectedBuildRequestId,
+        [Parameter(Mandatory)][string]$ExpectedCandidateSourceCommit,
+        [Parameter(Mandatory)][string]$ExpectedCandidateSha256,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$TestId,
+        [scriptblock]$DispositionResolver,
+        [scriptblock]$RequestInvoker
+    )
+    $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+    if(!$task){throw 'Continuation task was not found.'}
+    $workflows=@($task.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId)
+    if($workflows.Count -ne 1 -or $workflows[0].taskId -cne $TaskId){throw 'Continuation task/workflow identity mismatch.'}
+    if([long]$task.revision -ne $ExpectedTaskRevision){throw 'Continuation task revision changed.'}
+    $op=$null;if($task.PSObject.Properties.Name -contains 'deploymentValidationOperations'){$op=@($task.deploymentValidationOperations|Where-Object OperationId -ceq $OperationId)[0]}
+    if(!$op){throw 'Deployment-validation operation was not found.'}
+    foreach($pair in @(@('TaskId',$TaskId),@('WorkflowId',$WorkflowId),@('BuildRequestId',$ExpectedBuildRequestId),@('CandidateSourceCommit',$ExpectedCandidateSourceCommit),@('CandidateSha256',$ExpectedCandidateSha256),@('QaWorkflowId',$QaWorkflowId),@('TestId',$TestId))){if([string]$op.($pair[0]) -cne [string]$pair[1]){throw "Deployment-validation operation binding mismatch: $($pair[0])."}}
+    if([long]$op.ExpectedTaskRevision -ne $ExpectedTaskRevision){throw 'Deployment-validation operation revision binding mismatch.'}
+    if($op.RequestDisposition -ceq 'completed') {[pscustomobject]@{Status='Completed';OperationId=$OperationId;RequestDisposition='completed';Validation=$op.Response;RevitLaunched=$false;ApprovalBoundaryPreserved=$true};return}
+    if($op.RequestDisposition -ceq 'unknown'){
+        if(!$DispositionResolver){throw 'Ambiguous deployment-validation transmission is not retryable.'}
+        $resolved=& $DispositionResolver $op
+        if(!$resolved -or [string]$resolved.OperationId -cne $OperationId -or [string]$resolved.Disposition -cne 'completed'){throw 'Authoritative deployment-validation disposition did not confirm completion.'}
+        $op.Response=$resolved.Response;$op.RequestDisposition='completed'
+    } elseif($op.RequestDisposition -ne 'confirmed-unsent'){throw 'Legacy or incompatible deployment-validation operation state is not retryable.'}
+    if($op.RequestDisposition -ceq 'completed'){$result=$op.Response}else{
+        if(!$RequestInvoker){throw 'A request invoker is required for confirmed-unsent continuation.'}
+        $op.RequestDisposition='sent';$response=& $RequestInvoker $op
+        if(!$response){$op.RequestDisposition='unknown';throw 'Deployment-validation response was not received; retry is blocked.'}
+        $op.Response=$response;$op.RequestDisposition='completed';$result=$response
+    }
+    $null=Invoke-RepatoStoreMutation $StoreRoot {param($d,$preview)$t=Find-RepatoTask $d $TaskId;$x=@($t.deploymentValidationOperations|Where-Object OperationId -ceq $OperationId)[0];if(!$x){throw 'Deployment-validation operation disappeared.'};$x.RequestDisposition=$op.RequestDisposition;$x.Response=$op.Response;$t}
+    [pscustomobject]@{Status='Completed';OperationId=$OperationId;RequestDisposition='completed';Validation=$result;RevitLaunched=$false;ApprovalBoundaryPreserved=$true}
+}
 function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation {
     [CmdletBinding()]
     param(
@@ -2183,6 +2230,7 @@ Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
 Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup
 Export-ModuleMember -Function Complete-MayaQaPreparedAttemptCleanup
 Export-ModuleMember -Function Invoke-MayaQaLaunchAgentHealth,Invoke-MayaQaLaunchAgentPreflightReadonly,Invoke-MayaQaLaunchAgentFrozenCandidateStaging,Invoke-MayaQaLaunchAgentDeploymentValidation
+Export-ModuleMember -Function New-MayaQaDeploymentValidationOperation,Continue-MayaQaDeploymentValidation
 Export-ModuleMember -Function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation
 Export-ModuleMember -Function Normalize-MayaQaDeploymentValidationResponse
 Export-ModuleMember -Function Test-MayaQaFrozenCandidate,New-MayaQaCanonicalCandidate,Invoke-MayaQaFrozenCandidateEvidence,Get-MayaQaTrustedBuildSourceCommit,Resolve-MayaQaAuthenticatedBuildSource
