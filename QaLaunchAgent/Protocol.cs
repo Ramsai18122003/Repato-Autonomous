@@ -103,8 +103,8 @@ public static class QaLaunchPolicy
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
     public static bool HasValidDeploymentManifestEvidence(QaDeploymentValidationResponse? response)
     {
-        if (response is null || string.IsNullOrWhiteSpace(response.RunnerManifestPath) || !IsSha256(response.RunnerManifestSha256) || response.ManifestIntegrityPassed is null) return false;
-        try { return Path.GetFullPath(response.RunnerManifestPath).Equals(ExpectedRunnerManifestPath, StringComparison.OrdinalIgnoreCase) && response.RunnerManifestSha256!.Equals(ExpectedRunnerManifestSha256, StringComparison.OrdinalIgnoreCase); }
+        if (response is null || string.IsNullOrWhiteSpace(response.RunnerManifestPath) || response.RunnerManifestSha256 is not { Length: 64 } manifestHash || !IsSha256(manifestHash) || response.ManifestIntegrityPassed is null) return false;
+        try { return Path.GetFullPath(response.RunnerManifestPath).Equals(ExpectedRunnerManifestPath, StringComparison.OrdinalIgnoreCase) && manifestHash.Equals(ExpectedRunnerManifestSha256, StringComparison.OrdinalIgnoreCase); }
         catch { return false; }
     }
     public static bool CanPassDeploymentValidation(QaDeploymentValidationResponse? response) =>
