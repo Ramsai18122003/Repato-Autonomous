@@ -1,8 +1,9 @@
+param([string]$SourceRoot=(Join-Path (Split-Path $PSScriptRoot -Parent) 'QaLaunchAgent\bin\Release\net8.0-windows'),[string]$ManifestPath=(Join-Path (Split-Path $PSScriptRoot -Parent) 'QaLaunchAgent\Repato.QaLaunchAgent.release.json'))
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
 $module=Import-Module (Join-Path $repo 'QaLaunchAgent\Repato.QaLaunchAgent.Bootstrap.psm1') -Force -PassThru
-$source=Join-Path $repo 'QaLaunchAgent\bin\Release\net8.0-windows'
-$manifest=Join-Path $repo 'QaLaunchAgent\Repato.QaLaunchAgent.release.json'
+$source=$SourceRoot
+$manifest=$ManifestPath
 $manifestHash=(Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash
 $passed=0
 function Pass([bool]$condition,[string]$name){if(!$condition){throw "FAILED: $name"};$script:passed++}
@@ -24,7 +25,7 @@ try {
   Add-Content -LiteralPath (Join-Path $bad 'Repato.QaLaunchAgent.dll') -Value 'tamper'
   Reject {& $module {param($s,$m,$h) Read-ValidatedManifest $s $m $h} $bad $manifest $manifestHash} 'source hash mismatch rejected'
   $versionManifest=Join-Path $temp 'wrong-version.json'
-  $versionJson=(Get-Content -LiteralPath $manifest -Raw).Replace('1.0.0+fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3','9.9.9+wrong')
+  $versionJson=(Get-Content -LiteralPath $manifest -Raw).Replace([string]$validated.Manifest.productVersion,'9.9.9+wrong')
   Set-Content -LiteralPath $versionManifest -Value $versionJson -NoNewline
   $versionHash=(Get-FileHash -LiteralPath $versionManifest -Algorithm SHA256).Hash
   Reject {& $module {param($s,$m,$h) Read-ValidatedManifest $s $m $h} $source $versionManifest $versionHash} 'mismatched executable DLL release identity rejected'

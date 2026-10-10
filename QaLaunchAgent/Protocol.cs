@@ -36,7 +36,7 @@ public sealed record QaCandidateEvidence(
 public sealed record QaStageRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId, string? TaskId = null, string? WorkflowId = null, QaCandidateEvidence? CandidateEvidence = null);
 public sealed record QaStageResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? StagingIdentity, string? QaAddinRoot, bool IsolationPassed, string? ReceiptPath, string? ErrorCode, string? ErrorMessage);
 public sealed record QaDeploymentValidationRequest(int SchemaVersion, string Operation, string RequestId, string CandidateCommit, string ExpectedCandidateSha256, string QaWorkflowId, string TestId, string? TaskId = null, string? WorkflowId = null, QaCandidateEvidence? CandidateEvidence = null);
-public sealed record QaDeploymentValidationResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? ValidationIdentity, string? QaAddinRoot, bool IsolationPassed, string? ErrorCode, string? ErrorMessage);
+public sealed record QaDeploymentValidationResponse(int SchemaVersion, string Operation, string RequestId, bool Succeeded, string? CandidateCommit, string? CandidateSha256, string? QaWorkflowId, string? TestId, string? ValidationIdentity, string? QaAddinRoot, bool IsolationPassed, string? ErrorCode, string? ErrorMessage, string? RunnerManifestPath = null, string? RunnerManifestSha256 = null, bool? ManifestIntegrityPassed = null);
 
 public static class QaLaunchPolicy
 {
@@ -47,6 +47,8 @@ public static class QaLaunchPolicy
     public const string PreflightOperation = "preflight-readonly";
     public const string StageOperation = "stage-frozen-candidate-for-qa";
     public const string ValidateDeploymentOperation = "validate-qa-deployment";
+    public const string ExpectedRunnerManifestPath = @"C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin";
+    public const string ExpectedRunnerManifestSha256 = "AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F";
     public const string ApprovedCandidateRoot = @"C:\Repato-Autonomous\Source\DeploymentCandidates\AgentBuilds";
     public const string ApprovedRunnerManifestRoot = @"C:\Repato-Autonomous\Source\QA";
     public const string ExpectedUser = "RAMSAI\\RepatoQA";
@@ -99,6 +101,14 @@ public static class QaLaunchPolicy
     }
     private static bool Under(string path, string root) => path.StartsWith(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
+    public static bool HasValidDeploymentManifestEvidence(QaDeploymentValidationResponse? response)
+    {
+        if (response is null || string.IsNullOrWhiteSpace(response.RunnerManifestPath) || !IsSha256(response.RunnerManifestSha256) || response.ManifestIntegrityPassed is null) return false;
+        try { return Path.GetFullPath(response.RunnerManifestPath).Equals(ExpectedRunnerManifestPath, StringComparison.OrdinalIgnoreCase) && response.RunnerManifestSha256!.Equals(ExpectedRunnerManifestSha256, StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
+    }
+    public static bool CanPassDeploymentValidation(QaDeploymentValidationResponse? response) =>
+        response is { Succeeded: true, ManifestIntegrityPassed: true } && HasValidDeploymentManifestEvidence(response);
     public static bool IsValidRequest(QaLaunchRequest r, DateTimeOffset now) =>
         r is not null && r.SchemaVersion == LaunchSchemaVersion && r.Operation == Operation &&
         Guid.TryParse(r.RequestId, out _) &&

@@ -22,7 +22,14 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request?.RequestId ?? "", false, request?.CandidateCommit, request?.ExpectedCandidateSha256, request?.QaWorkflowId, request?.TestId, null, null, false, "wrong-agent-identity", null);
         if (request is null || request.SchemaVersion != 1 || request.Operation != QaLaunchPolicy.ValidateDeploymentOperation || !Guid.TryParse(request.RequestId, out _) || request.QaWorkflowId != "create-plan-views-v1" || request.TestId != request.QaWorkflowId || (request.CandidateEvidence is null && (request.CandidateCommit != QaLaunchPolicy.FrozenCandidateCommit || request.ExpectedCandidateSha256 != QaLaunchPolicy.FrozenCandidateSha256)) || (request.CandidateEvidence is not null && !QaLaunchPolicy.IsValidCandidateEvidence(request.CandidateEvidence, request.TaskId ?? "", request.WorkflowId ?? "", request.QaWorkflowId, request.TestId))) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request?.RequestId ?? "", false, request?.CandidateCommit, request?.ExpectedCandidateSha256, request?.QaWorkflowId, request?.TestId, null, null, false, "validation-request-invalid", null);
         if (!ledger.TryReserve(request.RequestId, now)) return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "validation-request-replayed", null);
-        try { return StagingAdapter.ValidateDeployment(request); } catch (Exception ex) { return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "deployment-validation-failed", ex.Message); }
+        try
+        {
+            var response = StagingAdapter.ValidateDeployment(request);
+            if (response.Succeeded && !QaLaunchPolicy.CanPassDeploymentValidation(response))
+                return response with { Succeeded = false, ErrorCode = "manifest-integrity-evidence-rejected", ErrorMessage = response.ManifestIntegrityPassed == false ? "Runtime manifest integrity evidence rejected deployment." : "Runtime manifest integrity evidence is missing or malformed." };
+            return response;
+        }
+        catch (Exception ex) { return new(1, QaLaunchPolicy.ValidateDeploymentOperation, request.RequestId, false, request.CandidateCommit, request.ExpectedCandidateSha256, request.QaWorkflowId, request.TestId, null, null, false, "deployment-validation-failed", ex.Message); }
     }
 
     public QaPreflightResponse HandlePreflight(QaPreflightRequest? request)

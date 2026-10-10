@@ -52,6 +52,9 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         }
         catch { response = new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request"); }
         using var writer = new StreamWriter(pipe) { AutoFlush = true };
-        await writer.WriteLineAsync(JsonSerializer.Serialize(response, response.GetType(), QaLaunchPolicy.JsonOptions));
+        await writer.WriteLineAsync(SerializeResponse(response));
     }
+
+    public static string SerializeResponse(object response) =>
+        JsonSerializer.Serialize(response, response.GetType(), QaLaunchPolicy.JsonOptions);
 }

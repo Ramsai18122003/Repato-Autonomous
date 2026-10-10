@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text;
 using Repato.QaLaunchAgent;
 if (args.Length == 2 && args[0] == "--candidate-evidence")
@@ -67,4 +68,37 @@ if(QaLaunchPolicy.CanonicalRequestSha256(tamperedJson).Equals(integrityRequest.R
 var response=new QaLaunchResponseV2(2,QaLaunchPolicy.Operation,request.RequestId,request.RequestId,true,4242,QaLaunchPolicy.ExpectedUser,QaLaunchPolicy.ExpectedUserSid,16,DateTimeOffset.UtcNow,@"E:\revit\Revit 2025\Revit.exe",request.RequestPath,request.TaskId,request.WorkflowId,request.QaWorkflowId,request.TestId,request.AttemptId,request.RunId,null);
 var rs=JsonSerializer.Deserialize<QaLaunchResponseV2>(JsonSerializer.Serialize(response))!;
 if(!rs.Accepted||rs.CorrelationId!=request.RequestId||rs.Sid!=QaLaunchPolicy.ExpectedUserSid||rs.RunId!=request.RunId)throw new Exception("Response interoperability failed.");
+var adapterJson="""{"schemaVersion":1,"operation":"validate-qa-deployment","requestId":"29244cda85b2416993130645675a7892","succeeded":true,"candidateCommit":"fcf624ee3ed1c84fcc2bb78e4bf46d92090b98f3","candidateSha256":"7EC1C819C771DCE4EC4ADCADB93B0245D243F6675EC0F0B070B03303B1F412C2","qaWorkflowId":"create-plan-views-v1","testId":"create-plan-views-v1","validationIdentity":"RAMSAI\\RepatoQA","qaAddinRoot":"C:\\Users\\RepatoQA\\AppData\\Roaming\\Autodesk\\Revit\\Addins\\2025\\RepatoQA","isolationPassed":true,"errorCode":null,"errorMessage":null,"runnerManifestPath":"C:\\Users\\RepatoQA\\AppData\\Roaming\\Autodesk\\Revit\\Addins\\2025\\Repato.CreatePlanViews.TestRunner.addin","runnerManifestSha256":"AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F","manifestIntegrityPassed":true}""";
+var adapterResponse = StagingAdapter.DeserializeDeploymentValidationResponse(adapterJson);
+if (!QaLaunchPolicy.CanPassDeploymentValidation(adapterResponse)) throw new Exception("Valid adapter deployment response was rejected.");
+var pipeJson = NamedPipeLaunchServer.SerializeResponse(adapterResponse);
+var pipeResponse = JsonSerializer.Deserialize<QaDeploymentValidationResponse>(pipeJson, QaLaunchPolicy.JsonOptions)!;
+if (pipeResponse.RunnerManifestPath != adapterResponse.RunnerManifestPath || pipeResponse.RunnerManifestSha256 != adapterResponse.RunnerManifestSha256 || pipeResponse.ManifestIntegrityPassed != true) throw new Exception("Named-pipe serialization dropped deployment manifest evidence.");
+var withoutEvidence = StagingAdapter.DeserializeDeploymentValidationResponse("""{"schemaVersion":1,"operation":"validate-qa-deployment","requestId":"29244cda85b2416993130645675a7892","succeeded":true,"isolationPassed":true}""");
+if (withoutEvidence.RunnerManifestPath is not null || withoutEvidence.RunnerManifestSha256 is not null || withoutEvidence.ManifestIntegrityPassed is not null || QaLaunchPolicy.CanPassDeploymentValidation(withoutEvidence)) throw new Exception("Missing deployment manifest evidence received unsafe defaults.");
+var pipeMissingJson = NamedPipeLaunchServer.SerializeResponse(withoutEvidence);
+if (!pipeMissingJson.Contains("\"runnerManifestPath\":null", StringComparison.Ordinal) || !pipeMissingJson.Contains("\"runnerManifestSha256\":null", StringComparison.Ordinal) || !pipeMissingJson.Contains("\"manifestIntegrityPassed\":null", StringComparison.Ordinal)) throw new Exception("Missing manifest evidence defaults were not explicit at the named-pipe boundary.");
+foreach (var field in new[] { "runnerManifestPath", "runnerManifestSha256", "manifestIntegrityPassed" })
+{
+    var withoutOneField = JsonNode.Parse(adapterJson)!.AsObject();
+    withoutOneField.Remove(field);
+    var incomplete = StagingAdapter.DeserializeDeploymentValidationResponse(withoutOneField.ToJsonString());
+    if (QaLaunchPolicy.CanPassDeploymentValidation(incomplete)) throw new Exception($"Missing {field} was accepted for successful validation.");
+}
+foreach (var malformed in new[]
+{
+    adapterJson.Replace("AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F", "not-a-sha256", StringComparison.Ordinal),
+    adapterJson.Replace("C:\\\\Users\\\\RepatoQA\\\\AppData\\\\Roaming\\\\Autodesk\\\\Revit\\\\Addins\\\\2025\\\\Repato.CreatePlanViews.TestRunner.addin", "C:\\\\unexpected.addin", StringComparison.Ordinal),
+    adapterJson.Replace("\"manifestIntegrityPassed\":true", "\"manifestIntegrityPassed\":\"true\"", StringComparison.Ordinal)
+})
+{
+    try
+    {
+        var invalid = StagingAdapter.DeserializeDeploymentValidationResponse(malformed);
+        if (QaLaunchPolicy.CanPassDeploymentValidation(invalid)) throw new Exception("Malformed deployment manifest evidence was accepted.");
+    }
+    catch (System.Text.Json.JsonException) { }
+}
+var explicitNegative = adapterResponse with { ManifestIntegrityPassed = false };
+if (!QaLaunchPolicy.HasValidDeploymentManifestEvidence(explicitNegative) || QaLaunchPolicy.CanPassDeploymentValidation(explicitNegative)) throw new Exception("Explicit negative manifest evidence passed validation.");
 Console.WriteLine("C# protocol v2 request/response interoperability passed.");
