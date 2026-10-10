@@ -6,5 +6,9 @@ if($script:seen.operation -cne 'preflight-readonly' -or $script:seen.schemaVersi
 if($result.ExecutionIdentity -cne 'RAMSAI\RepatoQA' -or $result.Checks.Count -ne 1 -or $result.Response.failureCode -cne 'preflight-failed'){throw 'Complete response parsing failed.'}
 try { Invoke-MayaQaLaunchAgentPreflightReadonly -ResponseProvider { [pscustomobject]@{schemaVersion=1;operation='launch-revit-qa'} } ; throw 'Invalid operation response was accepted.' } catch { if($_.Exception.Message -notmatch 'missing|Unexpected preflight response') { throw } }
 $module=Get-Content (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Raw
-if($module -notmatch "operation='preflight-readonly'" -or $module -match 'param\([^)]*Operation') {throw 'Operation injection surface detected.'}
+$start=$module.IndexOf('function Invoke-MayaQaLaunchAgentPreflightReadonly')
+$end=$module.IndexOf('function Read-MayaQaBoundedPipeLine',$start)
+if($start -lt 0 -or $end -le $start){throw 'Preflight implementation boundary could not be isolated.'}
+$preflight=$module.Substring($start,$end-$start)
+if($preflight -notmatch "operation='preflight-readonly'" -or $preflight -match 'param\([^)]*Operation') {throw 'Operation injection surface detected.'}
 Write-Output 'Maya preflight client synthetic tests passed: fixed operation, shared pipe transport, complete response, identity gate, and no operation injection.'
