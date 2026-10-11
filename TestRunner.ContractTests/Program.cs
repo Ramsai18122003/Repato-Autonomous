@@ -10,7 +10,7 @@ var jsonObject = new Dictionary<string, object?>
 {
     ["schemaVersion"] = 2, ["operation"] = "launch-revit-qa", ["requestId"] = Guid.NewGuid().ToString("N"),
     ["taskId"] = "task-synthetic", ["workflowId"] = Guid.NewGuid().ToString("N"), ["qaWorkflowId"] = CreatePlanViewsRequest.Test,
-    ["testId"] = CreatePlanViewsRequest.Test, ["attemptId"] = Guid.NewGuid().ToString("N"), ["runId"] = Guid.NewGuid().ToString("N"),
+    ["testId"] = CreatePlanViewsRequest.Test, ["attemptId"] = Guid.NewGuid().ToString("N"), ["runId"] = Environment.GetEnvironmentVariable("REPATO_CONTRACT_RUN_ID") ?? Guid.NewGuid().ToString("N"),
     ["claimId"] = Guid.NewGuid().ToString("N"), ["requestPath"] = tempRequest, ["requestSha256"] = new string('0', 64),
     ["modelPath"] = Path.Combine(Path.GetTempPath(), "model.rvt"), ["modelSha256"] = modelHash,
     ["manifestPath"] = Path.Combine(Path.GetTempPath(), "Repato.CreatePlanViews.TestRunner.addin"), ["manifestSha256"] = manifestHash,
@@ -22,6 +22,8 @@ string requestJson = JsonSerializer.Serialize(jsonObject);
 var request = CreatePlanViewsRequest.Parse(requestJson, tempRequest);
 Check(request.RequestId == (string)jsonObject["requestId"]!, "request id parsed and bound");
 Check(request.AttemptId == (string)jsonObject["attemptId"]! && request.RunId == (string)jsonObject["runId"]!, "attempt/run identity parsed");
+if (Environment.GetEnvironmentVariable("REPATO_CONTRACT_RUN_ID") is string producedRunId)
+    Check(request.RunId == producedRunId && Guid.TryParseExact(request.RunId, "N", out _), "actual producer run id accepted and correlated by compiled runner parser");
 Reject(() => CreatePlanViewsRequest.Parse(requestJson.Replace("task-synthetic", "task-tampered"), tempRequest), "tampered request self-hash rejected");
 Reject(() => CreatePlanViewsRequest.Parse(requestJson, tempRequest + ".other"), "request path binding enforced");
 Reject(() => CreatePlanViewsRequest.Parse(requestJson.Replace(CreatePlanViewsRequest.Test, "other-test"), tempRequest), "wrong test contract rejected");

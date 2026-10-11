@@ -10,10 +10,19 @@ namespace Repato.Revit.TestRunner;
 public sealed class CreatePlanViewsQaApplication : IExternalApplication
 {
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
+    public const string LevelInventoryEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_LEVEL_INVENTORY";
     private string? requestPath;
+    private string? levelInventoryRequestPath;
 
     public Result OnStartup(UIControlledApplication application)
     {
+        levelInventoryRequestPath = Environment.GetEnvironmentVariable(LevelInventoryEnvironmentVariable);
+        if (!string.IsNullOrWhiteSpace(levelInventoryRequestPath))
+        {
+            application.Idling += InspectLevelsOnce;
+            return Result.Succeeded;
+        }
+
         requestPath = Environment.GetEnvironmentVariable(RequestEnvironmentVariable);
         if (!string.IsNullOrWhiteSpace(requestPath)) application.Idling += RunOnce;
         return Result.Succeeded;
@@ -22,7 +31,74 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
     public Result OnShutdown(UIControlledApplication application)
     {
         application.Idling -= RunOnce;
+        application.Idling -= InspectLevelsOnce;
         return Result.Succeeded;
+    }
+
+    private void InspectLevelsOnce(object? sender, IdlingEventArgs args)
+    {
+        if (sender is not UIApplication app) return;
+        app.Idling -= InspectLevelsOnce;
+
+        string requestPath = QAPathPolicy.ValidatePath(levelInventoryRequestPath!, QAPathPolicy.RunsRoot, false);
+        using JsonDocument requestDocument = JsonDocument.Parse(File.ReadAllText(requestPath));
+        JsonElement request = requestDocument.RootElement;
+        string modelPath = QAPathPolicy.ValidatePath(request.GetProperty("modelPath").GetString()!, QAPathPolicy.RunsRoot, true);
+        string expectedModelSha256 = request.GetProperty("modelSha256").GetString() ?? "";
+        string outputPath = QAPathPolicy.ValidatePath(request.GetProperty("outputPath").GetString()!, QAPathPolicy.RunsRoot, false);
+        string taskId = request.GetProperty("taskId").GetString() ?? "";
+        string attemptId = request.GetProperty("attemptId").GetString() ?? "";
+        string runId = request.GetProperty("runId").GetString() ?? "";
+
+        if (!Guid.TryParseExact(attemptId, "N", out _) || !Guid.TryParseExact(runId, "N", out _))
+            throw new InvalidOperationException("Level inventory attempt/run identity is invalid.");
+        if (!Path.GetDirectoryName(modelPath)!.Equals(Path.GetDirectoryName(requestPath), StringComparison.OrdinalIgnoreCase) ||
+            !Path.GetDirectoryName(outputPath)!.Equals(Path.GetDirectoryName(requestPath), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Inventory request, model, and output must share one attempt directory.");
+        if (File.Exists(outputPath)) throw new InvalidOperationException("Level inventory output already exists.");
+        if (app.Application.VersionNumber != "2025") throw new InvalidOperationException("Level inventory requires Revit 2025.");
+        Document document = app.ActiveUIDocument?.Document ?? throw new InvalidOperationException("No fixture document is open for level inventory.");
+        if (!Path.GetFullPath(document.PathName).Equals(modelPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Open document does not match the level inventory request.");
+        string actualModelSha256 = TestRunReport.Hash(modelPath);
+        if (!actualModelSha256.Equals(expectedModelSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Fixture hash does not match the level inventory request.");
+        using (BasicFileInfo info = BasicFileInfo.Extract(modelPath))
+            if (info.IsWorkshared || info.IsCentral || info.IsLocal || info.Format != "2025")
+                throw new InvalidOperationException("Level inventory target is not a local non-workshared Revit 2025 fixture.");
+
+        var levels = new FilteredElementCollector(document).OfClass(typeof(Level)).Cast<Level>()
+            .OrderBy(level => level.Elevation)
+            .ThenBy(level => level.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(level => new
+            {
+                ElementId = level.Id.Value,
+                level.Name,
+                ElevationInternalFeet = level.Elevation,
+                ElevationFeet = UnitUtils.ConvertFromInternalUnits(level.Elevation, UnitTypeId.Feet),
+                ElevationMeters = UnitUtils.ConvertFromInternalUnits(level.Elevation, UnitTypeId.Meters)
+            }).ToArray();
+
+        string temporaryPath = outputPath + ".partial";
+        using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            JsonSerializer.Serialize(stream, new
+            {
+                SchemaVersion = 1,
+                Inspection = "read-only-revit-level-inventory",
+                TaskId = taskId,
+                AttemptId = attemptId,
+                RunId = runId,
+                ModelPath = modelPath,
+                ModelSha256 = actualModelSha256,
+                RevitVersion = $"{app.Application.VersionName}; {app.Application.VersionNumber}; {app.Application.VersionBuild}",
+                Levels = levels
+            }, new JsonSerializerOptions { WriteIndented = true });
+            stream.Flush(true);
+        }
+        File.Move(temporaryPath, outputPath);
+        if (!TestRunReport.Hash(modelPath).Equals(expectedModelSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Fixture hash changed during read-only level inventory.");
     }
 
     private void RunOnce(object? sender, IdlingEventArgs args)
