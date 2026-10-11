@@ -98,7 +98,13 @@ function New-TaraRevitQaPlan {
     $source=Assert-TaraPath $Context.SourceFixturePath (Join-Path $qa 'Fixtures') -Leaf
     $side=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json
     if($side.fixtureId -cne $Context.FixtureId -or $side.sourceSha256 -ine $Context.FixtureSha256){throw 'Fixture sidecar identity or expected source hash mismatch.'}
-    foreach($p in @($source,$model)){if((Get-TaraSha256 $p) -ine $Context.FixtureSha256){throw 'Fixture/model hash mismatch.'}}
+    if((Get-TaraSha256 $source) -ine $Context.FixtureSha256){throw 'Authoritative source fixture hash mismatch.'}
+    $preparation=if($Context.PSObject.Properties.Name -contains 'FixturePreparationEvidence'){$Context.FixturePreparationEvidence}else{$null}
+    if($preparation){
+        foreach($pair in @(@('RequestPath','RequestSha256'),@('ResultPath','ResultSha256'))){$p=Assert-TaraPath ([string]$preparation.($pair[0])) (Join-Path $qa 'TestRuns') -Leaf;if((Get-TaraSha256 $p) -ine [string]$preparation.($pair[1])){throw "Fixture preparation $($pair[0]) hash mismatch."}}
+        if((Get-TaraSha256 $model) -ine [string]$Context.ModelSha256 -or [string]$Context.ModelSha256 -ine [string]$preparation.PreparedModelSha256 -or [string]$preparation.SourceSha256 -ine [string]$Context.FixtureSha256){throw 'Prepared disposable model or source fixture hash does not match correlated preparation evidence.'}
+        if($side.preparedModelSha256 -ine [string]$Context.ModelSha256 -or $side.fixturePreparationRequestPath -ine [string]$preparation.RequestPath -or $side.fixturePreparationRequestSha256 -ine [string]$preparation.RequestSha256 -or $side.fixturePreparationResultPath -ine [string]$preparation.ResultPath -or $side.fixturePreparationResultSha256 -ine [string]$preparation.ResultSha256 -or $side.fixturePreparationAttemptId -cne [string]$preparation.AttemptId -or $side.fixturePreparationRunId -cne [string]$preparation.RunId){throw 'Fixture sidecar does not correlate to its preparation request/result.'}
+    }elseif((Get-TaraSha256 $model) -ine $Context.FixtureSha256){throw 'Fixture/model hash mismatch without correlated preparation evidence.'}
     $addin=if([Security.Principal.WindowsIdentity]::GetCurrent().Name.Split('\')[-1] -ieq 'RepatoQA'){Assert-TaraPath $QaAddinRoot $roots.UserAddinsRoot}else{$QaAddinRoot}
     if($addin -ine (Join-Path $roots.UserAddinsRoot 'RepatoQA')){throw 'Production add-in path rejected: only the dedicated RepatoQA folder is allowed.'}
     $runner=$runners[$QaWorkflowId]
