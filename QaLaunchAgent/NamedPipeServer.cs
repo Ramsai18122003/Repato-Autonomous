@@ -51,8 +51,16 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
             }
         }
         catch { response = new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request"); }
-        using var writer = new StreamWriter(pipe) { AutoFlush = true };
-        await writer.WriteLineAsync(SerializeResponse(response));
+        try
+        {
+            using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
+            await writer.WriteLineAsync(SerializeResponse(response));
+        }
+        catch (IOException)
+        {
+            // A client may time out while a bounded staging/validation adapter is still running.
+            // Its disconnect must not terminate the long-lived scheduled-task listener.
+        }
     }
 
     public static string SerializeResponse(object response) =>
