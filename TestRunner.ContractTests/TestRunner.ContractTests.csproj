@@ -8,5 +8,6 @@
   <ItemGroup>
     <Compile Include="..\TestRunner\CreatePlanViewsRequestContract.cs" Link="CreatePlanViewsRequestContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsResultContract.cs" Link="CreatePlanViewsResultContract.cs" />
+    <Compile Include="..\TestRunner\CreatePlanViewsFixturePreparationRequest.cs" Link="CreatePlanViewsFixturePreparationRequest.cs" />
   </ItemGroup>
 </Project>

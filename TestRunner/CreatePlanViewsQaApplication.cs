@@ -11,8 +11,10 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
 {
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
     public const string LevelInventoryEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_LEVEL_INVENTORY";
+    public const string FixturePreparationEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_FIXTURE_PREPARATION";
     private string? requestPath;
     private string? levelInventoryRequestPath;
+    private string? fixturePreparationRequestPath;
 
     public Result OnStartup(UIControlledApplication application)
     {
@@ -20,6 +22,13 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
         if (!string.IsNullOrWhiteSpace(levelInventoryRequestPath))
         {
             application.Idling += InspectLevelsOnce;
+            return Result.Succeeded;
+        }
+
+        fixturePreparationRequestPath = Environment.GetEnvironmentVariable(FixturePreparationEnvironmentVariable);
+        if (!string.IsNullOrWhiteSpace(fixturePreparationRequestPath))
+        {
+            application.Idling += PrepareFixtureOnce;
             return Result.Succeeded;
         }
 
@@ -32,7 +41,119 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
     {
         application.Idling -= RunOnce;
         application.Idling -= InspectLevelsOnce;
+        application.Idling -= PrepareFixtureOnce;
         return Result.Succeeded;
+    }
+
+    private void PrepareFixtureOnce(object? sender, IdlingEventArgs args)
+    {
+        if (sender is not UIApplication app) return;
+        app.Idling -= PrepareFixtureOnce;
+        try
+        {
+            PrepareFixtureCore(app);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                string requestPath = QAPathPolicy.ValidatePath(fixturePreparationRequestPath!, QAPathPolicy.RunsRoot, false);
+                using JsonDocument requestDocument = JsonDocument.Parse(File.ReadAllText(requestPath));
+                JsonElement request = requestDocument.RootElement;
+                string outputPath = QAPathPolicy.ValidatePath(request.GetProperty("outputPath").GetString()!, QAPathPolicy.RunsRoot, false);
+                if (!File.Exists(outputPath))
+                {
+                    using var stream = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    JsonSerializer.Serialize(stream, new
+                    {
+                        SchemaVersion = 1,
+                        Operation = "prepare-disposable-create-plan-views-fixture",
+                        Status = "Failed",
+                        TaskId = request.GetProperty("taskId").GetString(),
+                        WorkflowId = request.GetProperty("workflowId").GetString(),
+                        AttemptId = request.GetProperty("attemptId").GetString(),
+                        RunId = request.GetProperty("runId").GetString(),
+                        ModelPath = request.GetProperty("modelPath").GetString(),
+                        Error = ex.ToString()
+                    }, new JsonSerializerOptions { WriteIndented = true });
+                    stream.Flush(true);
+                }
+            }
+            catch (Exception evidenceError)
+            {
+                app.Application.WriteJournalComment("Repato Create Plan Views fixture preparation evidence failure: " + evidenceError, false);
+            }
+        }
+    }
+
+    private void PrepareFixtureCore(UIApplication app)
+    {
+        string requestPath = QAPathPolicy.ValidatePath(fixturePreparationRequestPath!, QAPathPolicy.RunsRoot, false);
+        CreatePlanViewsFixturePreparationRequest parsed = CreatePlanViewsFixturePreparationRequest.Parse(File.ReadAllText(requestPath), requestPath);
+        string modelPath = QAPathPolicy.ValidatePath(parsed.ModelPath, QAPathPolicy.RunsRoot, true);
+        string expectedModelSha256 = parsed.ModelSha256;
+        string outputPath = QAPathPolicy.ValidatePath(parsed.OutputPath, QAPathPolicy.RunsRoot, false);
+        string taskId = parsed.TaskId, workflowId = parsed.WorkflowId, attemptId = parsed.AttemptId, runId = parsed.RunId;
+        if (File.Exists(outputPath)) throw new InvalidOperationException("Fixture preparation output already exists.");
+        if (app.Application.VersionNumber != "2025") throw new InvalidOperationException("Fixture preparation requires Revit 2025.");
+        if (app.Application.Documents.Size != 1 || !string.Equals(Environment.UserName, "RepatoQA", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Fixture preparation requires one open document under the RepatoQA account.");
+        AddinIsolationPolicy.RequireAllowed(new TestRunReport());
+        Document document = app.ActiveUIDocument?.Document ?? throw new InvalidOperationException("No fixture document is open for preparation.");
+        if (!Path.GetFullPath(document.PathName).Equals(modelPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Open document does not match the fixture preparation request.");
+        using (BasicFileInfo info = BasicFileInfo.Extract(modelPath))
+            if (info.IsWorkshared || info.IsCentral || info.IsLocal || info.Format != "2025")
+                throw new InvalidOperationException("Fixture preparation target is not a local non-workshared Revit 2025 model.");
+        if (!TestRunReport.Hash(modelPath).Equals(expectedModelSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Fixture preparation input hash does not match the request.");
+
+        var levels = new FilteredElementCollector(document).OfClass(typeof(Level)).Cast<Level>().ToArray();
+        Level level0 = levels.SingleOrDefault(level => level.Name.Equals("Level 0", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("Expected source level 'Level 0' was not present exactly once.");
+        Level level1 = levels.SingleOrDefault(level => level.Name.Equals("Level 1", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("Expected source level 'Level 1' was not present exactly once.");
+        if (levels.Length != 2 || levels.Any(level => level.Name is "0" or "1" or "2"))
+            throw new InvalidOperationException("Fixture already contains one or more target level names.");
+
+        const double level2ElevationMillimeters = 7800;
+        using (var transaction = new Transaction(document, "Prepare disposable Create Plan Views fixture"))
+        {
+            transaction.Start();
+            level0.Name = "0";
+            level1.Name = "1";
+            Level.Create(document, UnitUtils.ConvertToInternalUnits(level2ElevationMillimeters, UnitTypeId.Millimeters)).Name = "2";
+            if (transaction.Commit() != TransactionStatus.Committed)
+                throw new InvalidOperationException("Fixture preparation transaction did not commit.");
+        }
+        document.Save();
+        var preparedLevels = new FilteredElementCollector(document).OfClass(typeof(Level)).Cast<Level>()
+            .Where(level => level.Name is "0" or "1" or "2")
+            .OrderBy(level => level.Name, StringComparer.Ordinal)
+            .Select(level => new { ElementId = level.Id.Value, level.Name, ElevationMeters = UnitUtils.ConvertFromInternalUnits(level.Elevation, UnitTypeId.Meters) })
+            .ToArray();
+        if (preparedLevels.Length != 3 || !preparedLevels.Select(level => level.Name).SequenceEqual(new[] { "0", "1", "2" }))
+            throw new InvalidOperationException("Prepared fixture did not contain exactly the required levels.");
+        string resultHash = TestRunReport.Hash(modelPath);
+        using (var stream = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            JsonSerializer.Serialize(stream, new
+            {
+                SchemaVersion = 1,
+                Operation = "prepare-disposable-create-plan-views-fixture",
+                Status = "Passed",
+                TaskId = taskId,
+                WorkflowId = workflowId,
+                AttemptId = attemptId,
+                RunId = runId,
+                ModelPath = modelPath,
+                SourceModelSha256 = expectedModelSha256,
+                PreparedModelSha256 = resultHash,
+                ElevationSource = "CreateLevelsTestCommand specification: 7800 mm",
+                Levels = preparedLevels
+            }, new JsonSerializerOptions { WriteIndented = true });
+            stream.Flush(true);
+        }
     }
 
     private void InspectLevelsOnce(object? sender, IdlingEventArgs args)

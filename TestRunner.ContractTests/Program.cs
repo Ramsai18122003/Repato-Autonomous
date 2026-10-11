@@ -4,6 +4,31 @@ using Repato.Revit.TestRunner;
 static void Check(bool value, string reason) { if (!value) throw new InvalidOperationException("FAILED: " + reason); }
 static void Reject(Action action, string reason) { try { action(); } catch { return; } throw new InvalidOperationException("FAILED: " + reason); }
 
+string preparationDirectory = Path.Combine(Path.GetTempPath(), "repato-fixture-prep-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(preparationDirectory);
+try
+{
+    string preparationRequestPath = Path.Combine(preparationDirectory, "prep.request.json");
+    var preparationJson = JsonSerializer.Serialize(new
+    {
+        operation = "prepare-disposable-create-plan-views-fixture",
+        taskId = "task-41cfec12ef3e406990d36c9997cf6591",
+        workflowId = "78b5a11ab95e4cac86dcf45a1cb9cfdc",
+        attemptId = Guid.NewGuid().ToString("N"),
+        runId = Guid.NewGuid().ToString("N"),
+        requestPath = preparationRequestPath,
+        modelPath = Path.Combine(preparationDirectory, "model.rvt"),
+        modelSha256 = new string('A', 64),
+        outputPath = Path.Combine(preparationDirectory, "prep.result.json"),
+        expiresUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+    });
+    var parsedPreparation = CreatePlanViewsFixturePreparationRequest.Parse(preparationJson, preparationRequestPath);
+    Check(parsedPreparation.TaskId == "task-41cfec12ef3e406990d36c9997cf6591" && parsedPreparation.AttemptId.Length == 32 && parsedPreparation.RunId.Length == 32, "fixture-preparation request identity parses and correlates");
+    Reject(() => CreatePlanViewsFixturePreparationRequest.Parse(preparationJson.Replace(parsedPreparation.RunId, Guid.NewGuid().ToString("D")), preparationRequestPath), "fixture-preparation mismatched run ID rejected");
+    Reject(() => CreatePlanViewsFixturePreparationRequest.Parse(preparationJson, preparationRequestPath + ".other"), "fixture-preparation request path binding enforced");
+}
+finally { Directory.Delete(preparationDirectory, recursive: true); }
+
 string tempRequest = Path.Combine(Path.GetTempPath(), "repato-request-" + Guid.NewGuid().ToString("N") + ".json");
 string modelHash = new('A', 64), manifestHash = new('B', 64), artifactHash = new('C', 64);
 var jsonObject = new Dictionary<string, object?>
