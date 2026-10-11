@@ -35,7 +35,8 @@ internal static class CreatePlanViewsResultContract
                 R("RunId") != request.RunId || R("ClaimId") != request.ClaimId || R("Status") != "Passed" ||
                 P("RequestId") != request.RequestId || P("TaskId") != request.TaskId || P("WorkflowId") != request.WorkflowId ||
                 P("TestId") != request.TestId || P("AttemptId") != request.AttemptId || P("RunId") != request.RunId || P("ClaimId") != request.ClaimId ||
-                P("Status") != "Passed" || P("RollbackStatus") != "RolledBack" || !IsHash(P("FixtureSha256")) ||
+                P("Status") != "Passed" || P("RollbackStatus") != "RolledBack" ||
+                !P("FixtureSha256").Equals(request.FixtureSha256, StringComparison.OrdinalIgnoreCase) ||
                 !P("RuntimeModelSha256").Equals(request.ModelSha256, StringComparison.OrdinalIgnoreCase) ||
                 !DateTimeOffset.TryParse(P("FinishedUtc"), out DateTimeOffset finished) || finished == default)
                 return false;

@@ -275,14 +275,16 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
                 throw new InvalidOperationException("Disposable model SHA-256 does not match the launch request.");
             string fixture = QAPathPolicy.ValidatePath(Path.Combine(QAPathPolicy.RepositoryRoot, "QA", "Fixtures", "CreatePlanViewsEmpty.rvt"),
                 Path.Combine(QAPathPolicy.RepositoryRoot, "QA", "Fixtures"), true);
+            string preparationRequestPath = QAPathPolicy.ValidatePath(request.FixturePreparationRequestPath, QAPathPolicy.RunsRoot, true);
+            string preparationResultPath = QAPathPolicy.ValidatePath(request.FixturePreparationResultPath, QAPathPolicy.RunsRoot, true);
+            CreatePlanViewsPreparationEvidenceContract.Verify(request, fixture, model);
             string sidecar = QAPathPolicy.ValidatePath(model + ".fixture.json", QAPathPolicy.RunsRoot, false);
             using (var provenance = JsonDocument.Parse(File.ReadAllText(sidecar)))
             {
                 JsonElement root = provenance.RootElement;
                 string fixtureHash = root.GetProperty("sourceSha256").GetString() ?? "";
                 if (root.GetProperty("fixtureId").GetString() != "CreatePlanViewsEmpty" ||
-                    !fixtureHash.Equals(TestRunReport.Hash(fixture), StringComparison.OrdinalIgnoreCase) ||
-                    !fixtureHash.Equals(request.ModelSha256, StringComparison.OrdinalIgnoreCase))
+                    !fixtureHash.Equals(request.FixtureSha256, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Controlled CreatePlanViewsEmpty fixture provenance failed.");
                 report.FixtureSha256 = fixtureHash;
             }

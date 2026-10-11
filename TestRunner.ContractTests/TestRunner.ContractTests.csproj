@@ -9,5 +9,6 @@
     <Compile Include="..\TestRunner\CreatePlanViewsRequestContract.cs" Link="CreatePlanViewsRequestContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsResultContract.cs" Link="CreatePlanViewsResultContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsFixturePreparationRequest.cs" Link="CreatePlanViewsFixturePreparationRequest.cs" />
+    <Compile Include="..\TestRunner\CreatePlanViewsPreparationEvidenceContract.cs" Link="CreatePlanViewsPreparationEvidenceContract.cs" />
   </ItemGroup>
 </Project>

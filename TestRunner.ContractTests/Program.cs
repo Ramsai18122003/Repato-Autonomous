@@ -32,8 +32,48 @@ try
 }
 finally { Directory.Delete(preparationDirectory, recursive: true); }
 
+string evidenceDirectory = Path.Combine(Path.GetTempPath(), "repato-prep-evidence-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(evidenceDirectory);
+try
+{
+    string sourceModel = Path.Combine(evidenceDirectory, "source.rvt"), preparedModel = Path.Combine(evidenceDirectory, "prepared.rvt");
+    string canonicalModel = Path.Combine(evidenceDirectory, "canonical.rvt"), prepRequestPath = Path.Combine(evidenceDirectory, "prep.request.json");
+    string prepResultPath = Path.Combine(evidenceDirectory, "prep.result.json");
+    File.WriteAllBytes(sourceModel, new byte[] { 1, 2, 3 }); File.WriteAllBytes(preparedModel, new byte[] { 4, 5, 6 }); File.Copy(preparedModel, canonicalModel);
+    string Hash(string path) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)));
+    string sourceEvidenceHash = Hash(sourceModel), preparedEvidenceHash = Hash(preparedModel);
+    string prepAttempt = Guid.NewGuid().ToString("N"), prepRun = Guid.NewGuid().ToString("N"), workflowId = Guid.NewGuid().ToString("N");
+    string prepJson = JsonSerializer.Serialize(new { operation = "prepare-disposable-create-plan-views-fixture", taskId = "task-contract", workflowId,
+        attemptId = prepAttempt, runId = prepRun, requestPath = prepRequestPath, modelPath = sourceModel, modelSha256 = sourceEvidenceHash,
+        selectedManifestPath = Path.Combine(evidenceDirectory, "Repato.CreatePlanViews.TestRunner.addin"), selectedManifestSha256 = new string('B', 64),
+        outputPath = prepResultPath, expiresUtc = DateTimeOffset.UtcNow.AddMinutes(5) });
+    File.WriteAllText(prepRequestPath, prepJson);
+    File.WriteAllText(prepResultPath, JsonSerializer.Serialize(new { Status = "Passed", Operation = "prepare-disposable-create-plan-views-fixture",
+        TaskId = "task-contract", WorkflowId = workflowId, AttemptId = prepAttempt, RunId = prepRun, ModelPath = sourceModel,
+        SourceModelSha256 = sourceEvidenceHash, PreparedModelSha256 = preparedEvidenceHash }));
+    var evidenceRequest = new CreatePlanViewsRequest(Guid.NewGuid().ToString("N"), "task-contract", workflowId, CreatePlanViewsRequest.Test,
+        CreatePlanViewsRequest.Test, Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"),
+        Path.Combine(evidenceDirectory, "launch.request.json"), new string('A', 64), canonicalModel, preparedEvidenceHash, sourceEvidenceHash,
+        prepRequestPath, Hash(prepRequestPath), prepResultPath, Hash(prepResultPath), prepAttempt, prepRun,
+        Path.Combine(evidenceDirectory, "Repato.CreatePlanViews.TestRunner.addin"), new string('B', 64), DateTimeOffset.UtcNow.AddMinutes(5));
+    CreatePlanViewsPreparationEvidenceContract.Verify(evidenceRequest, sourceModel, canonicalModel);
+    Check(true, "separate source and prepared model hashes accepted only with correlated preparation evidence");
+    string mismatchedResult = JsonSerializer.Serialize(new { Status = "Passed", Operation = "prepare-disposable-create-plan-views-fixture",
+        TaskId = "task-contract", WorkflowId = workflowId, AttemptId = Guid.NewGuid().ToString("N"), RunId = prepRun, ModelPath = sourceModel,
+        SourceModelSha256 = sourceEvidenceHash, PreparedModelSha256 = preparedEvidenceHash });
+    File.WriteAllText(prepResultPath, mismatchedResult);
+    Reject(() => CreatePlanViewsPreparationEvidenceContract.Verify(evidenceRequest with { FixturePreparationResultSha256 = Hash(prepResultPath) }, sourceModel, canonicalModel),
+        "mismatched preparation result identity rejected");
+    File.WriteAllText(prepResultPath, JsonSerializer.Serialize(new { Status = "Passed", Operation = "prepare-disposable-create-plan-views-fixture",
+        TaskId = "task-contract", WorkflowId = workflowId, AttemptId = prepAttempt, RunId = prepRun, ModelPath = sourceModel,
+        SourceModelSha256 = sourceEvidenceHash, PreparedModelSha256 = preparedEvidenceHash }));
+    Reject(() => CreatePlanViewsPreparationEvidenceContract.Verify(evidenceRequest with { FixtureSha256 = preparedEvidenceHash }, sourceModel, canonicalModel),
+        "prepared model hash cannot replace source fixture hash");
+}
+finally { Directory.Delete(evidenceDirectory, recursive: true); }
+
 string tempRequest = Path.Combine(Path.GetTempPath(), "repato-request-" + Guid.NewGuid().ToString("N") + ".json");
-string modelHash = new('A', 64), manifestHash = new('B', 64), artifactHash = new('C', 64);
+string modelHash = new('A', 64), sourceHash = new('D', 64), preparationRequestHash = new('E', 64), preparationResultHash = new('F', 64), manifestHash = new('B', 64), artifactHash = new('C', 64);
 var jsonObject = new Dictionary<string, object?>
 {
     ["schemaVersion"] = 2, ["operation"] = "launch-revit-qa", ["requestId"] = Guid.NewGuid().ToString("N"),
@@ -41,6 +81,10 @@ var jsonObject = new Dictionary<string, object?>
     ["testId"] = CreatePlanViewsRequest.Test, ["attemptId"] = Guid.NewGuid().ToString("N"), ["runId"] = Environment.GetEnvironmentVariable("REPATO_CONTRACT_RUN_ID") ?? Guid.NewGuid().ToString("N"),
     ["claimId"] = Guid.NewGuid().ToString("N"), ["requestPath"] = tempRequest, ["requestSha256"] = new string('0', 64),
     ["modelPath"] = Path.Combine(Path.GetTempPath(), "model.rvt"), ["modelSha256"] = modelHash,
+    ["fixtureSha256"] = sourceHash, ["fixturePreparationRequestPath"] = Path.Combine(Path.GetTempPath(), "prep.request.json"),
+    ["fixturePreparationRequestSha256"] = preparationRequestHash, ["fixturePreparationResultPath"] = Path.Combine(Path.GetTempPath(), "prep.result.json"),
+    ["fixturePreparationResultSha256"] = preparationResultHash, ["fixturePreparationAttemptId"] = Guid.NewGuid().ToString("N"),
+    ["fixturePreparationRunId"] = Guid.NewGuid().ToString("N"),
     ["manifestPath"] = Path.Combine(Path.GetTempPath(), "Repato.CreatePlanViews.TestRunner.addin"), ["manifestSha256"] = manifestHash,
     ["expiresUtc"] = DateTimeOffset.UtcNow.AddMinutes(5)
 };
@@ -65,7 +109,7 @@ var identity = new Dictionary<string, object?>
 };
 var passingReport = new Dictionary<string, object?>(identity)
 {
-    ["Status"] = "Passed", ["RollbackStatus"] = "RolledBack", ["FixtureSha256"] = modelHash,
+    ["Status"] = "Passed", ["RollbackStatus"] = "RolledBack", ["FixtureSha256"] = sourceHash,
     ["RuntimeModelSha256"] = modelHash, ["FinishedUtc"] = DateTimeOffset.UtcNow,
     ["AssemblyIdentity"] = new { Sha256 = artifactHash }, ["Errors"] = Array.Empty<string>(),
     ["Assertions"] = new[] { new { Passed = true } }
@@ -80,6 +124,7 @@ Check(!CreatePlanViewsResultContract.IsPassing(passingReceiptJson, passingReport
 Check(!CreatePlanViewsResultContract.IsPassing(passingReceiptJson.Replace(request.RequestId, Guid.NewGuid().ToString("N")), passingReportJson, request, artifactHash), "unmatched receipt request id rejected");
 Check(!CreatePlanViewsResultContract.IsPassing(passingReceiptJson, passingReportJson.Replace("Passed", "Failed"), request, artifactHash), "failed report cannot pass");
 Check(!CreatePlanViewsResultContract.IsPassing(passingReceiptJson, passingReportJson, request, new string('D', 64)), "candidate hash mismatch rejected");
+Check(!CreatePlanViewsResultContract.IsPassing(passingReceiptJson, passingReportJson.Replace(sourceHash, modelHash), request, artifactHash), "prepared-model hash cannot stand in for authoritative source fixture hash");
 
 var failedReceipt = CreatePlanViewsResultContract.CreateReceipt(request, request.RequestId, request.TaskId, request.WorkflowId,
     request.TestId, request.AttemptId, request.RunId, request.ClaimId, "Failed", reportPath);
