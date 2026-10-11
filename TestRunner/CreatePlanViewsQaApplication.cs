@@ -98,7 +98,14 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
         if (app.Application.VersionNumber != "2025") throw new InvalidOperationException("Fixture preparation requires Revit 2025.");
         if (app.Application.Documents.Size != 1 || !string.Equals(Environment.UserName, "RepatoQA", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Fixture preparation requires one open document under the RepatoQA account.");
-        AddinIsolationPolicy.RequireAllowed(new TestRunReport());
+        string selectedManifestPath = Path.GetFullPath(parsed.SelectedManifestPath);
+        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        string expectedManifestPath = Path.Combine(appData, "Autodesk", "Revit", "Addins", "2025", "Repato.CreatePlanViews.TestRunner.addin");
+        if (!selectedManifestPath.Equals(expectedManifestPath, StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(selectedManifestPath) ||
+            !TestRunReport.Hash(selectedManifestPath).Equals(parsed.SelectedManifestSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Fixture preparation selected runner manifest is missing or differs from its request-bound identity.");
+        AddinIsolationPolicy.RequireAllowed(new TestRunReport(), selectedManifestPath, parsed.SelectedManifestSha256);
         Document document = app.ActiveUIDocument?.Document ?? throw new InvalidOperationException("No fixture document is open for preparation.");
         if (!Path.GetFullPath(document.PathName).Equals(modelPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Open document does not match the fixture preparation request.");

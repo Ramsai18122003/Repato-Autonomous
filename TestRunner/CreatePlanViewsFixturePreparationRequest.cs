@@ -11,6 +11,8 @@ internal sealed record CreatePlanViewsFixturePreparationRequest(
     string RequestPath,
     string ModelPath,
     string ModelSha256,
+    string SelectedManifestPath,
+    string SelectedManifestSha256,
     string OutputPath,
     DateTimeOffset ExpiresUtc)
 {
@@ -23,6 +25,8 @@ internal sealed record CreatePlanViewsFixturePreparationRequest(
         string declaredRequestPath = Path.GetFullPath(Text("requestPath"));
         string modelPath = Path.GetFullPath(Text("modelPath")), outputPath = Path.GetFullPath(Text("outputPath"));
         string modelSha256 = Text("modelSha256");
+        string selectedManifestPath = Path.GetFullPath(Text("selectedManifestPath"));
+        string selectedManifestSha256 = Text("selectedManifestSha256");
         DateTimeOffset expiresUtc = root.GetProperty("expiresUtc").GetDateTimeOffset();
         if (Text("operation") != "prepare-disposable-create-plan-views-fixture")
             throw new InvalidOperationException("Unknown fixture preparation operation.");
@@ -34,12 +38,16 @@ internal sealed record CreatePlanViewsFixturePreparationRequest(
             throw new InvalidOperationException("Fixture preparation task/workflow identity is invalid.");
         if (modelSha256.Length != 64 || !modelSha256.All(Uri.IsHexDigit))
             throw new InvalidOperationException("Fixture preparation model hash is invalid.");
+        if (!Path.GetFileName(selectedManifestPath).Equals("Repato.CreatePlanViews.TestRunner.addin", StringComparison.OrdinalIgnoreCase) ||
+            selectedManifestSha256.Length != 64 || !selectedManifestSha256.All(Uri.IsHexDigit))
+            throw new InvalidOperationException("Fixture preparation selected manifest identity is invalid.");
         string requestDirectory = Path.GetDirectoryName(Path.GetFullPath(actualRequestPath))!;
         if (!Path.GetDirectoryName(modelPath)!.Equals(requestDirectory, StringComparison.OrdinalIgnoreCase) ||
             !Path.GetDirectoryName(outputPath)!.Equals(requestDirectory, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Fixture preparation request, model, and output must share one attempt directory.");
         if (expiresUtc <= DateTimeOffset.UtcNow)
             throw new InvalidOperationException("Fixture preparation request expired.");
-        return new(taskId, workflowId, attemptId, runId, declaredRequestPath, modelPath, modelSha256.ToUpperInvariant(), outputPath, expiresUtc);
+        return new(taskId, workflowId, attemptId, runId, declaredRequestPath, modelPath, modelSha256.ToUpperInvariant(),
+            selectedManifestPath, selectedManifestSha256.ToUpperInvariant(), outputPath, expiresUtc);
     }
 }

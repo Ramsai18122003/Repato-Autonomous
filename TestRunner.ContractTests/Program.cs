@@ -19,6 +19,8 @@ try
         requestPath = preparationRequestPath,
         modelPath = Path.Combine(preparationDirectory, "model.rvt"),
         modelSha256 = new string('A', 64),
+        selectedManifestPath = Path.Combine(preparationDirectory, "Repato.CreatePlanViews.TestRunner.addin"),
+        selectedManifestSha256 = new string('B', 64),
         outputPath = Path.Combine(preparationDirectory, "prep.result.json"),
         expiresUtc = DateTimeOffset.UtcNow.AddMinutes(5)
     });
@@ -26,6 +28,7 @@ try
     Check(parsedPreparation.TaskId == "task-41cfec12ef3e406990d36c9997cf6591" && parsedPreparation.AttemptId.Length == 32 && parsedPreparation.RunId.Length == 32, "fixture-preparation request identity parses and correlates");
     Reject(() => CreatePlanViewsFixturePreparationRequest.Parse(preparationJson.Replace(parsedPreparation.RunId, Guid.NewGuid().ToString("D")), preparationRequestPath), "fixture-preparation mismatched run ID rejected");
     Reject(() => CreatePlanViewsFixturePreparationRequest.Parse(preparationJson, preparationRequestPath + ".other"), "fixture-preparation request path binding enforced");
+    Reject(() => CreatePlanViewsFixturePreparationRequest.Parse(preparationJson.Replace(new string('B', 64), new string('G', 64)), preparationRequestPath), "fixture-preparation manifest hash format enforced");
 }
 finally { Directory.Delete(preparationDirectory, recursive: true); }
 
