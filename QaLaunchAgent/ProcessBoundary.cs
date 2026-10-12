@@ -18,10 +18,22 @@ public sealed class CurrentIdentitySessionProvider : IIdentitySessionProvider
 
 public sealed class RevitChildProcessLauncher : IChildProcessLauncher
 {
+    public static ProcessStartInfo CreateStartInfo(QaLaunchRequest request, QaAgentOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(request.ModelPath)) throw new InvalidDataException("A model path is required before Revit can start.");
+        var modelPath = Path.GetFullPath(request.ModelPath);
+        if (!modelPath.EndsWith(".rvt", StringComparison.OrdinalIgnoreCase) || !File.Exists(modelPath))
+            throw new InvalidDataException("An existing .rvt model is required before Revit can start.");
+
+        var psi = new ProcessStartInfo(options.RevitExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(options.RevitExe)! };
+        psi.ArgumentList.Add(modelPath);
+        psi.Environment[QaLaunchPolicy.RequestEnvironmentVariable] = request.RequestPath;
+        return psi;
+    }
+
     public ChildLaunchResult Launch(QaLaunchRequest request, QaAgentOptions options)
     {
-        var psi = new ProcessStartInfo(options.RevitExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(options.RevitExe)! };
-        psi.Environment[QaLaunchPolicy.RequestEnvironmentVariable] = request.RequestPath;
+        var psi = CreateStartInfo(request, options);
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("Revit process creation failed.");
         var identity = WindowsIdentity.GetCurrent();
         return new ChildLaunchResult(process.Id, identity.Name, identity.User?.Value ?? "", process.SessionId, options.RevitExe, DateTimeOffset.UtcNow);
