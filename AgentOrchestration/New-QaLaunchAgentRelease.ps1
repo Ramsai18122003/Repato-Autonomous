@@ -12,7 +12,11 @@ foreach($name in $files){if(!(Test-Path -LiteralPath (Join-Path $source $name) -
 $exe=(Get-Item -LiteralPath (Join-Path $source $files[0])).VersionInfo.ProductVersion
 $dll=(Get-Item -LiteralPath (Join-Path $source $files[1])).VersionInfo.ProductVersion
 if([string]::IsNullOrWhiteSpace($exe) -or $exe -cne $dll -or $exe -notmatch '^\d+\.\d+\.\d+\+[a-fA-F0-9]{12,40}$'){throw 'Executable/DLL build identity is inconsistent.'}
-if(!$exe.EndsWith('+'+$SourceCommit.Substring(0,12),[StringComparison]::OrdinalIgnoreCase)){throw 'Build version is not bound to SourceCommit.'}
+$versionCommit=$exe.Substring($exe.IndexOf('+')+1)
+git -C $repo merge-base --is-ancestor $versionCommit $SourceCommit
+if($LASTEXITCODE -ne 0){throw 'Build version is not bound to runtime source in SourceCommit history.'}
+git -C $repo diff --quiet $SourceCommit -- 'QaLaunchAgent/*.cs' 'QaLaunchAgent/Repato.QaLaunchAgent.csproj'
+if($LASTEXITCODE -ne 0){throw 'Runtime source differs from the declared SourceCommit.'}
 $destination=Join-Path $root ('Repato.QaLaunchAgent-'+$exe)
 if(Test-Path -LiteralPath $destination){throw 'Immutable release destination already exists.'}
 $stage=Join-Path $root ('.stage-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $stage -Force|Out-Null
