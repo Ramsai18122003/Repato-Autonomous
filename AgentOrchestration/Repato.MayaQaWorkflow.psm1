@@ -2369,7 +2369,7 @@ function Request-MayaQaRecoveredExpiredAttemptApproval {
         [Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
         [Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$ExpiredApprovalRequestId,
         [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$ExpiredAttemptId,
-        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$ExpiredRunId,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')][string]$ExpiredRunId,
         [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$RecoveredAttemptId,
         [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$RecoveredRunId,
         [Parameter(Mandatory)][long]$ExpectedTaskRevision,
