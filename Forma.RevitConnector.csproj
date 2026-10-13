@@ -5,6 +5,8 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Deployment artifacts and nested worktrees are never project source inputs. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);DeploymentCandidates\**;DeploymentBackups\**;.worktrees\**;.release-worktree-*\**;.diagnostic-publish*\**</DefaultItemExcludes>
 
     <AssemblyName>Repato.Revit</AssemblyName>
     <RootNamespace>Repato.Revit</RootNamespace>
