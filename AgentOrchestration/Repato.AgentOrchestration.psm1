@@ -101,6 +101,84 @@ function Add-RepatoHistory($Task,[string]$Event,[string]$Actor,[string]$Details)
     $Task.history = [object[]]@($Task.history) + [pscustomobject]@{timestampUtc=(Get-RepatoUtc);event=$Event;actor=$Actor;details=$Details}
 }
 
+function Get-RepatoCanonicalQaDeploymentApprovalEvidence {
+    param(
+        [Parameter(Mandatory)][object]$Task,[Parameter(Mandatory)][object]$Workflow,
+        [Parameter(Mandatory)][string]$BuildRequestId,[Parameter(Mandatory)][string]$CandidateSourceCommit,
+        [Parameter(Mandatory)][string]$CandidateSha256,[Parameter(Mandatory)][string]$RunnerManifestPath,
+        [Parameter(Mandatory)][string]$RunnerManifestSha256
+    )
+    $e=$Workflow.qaBuildEvidence
+    if(!$Task -or !$Workflow -or !$e -or $Workflow.taskId -cne $Task.taskId -or $Workflow.qaBuildStatus -cne 'succeeded' -or
+       $e.BuildRequestId -cne $BuildRequestId -or $e.CandidateSourceCommit -cne $CandidateSourceCommit -or
+       $e.SourceCommit -cne $CandidateSourceCommit -or $e.ArtifactSha256 -ine $CandidateSha256 -or
+       $e.DeploymentValidation -ne $true -or $e.ManifestIntegrityValidation -ne $true -or $e.QaIsolation -ne $true -or
+       $e.RunnerManifestPath -cne $RunnerManifestPath -or $e.RunnerManifestSha256 -ine $RunnerManifestSha256){
+        throw 'Canonical QA deployment evidence does not match the approved candidate.'
+    }
+    $trustedRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\QA')).TrimEnd('\')+'\'
+    $manifest=[IO.Path]::GetFullPath($RunnerManifestPath)
+    if(!$manifest.StartsWith($trustedRoot,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $manifest -PathType Leaf) -or
+       (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ine $RunnerManifestSha256){throw 'Canonical QA runner manifest is not trusted or has changed.'}
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try {
+        if($e.PSObject.Properties.Name -contains 'IndependentDeploymentValidation' -and $e.IndependentDeploymentValidation){
+            $ind=$e.IndependentDeploymentValidation
+            if($ind.Purpose -cne 'independent-current-deployment-validation' -or $ind.TaskId -cne $Task.taskId -or
+               $ind.WorkflowId -cne $Workflow.workflowId -or $ind.BuildRequestId -cne $BuildRequestId -or
+               $ind.CandidateSourceCommit -cne $CandidateSourceCommit -or $ind.CandidateDllSha256 -ine $CandidateSha256 -or
+               $ind.StagingDisposition -cne 'ambiguous-unresolved' -or $ind.StagingSuccessClaimed -ne $false -or
+               $ind.RunnerManifestSha256 -ine $RunnerManifestSha256 -or !$ind.ValidationRequest -or !$ind.Response){
+                throw 'Independent QA validation evidence is inconsistent or claims staging success.'
+            }
+            if($e.OriginalRunnerManifestPath){$originalPath=[IO.Path]::GetFullPath([string]$e.OriginalRunnerManifestPath);if(!(Test-Path -LiteralPath $originalPath -PathType Leaf) -or (Get-FileHash -LiteralPath $originalPath -Algorithm SHA256).Hash -ine $RunnerManifestSha256){throw 'Original runner-manifest provenance is missing or changed.'}}
+            $ops=@(if($Task.PSObject.Properties.Name -contains 'deploymentValidationOperations'){$Task.deploymentValidationOperations|Where-Object OperationId -ceq $ind.OperationId})
+            if($ops.Count -ne 1){throw 'Independent QA validation operation is not uniquely bound to this task.'}
+            $op=$ops[0];$r=$op.Response;$q=$op.ValidationRequest
+            foreach($pair in @(@('TaskId',$Task.taskId),@('WorkflowId',$Workflow.workflowId),@('BuildRequestId',$BuildRequestId),@('CandidateSourceCommit',$CandidateSourceCommit),@('CandidateSha256',$CandidateSha256),@('QaWorkflowId',[string]$Workflow.qaWorkflowId),@('TestId',[string]$Workflow.qaWorkflowId))){if([string]$op.($pair[0]) -cne [string]$pair[1]){throw "Independent QA operation binding mismatch: $($pair[0])."}}
+            if($op.ValidationPurpose -cne 'IndependentAfterAmbiguousStaging' -or $op.RequestDisposition -cne 'completed' -or
+               $op.RequestId -cne $ind.RequestId -or $q.requestId -cne $op.RequestId -or $q.taskId -cne $Task.taskId -or
+               $q.workflowId -cne $Workflow.workflowId -or $q.candidateCommit -cne $CandidateSourceCommit -or
+               $q.expectedCandidateSha256 -ine $CandidateSha256 -or $q.qaWorkflowId -cne $Workflow.qaWorkflowId -or
+               $q.testId -cne $Workflow.qaWorkflowId){throw 'Independent QA request identity or disposition is invalid.'}
+            $requestJson=ConvertTo-Json -InputObject $q -Compress -Depth 32
+            $requestHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($requestJson)))).Replace('-','')
+            $requestEvidence=$q.candidateEvidence
+            if($requestHash -ine $op.ValidationRequestSha256 -or $requestHash -ine $ind.ValidationRequestSha256 -or
+               $requestEvidence.TaskId -cne $Task.taskId -or $requestEvidence.WorkflowId -cne $Workflow.workflowId -or
+               $requestEvidence.CandidateSourceCommit -cne $CandidateSourceCommit -or $requestEvidence.CandidateDllSha256 -ine $CandidateSha256 -or
+               $requestEvidence.RunnerManifestPath -cne $RunnerManifestPath -or $requestEvidence.RunnerManifestSha256 -ine $RunnerManifestSha256 -or
+               $requestEvidence.CandidateProvenancePath -cne $e.CandidateProvenancePath){throw 'Independent QA request provenance or hash is invalid.'}
+            $responseJson=ConvertTo-Json -InputObject $r -Compress -Depth 32
+            $responseHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($responseJson)))).Replace('-','')
+            $indResponseJson=ConvertTo-Json -InputObject $ind.Response -Compress -Depth 32
+            if($responseHash -ne ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($indResponseJson)))).Replace('-','') -or
+               [int]$r.schemaVersion -ne 1 -or $r.operation -cne 'validate-qa-deployment' -or $r.requestId -cne $op.RequestId -or
+               $r.succeeded -ne $true -or $r.candidateCommit -cne $CandidateSourceCommit -or
+               $r.candidateSha256 -ine $CandidateSha256 -or $r.validationIdentity -ine 'RAMSAI\RepatoQA' -or
+               $r.isolationPassed -ne $true -or $r.manifestIntegrityPassed -ne $true -or
+               $r.runnerManifestSha256 -ine $RunnerManifestSha256 -or $r.runnerManifestPath -cne $ind.RunnerManifestPath -or
+               $r.validatedRunnerManifestPath -cne $r.runnerManifestPath -or
+               [IO.Path]::GetFullPath([string]$r.qaAddinRoot) -ine 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA' -or
+               $r.qaWorkflowId -cne $Workflow.qaWorkflowId -or $r.testId -cne $Workflow.qaWorkflowId -or
+               $e.DeployedRunnerManifestPath -cne $r.runnerManifestPath -or $e.DeployedRunnerManifestSha256 -ine $RunnerManifestSha256){throw 'Independent QA authenticated response no longer matches its operation.'}
+            return [pscustomobject][ordered]@{Mode='independent-current-deployment-validation';OperationId=$op.OperationId;RequestId=$op.RequestId;ValidationRequestSha256=$requestHash;ValidationResponseSha256=$responseHash;CandidateSourceCommit=$CandidateSourceCommit;CandidateSha256=$CandidateSha256;RunnerManifestPath=$RunnerManifestPath;RunnerManifestSha256=$RunnerManifestSha256;ValidationIdentity='RAMSAI\RepatoQA';IsolationPassed=$true;ManifestIntegrityPassed=$true;StagingDisposition='ambiguous-unresolved';StagingSuccessClaimed=$false;OriginalRunnerManifestPath=[string]$e.OriginalRunnerManifestPath}
+        }
+        if($e.PSObject.Properties.Name -contains 'StagingSuccessClaimed' -and $e.StagingSuccessClaimed -eq $true){throw 'Staging success cannot be asserted without the supported staging evidence.'}
+        $ops=@(if($Task.PSObject.Properties.Name -contains 'deploymentValidationOperations'){$Task.deploymentValidationOperations|Where-Object {$_.ValidationPurpose -ceq 'CanonicalAfterStaging' -and $_.TaskId -ceq $Task.taskId -and $_.WorkflowId -ceq $Workflow.workflowId -and $_.BuildRequestId -ceq $BuildRequestId -and $_.CandidateSourceCommit -ceq $CandidateSourceCommit -and $_.CandidateSha256 -ieq $CandidateSha256 -and $_.RequestDisposition -ceq 'completed'}})
+        if($ops.Count -ne 1){throw 'Canonical staging-path deployment validation is not uniquely recorded.'}
+        $op=$ops[0];$r=$op.Response;$expectedInstalledManifest='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin'
+        if(!$r -or $r.requestId -cne $op.RequestId -or $r.succeeded -ne $true -or $r.candidateCommit -cne $CandidateSourceCommit -or
+           $r.candidateSha256 -ine $CandidateSha256 -or $r.qaWorkflowId -cne $Workflow.qaWorkflowId -or $r.testId -cne $Workflow.qaWorkflowId -or $r.validationIdentity -ine 'RAMSAI\RepatoQA' -or $r.isolationPassed -ne $true -or
+           $r.manifestIntegrityPassed -ne $true -or $r.runnerManifestSha256 -ine $RunnerManifestSha256 -or $r.validatedRunnerManifestPath -cne $r.runnerManifestPath -or
+           [IO.Path]::GetFullPath([string]$r.qaAddinRoot) -ine 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA' -or
+           [IO.Path]::GetFullPath([string]$r.runnerManifestPath) -ine $expectedInstalledManifest){throw 'Canonical staging-path validation response is invalid.'}
+        $responseJson=ConvertTo-Json -InputObject $r -Compress -Depth 32
+        $responseHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($responseJson)))).Replace('-','')
+        [pscustomobject][ordered]@{Mode='canonical-staging-deployment-validation';OperationId=$op.OperationId;RequestId=$op.RequestId;ValidationResponseSha256=$responseHash;CandidateSourceCommit=$CandidateSourceCommit;CandidateSha256=$CandidateSha256;RunnerManifestPath=$RunnerManifestPath;RunnerManifestSha256=$RunnerManifestSha256;ValidationIdentity='RAMSAI\RepatoQA';IsolationPassed=$true;ManifestIntegrityPassed=$true;StagingSuccessClaimed=$false}
+    } finally {$sha.Dispose()}
+}
+
 function Find-RepatoTask($Data,[string]$TaskId) {
     $matches = @($Data.tasks | Where-Object taskId -ceq $TaskId)
     if ($matches.Count -ne 1) { throw "Task not found: $TaskId" }
@@ -172,11 +250,14 @@ function Resolve-RepatoTaskApproval([string]$StoreRoot,[string]$TaskId,[string]$
             if($hash -ine [string]$request.bindingHash -or [string]$binding.TaskId -cne $TaskId){throw 'Bound QA approval payload hash or task identity is invalid.'}
             $workflows=@($task.deploymentWorkflows|Where-Object {[string]$_.workflowId -ceq [string]$binding.WorkflowId})
             if($workflows.Count -ne 1){$available=@($task.deploymentWorkflows|ForEach-Object {[string]$_.workflowId}) -join ',';throw "Bound QA approval workflow identity is invalid: task=$TaskId; workflow=$($binding.WorkflowId); matches=$($workflows.Count); available=$available."};$e=$workflows[0].qaBuildEvidence
-            $plan=$binding.ExecutionPlan;$candidateRoot='C:\Repato-Autonomous\Worktrees\create-plan-views-buildfix-4f2cbba22ba9\DeploymentCandidates\AgentBuilds';$runnerRoot='C:\Repato-Autonomous\Source\QA'
-            if([string]$binding.BuildRequestId -cne [string]$e.BuildRequestId -or [string]$binding.CandidateSourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$binding.CandidateSha256 -ine [string]$e.ArtifactSha256 -or [string]$binding.RunnerManifestPath -ine [string]$e.RunnerManifestPath -or [string]$binding.RunnerManifestSha256 -ine [string]$e.RunnerManifestSha256 -or !$e.DeploymentValidation -or !$e.ManifestIntegrityValidation -or !$e.QaIsolation -or [string]$binding.RunId -cne [string]$workflows[0].qaRunId -or [string]$binding.ModelPath -ine [string]$workflows[0].qaModelPath -or [string]$plan.TaskId -cne $TaskId -or [string]$plan.WorkflowId -cne [string]$binding.WorkflowId -or [string]$plan.QaWorkflowId -cne [string]$binding.QaWorkflowId -or [string]$plan.Stage -cne 'qa-prepared' -or [string]$plan.NextAgent -cne 'Tara' -or [string]$plan.NextOperation -cne 'canonical-execution-record' -or $plan.SideEffectsPerformed -ne $false){throw 'Bound QA approval no longer matches candidate or execution evidence.'}
+            $plan=$binding.ExecutionPlan;$candidateRoot='C:\Repato-Autonomous\Worktrees\create-plan-views-buildfix-4f2cbba22ba9\DeploymentCandidates\AgentBuilds';$runnerRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\QA'))
+            if([string]$binding.BuildRequestId -cne [string]$e.BuildRequestId -or [string]$binding.CandidateSourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$binding.CandidateSha256 -ine [string]$e.ArtifactSha256 -or [string]$binding.RunnerManifestPath -ine [string]$e.RunnerManifestPath -or [string]$binding.RunnerManifestSha256 -ine [string]$e.RunnerManifestSha256 -or !$e.DeploymentValidation -or !$e.ManifestIntegrityValidation -or !$e.QaIsolation -or [string]$binding.RunId -cne [string]$workflows[0].qaRunId -or [string]$binding.ModelPath -ine [string]$workflows[0].qaModelPath -or [string]$binding.SidecarPath -ine [string]$workflows[0].qaSidecarPath -or [string]$binding.FixtureId -cne [string]$workflows[0].qaFixtureId -or [string]$binding.FixtureSha256 -ine [string]$workflows[0].qaFixtureSha256 -or [string]$plan.TaskId -cne $TaskId -or [string]$plan.WorkflowId -cne [string]$binding.WorkflowId -or [string]$plan.QaWorkflowId -cne [string]$binding.QaWorkflowId -or [string]$plan.Stage -cne 'qa-prepared' -or [string]$plan.NextAgent -cne 'Tara' -or [string]$plan.NextOperation -cne 'canonical-execution-record' -or $plan.SideEffectsPerformed -ne $false){throw 'Bound QA approval no longer matches candidate or execution evidence.'}
+            $currentDeploymentBinding=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $task -Workflow $workflows[0] -BuildRequestId $binding.BuildRequestId -CandidateSourceCommit $binding.CandidateSourceCommit -CandidateSha256 $binding.CandidateSha256 -RunnerManifestPath $binding.RunnerManifestPath -RunnerManifestSha256 $binding.RunnerManifestSha256
+            $currentDeploymentJson=ConvertTo-Json -InputObject $currentDeploymentBinding -Depth 20 -Compress;$approvedDeploymentJson=ConvertTo-Json -InputObject $binding.DeploymentValidationEvidence -Depth 20 -Compress
+            if($currentDeploymentJson -cne $approvedDeploymentJson){throw 'Bound QA approval deployment-validation operation or authenticated response changed.'}
             $candidateDirectory=[IO.Path]::GetFullPath([string]$e.CandidateDirectory);$runnerPath=[IO.Path]::GetFullPath([string]$binding.RunnerManifestPath)
             if(!$candidateDirectory.StartsWith([IO.Path]::GetFullPath($candidateRoot).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !$runnerPath.StartsWith([IO.Path]::GetFullPath($runnerRoot).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Bound QA approval candidate or runner path is outside its trusted root.'}
-            foreach($pair in @(@($e.ArtifactPath,$binding.CandidateSha256),@($binding.RunnerManifestPath,$binding.RunnerManifestSha256),@($e.CandidateProvenancePath,$binding.CandidateProvenanceSha256),@($binding.ModelPath,$binding.ModelSha256))){if(!(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine $pair[1]){throw 'Bound QA approval file evidence changed.'}}
+            foreach($pair in @(@($e.ArtifactPath,$binding.CandidateSha256),@($binding.RunnerManifestPath,$binding.RunnerManifestSha256),@($e.CandidateProvenancePath,$binding.CandidateProvenanceSha256),@($binding.ModelPath,$binding.ModelSha256),@($binding.SidecarPath,$binding.SidecarSha256))){if(!(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine $pair[1]){throw 'Bound QA approval file evidence changed.'}}
         }
         if($request.requiredLevel -ceq 'user' -and $Actor -cne 'user'){throw 'This action requires user approval.'}
         $request.status=$(if($Decision -ceq 'approve'){'approved'}else{'rejected'});$request.decidedUtc=Get-RepatoUtc;$request.decidedBy=$Actor;$request.reason=$Reason;$task.status=$(if($Decision -ceq'approve'){$request.previousStatus}else{'blocked'});Add-RepatoHistory $task ('approval-'+$Decision) $Actor $(if($preview){'dry-run preview'}else{$Reason});if($Decision -ceq'approve'){$request.approvedRevision=[long]$task.revision};$task
@@ -272,4 +353,4 @@ function Fail-RepatoExecutorRun([string]$StoreRoot,[string]$TaskId,[string]$Exec
     Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$task=Find-RepatoTask $data $TaskId;$run=Find-RepatoExecutorRun $task $ExecutionId;if($run.status -in @('completed','failed')){throw 'Executor run is already terminal.'};if(!$preview){$run.status='failed';$run.finishedUtc=Get-RepatoUtc;$run.errorDetails=$ErrorDetails;$run.logs=[object[]]@($LogPaths);$run.reports=[object[]]@($ReportPaths);$task.status='failed';$task.finishedUtc=$run.finishedUtc;$task.errorDetails=$ErrorDetails;$task.logs=[object[]]@($task.logs)+[object[]]@($LogPaths);$task.reportPaths=[object[]]@($task.reportPaths)+[object[]]@($ReportPaths);Add-RepatoHistory $task 'executor-failed' $run.agent "execution=$ExecutionId; $ErrorDetails"};$run} -DryRun:$DryRun
 }
 
-Export-ModuleMember -Function Get-RepatoUtc,Get-RepatoStorePaths,Write-RepatoJsonAtomic,Assert-RepatoTask,Read-RepatoTaskStore,Invoke-RepatoStoreMutation,Add-RepatoHistory,Find-RepatoTask,Initialize-RepatoTaskStore,New-RepatoTask,Get-RepatoTasks,Claim-RepatoTask,Update-RepatoTask,Add-RepatoTaskReport,Request-RepatoTaskApproval,Resolve-RepatoTaskApproval,Complete-RepatoTask,New-RepatoExecutorPlan,Claim-RepatoExecutorRun,Test-RepatoExecutorRun,Request-RepatoExecutorApproval,Get-RepatoExecutorPreview,Complete-RepatoExecutorRun,Fail-RepatoExecutorRun
+Export-ModuleMember -Function Get-RepatoUtc,Get-RepatoStorePaths,Write-RepatoJsonAtomic,Assert-RepatoTask,Read-RepatoTaskStore,Invoke-RepatoStoreMutation,Add-RepatoHistory,Find-RepatoTask,Initialize-RepatoTaskStore,New-RepatoTask,Get-RepatoTasks,Claim-RepatoTask,Update-RepatoTask,Add-RepatoTaskReport,Request-RepatoTaskApproval,Resolve-RepatoTaskApproval,Complete-RepatoTask,New-RepatoExecutorPlan,Claim-RepatoExecutorRun,Test-RepatoExecutorRun,Request-RepatoExecutorApproval,Get-RepatoExecutorPreview,Complete-RepatoExecutorRun,Fail-RepatoExecutorRun,Get-RepatoCanonicalQaDeploymentApprovalEvidence
