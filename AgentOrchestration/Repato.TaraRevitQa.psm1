@@ -307,6 +307,7 @@ function Handle-TaraTrustPrompt($Plan,$Process,$Handler){
         PromptAction = $(if($handled.Count){'Always Load'}else{'None'})
         ApprovedManifest = $(if($handled.Count){$handled[-1].Manifest}else{$null})
         PromptRecords = $handled
+        ManualApprovalEvidence = $null
         PromptFree = $true
     }
 }
