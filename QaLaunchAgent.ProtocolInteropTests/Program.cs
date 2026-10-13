@@ -61,6 +61,7 @@ var camelJson=JsonSerializer.Serialize(request, QaLaunchPolicy.JsonOptions);
 var rq=JsonSerializer.Deserialize<QaLaunchRequest>(camelJson, QaLaunchPolicy.JsonOptions)!;
 if(rq.SchemaVersion!=2||rq.Operation!=QaLaunchPolicy.Operation||rq.RequestId!=request.RequestId||rq.AttemptId!=request.AttemptId)throw new Exception("Request interoperability failed.");
 var integrityRequest = request with { RequestSha256 = QaLaunchPolicy.CanonicalRequestSha256(camelJson) };
+StartupContractTests.Run(integrityRequest);
 var integrityJson = JsonSerializer.Serialize(integrityRequest, QaLaunchPolicy.JsonOptions);
 if(!QaLaunchPolicy.CanonicalRequestSha256(integrityJson).Equals(integrityRequest.RequestSha256, StringComparison.OrdinalIgnoreCase))throw new Exception("Request integrity positive case failed.");
 var tamperedJson = integrityJson.Replace("task-1", "task-tampered", StringComparison.Ordinal);
