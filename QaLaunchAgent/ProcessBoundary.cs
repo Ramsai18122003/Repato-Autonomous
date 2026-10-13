@@ -26,7 +26,13 @@ public sealed class RevitChildProcessLauncher : IChildProcessLauncher
             throw new InvalidDataException("An existing .rvt model is required before Revit can start.");
 
         var psi = new ProcessStartInfo(options.RevitExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(options.RevitExe)! };
-        psi.ArgumentList.Add(modelPath);
+        // The request-bound runner validates an empty session and opens the disposable
+        // model after manifest, isolation, fixture, and model safety checks. Passing
+        // the model on Revit's command line would open it before those checks.
+        // An inherited inventory/preparation request takes precedence in the runner.
+        // Only this authenticated dispatch may be present in the child environment.
+        foreach (var key in psi.Environment.Keys.ToArray())
+            if (key.StartsWith("REPATO_QA_", StringComparison.OrdinalIgnoreCase)) psi.Environment.Remove(key);
         psi.Environment[QaLaunchPolicy.RequestEnvironmentVariable] = request.RequestPath;
         return psi;
     }
