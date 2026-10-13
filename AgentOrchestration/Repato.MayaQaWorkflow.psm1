@@ -624,6 +624,36 @@ function Test-MayaQaCorrelatedDisposableFixtureProvenance {
     $true
 }
 
+function Register-MayaQaCorrelatedStartupFailure {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$AttemptId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][long]$ExpectedTaskRevision)
+    $t=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId;$x=$t.mayaTaraExecution
+    if([long]$t.revision -ne $ExpectedTaskRevision -or $x.Stage -cne 'executing' -or $x.ExecutionStatus -cne 'Executing' -or $x.AttemptId -cne $AttemptId -or $x.ClaimId -cne $ClaimId -or $x.ClaimOwner -cne 'Tara'){throw 'Exact executing startup-failure identity is required.'}
+    $resultPath=$x.RequestPath+'.result.json';$result=Get-Content -LiteralPath $resultPath -Raw|ConvertFrom-Json
+    $reportPath=[IO.Path]::GetFullPath([string]$result.ReportPath)
+    if(!$reportPath.StartsWith([IO.Path]::GetFullPath((Join-Path (Get-MayaQaRoot) 'Reports')).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Startup failure report escaped QA root.'}
+    $report=Get-Content -LiteralPath $reportPath -Raw|ConvertFrom-Json
+    foreach($document in @($result,$report)){
+        foreach($n in 'TaskId','WorkflowId','TestId','AttemptId','RunId','ClaimId'){if([string]$document.$n -cne [string]$x.$n){throw "Startup failure evidence identity mismatch: $n"}}
+        if([string]$document.RequestId -cne [string]$x.NativeRequestId -or $document.Status -cne 'Failed'){throw 'Startup failure result/report status mismatch.'}
+    }
+    if($report.RollbackStatus -cne 'NotStarted' -or @($report.CreatedIds).Count -or @($report.ChangedIds).Count -or @($report.DeletedIds).Count -or @($report.Errors).Count -ne 1 -or $report.Errors[0] -notmatch 'Start a fresh Revit 2025 QA session with no open documents\.' -or $report.AssemblyIdentity.Sha256 -ine $x.ArtifactSha256){throw 'Report does not prove the expected pre-transaction startup rejection.'}
+    if((Get-FileHash -LiteralPath $x.DisposableModelPath -Algorithm SHA256).Hash -ine $x.DisposableModelSha256){throw 'Disposable model changed after startup failure.'}
+    if(Get-Process -Id $x.NativeProcessId -ErrorAction SilentlyContinue){throw 'Stop the exact failed QA process before recording terminal failure.'}
+    $resultHash=(Get-FileHash $resultPath -Algorithm SHA256).Hash;$reportHash=(Get-FileHash $reportPath -Algorithm SHA256).Hash
+    Invoke-RepatoStoreMutation $StoreRoot {
+        param($data,$preview)
+        $current=Find-RepatoTask $data $TaskId;$r=$current.mayaTaraExecution
+        if([long]$current.revision -ne $ExpectedTaskRevision -or $r.Stage -cne 'executing' -or $r.AttemptId -cne $AttemptId -or $r.ClaimId -cne $ClaimId -or (Get-FileHash $resultPath).Hash -ine $resultHash -or (Get-FileHash $reportPath).Hash -ine $reportHash){throw 'Startup failure compare-and-swap evidence changed.'}
+        $r.Stage='qa-failed';$r.ExecutionStatus='QaFailed';$r.ClaimStatus='qa-failed';$r.FailureCode='native-qa-failed';$r.FailureDetails=[string]$report.Errors[0];$r.FailedUtc=Get-RepatoUtc;$r.ResultPath=$resultPath;$r.ReportPath=$reportPath;$r.ReceiptPath=$resultPath;$r.RollbackStatus='NotStarted';$r.VerificationStatus='Failed';$r.CompletionStatus='Failed'
+        $r|Add-Member NoteProperty ResultSha256 $resultHash -Force;$r|Add-Member NoteProperty ReportSha256 $reportHash -Force
+        $current.mayaTaraAttempt.Stage='qa-failed';$current.mayaTaraAttempt.Success=$false;$current.status='blocked';$current.workflowStage='qa';$current.errorDetails=$r.FailureDetails
+        Add-RepatoHistory $current 'maya-tara-correlated-startup-failure-recorded' 'Tara' "attempt=$AttemptId; request=$($r.NativeRequestId); no model changes reported; no second dispatch"
+        $r
+    }
+}
+Export-ModuleMember -Function Register-MayaQaCorrelatedStartupFailure
+
 function Recover-MayaQaCorrelatedNativeFailure {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[string]$RuntimeRoot,[scriptblock]$ProcessInspector,[ValidateRange(1,1440)][Nullable[int]]$AttemptDurationMinutes)
     if($null -eq $AttemptDurationMinutes){$AttemptDurationMinutes=Get-MayaQaAttemptDurationMinutes};
