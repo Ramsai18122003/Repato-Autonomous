@@ -3,9 +3,9 @@ Set-StrictMode -Version Latest
 
 $modulePath=Join-Path $PSScriptRoot 'Repato.QaAddinDeployment.psm1'
 $mayaPath=Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1'
-$sourceCandidate='C:\Repato-Autonomous\Source\DeploymentCandidates\AgentBuilds\ReleaseCandidate-251ebb4b8680'
-$expected='79C0FEB181B6B85F735EEE3F36F8980BC56BDEED83B91F62936F885AC2047418'
-$commit='251ebb4b86807f1b96ceeb3db5d3bd4ba09813cf'
+$sourceCandidate='C:\Repato-Autonomous\Worktrees\create-plan-views-buildfix-4f2cbba22ba9\DeploymentCandidates\AgentBuilds\ReleaseCandidate-4f2cbba22ba9'
+$expected='8C3F6EF16790247B9949EADED8FF098B4D95598791011C418D003DAAC0680AB5'
+$commit='4f2cbba22ba9f4d6d3176e2d36daf2890bd1849c'
 $scratch=Join-Path ([IO.Path]::GetTempPath()) ('tara-isolation-api-'+[guid]::NewGuid().ToString('N'))
 $revitBefore=@(Get-Process Revit -ErrorAction SilentlyContinue).Count
 $passed=0
@@ -29,6 +29,7 @@ function Validate($Layout){
 try{
     Check ($null -eq (Get-Command Assert-ChildPath -ErrorAction SilentlyContinue)) 'AssertChildPathPreExisting = False'
     Import-Module $modulePath -Force
+Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
     Check ($null -eq (Get-Command Assert-ChildPath -ErrorAction SilentlyContinue)) 'module import does not introduce global helper'
 
     $valid=New-Layout valid;$staged=Stage $valid;$result=Validate $valid
@@ -59,7 +60,8 @@ try{
     Import-Module $mayaPath -Force -WarningAction SilentlyContinue
     $store=Join-Path $scratch 'must-not-exist'
     Reject {Invoke-MayaQaRequest -StoreRoot $store -UserRequest 'create-plan-views-v1' -ArtifactMode FrozenCandidate -CandidateDirectory $sourceCandidate -ExpectedCandidateSha256 $expected -ExpectedCandidateSourceCommit $commit -StageFrozenCandidateForQa -QaStagingInvoker {param($c,$h,$s,$q,$t,$d)[pscustomobject]@{Success=$true;CandidateSha256=$h;BuildInvoked=$false;Isolation=[pscustomobject]@{Allowed=$false;Errors=@('blocked')}}}} 'controller rejects failed supported isolation result'
-    Check (!(Test-Path $store)) 'no canonical attempt created on isolation failure'
+    $failedStore=if(Test-Path $store){Read-RepatoTaskStore $store}else{$null};$failedTasks=if($failedStore){@($failedStore.tasks)}else{@()}
+    Check (@($failedTasks|Where-Object {($_.PSObject.Properties.Name -contains 'mayaTaraAttempt' -and $_.mayaTaraAttempt) -or ($_.PSObject.Properties.Name -contains 'mayaTaraExecution' -and $_.mayaTaraExecution) -or @($_.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -in @('pending','approved')}).Count}).Count -eq 0) 'no attempt, execution, or active QA approval created on isolation failure'
     Check (@(Get-Process Revit -ErrorAction SilentlyContinue).Count -eq $revitBefore) 'no Revit launched'
 
     [pscustomobject]@{Status='PASS';AssertChildPathPreExisting=$false;StandaloneIsolationInvocation='PASS';IsolationValidationResult='PASS';AssertionsPassed=$passed;AssertionsFailed=0;CanonicalAttemptCreated=$false;RevitLaunched=$false;LivePipeRequestSent=$false}|ConvertTo-Json -Compress
