@@ -55,10 +55,10 @@ public static class QaLaunchPolicy
     public const string ExpectedUserSid = "S-1-5-21-1031246752-3872016183-2454652381-1015";
     public const string ClientAccount = ExpectedUser;
     public const string ClientSid = ExpectedUserSid;
-    public const string FrozenCandidateCommit = "e2b5bcf889657b82cc10fd46909d145cd27ff2e0";
-    public const string FrozenCandidateSha256 = "56B6E70E42FBFEAF8DA502E53C31C5CC1DAE1CA6A56A7CD3AC258CA573C5D9F5";
+    public const string FrozenCandidateCommit = "4f2cbba22ba9f4d6d3176e2d36daf2890bd1849c";
+    public const string FrozenCandidateSha256 = "8C3F6EF16790247B9949EADED8FF098B4D95598791011C418D003DAAC0680AB5";
     public const string StagingAdapterPath = @"C:\Repato-Autonomous\Source\AgentOrchestration\Invoke-RepatoQaFrozenCandidateStaging.ps1";
-    public const string StagingCandidateDirectory = @"C:\Repato-Autonomous\Source\DeploymentCandidates\AgentBuilds\ReleaseCandidate-e2b5bcf88965";
+    public const string StagingCandidateDirectory = @"C:\Repato-Autonomous\Worktrees\create-plan-views-buildfix-4f2cbba22ba9\DeploymentCandidates\AgentBuilds\ReleaseCandidate-4f2cbba22ba9";
     public const string LogRoot = @"C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\Logs";
     public const string RequestEnvironmentVariable = "REPATO_QA_CREATE_PLAN_VIEWS_REQUEST";
     public static readonly string[] AllowedQaWorkflows = ["create-plan-views-v1"];
