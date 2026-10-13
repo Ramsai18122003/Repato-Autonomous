@@ -293,10 +293,22 @@ function Invoke-MayaQaFixtureBlockedRecovery {
         return [pscustomobject]@{Stage='fixture-preparation-authorized';TaskId=$TaskId;OldAttemptId=$oldAttemptId;OldRunId=$oldRunId;NewAttemptId=$task.mayaTaraAttempt.AttemptId;NewRunId=$task.mayaTaraAttempt.RunId;TaskRevision=$task.revision;PreparationPlan=$plan;ApprovalCreated=$false;RevitLaunched=$false}
     }
     foreach($n in 'FixturePreparationResultPath','ExpiredApprovalRequestId','ExpiredAttemptId','ExpiredRunId','ExpectedCandidateSourceCommit','ExpectedCandidateSha256','LaunchAgentRuntimeVersion'){if([string]::IsNullOrWhiteSpace([string](Get-Variable $n -ValueOnly))){throw "Finalize recovery requires $n."}}
-    $null=Repair-MayaQaRecoveredFixturePreparation -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -FixturePreparationResultPath $FixturePreparationResultPath
-    $afterRepair=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
-    $null=Set-MayaQaRecoveredFixtureReadyState -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision ([long]$afterRepair.revision)
-    $ready=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    $snapshot=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    if([long]$snapshot.revision -ne $ExpectedTaskRevision){throw 'Fixture finalization task revision is stale.'}
+    $current=$snapshot.mayaTaraExecution;$packet=$snapshot.mayaTaraQaPacket;$attempt=$snapshot.mayaTaraAttempt
+    $alreadyReconciled=($current.FixturePreparationEvidence -and $packet.FixturePreparationEvidence -and (ConvertTo-Json -InputObject $current.FixturePreparationEvidence -Depth 20 -Compress) -ceq (ConvertTo-Json -InputObject $packet.FixturePreparationEvidence -Depth 20 -Compress))
+    if($alreadyReconciled){
+        if($snapshot.status -cne 'in-progress' -or $snapshot.workflowStage -cne 'approval' -or $current.Stage -cne 'prepared' -or $current.ExecutionStatus -cne 'Prepared' -or $current.ClaimStatus -cne 'unclaimed' -or $current.ClaimId -or $current.NativeProcessId -or $current.RequestPath -or $current.ResultPath -or $current.ReportPath -or $current.EvidencePath -or $current.ReceiptPath -or $current.SideEffectsPerformed -or $attempt.AttemptId -cne $current.AttemptId -or $attempt.RunId -cne $current.RunId -or $current.FixturePreparationEvidence.RunId -cne $attempt.RunId -or $current.DisposableModelSha256 -ine $current.FixturePreparationEvidence.PreparedModelSha256 -or (Get-FileHash -LiteralPath $current.DisposableModelPath -Algorithm SHA256).Hash -ine $current.FixturePreparationEvidence.PreparedModelSha256){throw 'Persisted fixture-ready state is not safe to resume.'}
+        if(@($snapshot.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count){throw 'Fixture finalization cannot resume with an existing pending QA approval.'}
+        $null=Test-MayaQaFixturePreparationRecord -QaRoot (Get-MayaQaRoot) -TaskId $TaskId -WorkflowId $current.WorkflowId -SourcePath $current.AuthoritativeFixturePath -SourceSha256 $current.AuthoritativeFixtureSha256 -Evidence $current.FixturePreparationEvidence
+        $ready=$snapshot
+    }else{
+        if($current.FixturePreparationEvidence -or $packet.FixturePreparationEvidence){throw 'Fixture finalization found conflicting partial evidence.'}
+        $null=Repair-MayaQaRecoveredFixturePreparation -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -FixturePreparationResultPath $FixturePreparationResultPath
+        $afterRepair=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+        $null=Set-MayaQaRecoveredFixtureReadyState -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision ([long]$afterRepair.revision)
+        $ready=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    }
     $approval=Request-MayaQaRecoveredExpiredAttemptApproval -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $ready.mayaTaraExecution.WorkflowId -ExpiredApprovalRequestId $ExpiredApprovalRequestId -ExpiredAttemptId $ExpiredAttemptId -ExpiredRunId $ExpiredRunId -RecoveredAttemptId $ready.mayaTaraAttempt.AttemptId -RecoveredRunId $ready.mayaTaraAttempt.RunId -ExpectedTaskRevision ([long]$ready.revision) -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -LaunchAgentRuntimeVersion $LaunchAgentRuntimeVersion -ExpiryMinutes $ApprovalExpiryMinutes
     [pscustomobject]@{Stage='approval-required';TaskId=$TaskId;AttemptId=$ready.mayaTaraAttempt.AttemptId;RunId=$ready.mayaTaraAttempt.RunId;ApprovalRequest=$approval.Request;ApprovalRequestId=$approval.Request.requestId;RevitLaunched=$false}
 }
