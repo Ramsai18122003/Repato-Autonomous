@@ -9,9 +9,10 @@ $commit='4f2cbba22ba9f4d6d3176e2d36daf2890bd1849c';$candidateHash='8C3F6EF167902
 $candidate='C:\Repato-Autonomous\Worktrees\create-plan-views-buildfix-4f2cbba22ba9\DeploymentCandidates\AgentBuilds\ReleaseCandidate-4f2cbba22ba9'
 $sourceRunner=Join-Path (Split-Path $here -Parent) 'QA\Repato.CreatePlanViews.TestRunner.addin';$runnerHash=(Get-FileHash $sourceRunner -Algorithm SHA256).Hash
 $installedRunner='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$addinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA'
-$fixture=Join-Path (Split-Path $here -Parent) 'QA\Fixtures\CreatePlanViewsEmpty.rvt'
-if(Test-Path -LiteralPath $fixture){throw 'Synthetic fixture path already exists; refusing to overwrite it.'}
+$fixture=Join-Path (Split-Path $here -Parent) 'QA\Fixtures\CreatePlanViewsEmpty.rvt';$madeFixture=$false
+if(!(Test-Path -LiteralPath $fixture)){New-Item -ItemType Directory -Path (Split-Path $fixture -Parent) -Force|Out-Null;[IO.File]::WriteAllBytes($fixture,[byte[]](1..128));$madeFixture=$true}
 $tmp=Join-Path ([IO.Path]::GetTempPath()) ('maya-independent-approval-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $tmp|Out-Null
+$prepRoots=[Collections.Generic.List[string]]::new()
 $passed=0;$total=0
 function Case([string]$name,[scriptblock]$body){$script:total++;try{&$body;$script:passed++}catch{throw "$name : $($_.Exception.Message) [$($_.ScriptStackTrace)]"}}
 function New-ApprovalFixture([string]$mode){
@@ -46,13 +47,13 @@ function New-ApprovalFixture([string]$mode){
     [pscustomobject]@{Store=$store;Mode=$mode;OperationId=$opId;RequestId=$requestId;Revision=[long](Find-RepatoTask (Read-RepatoTaskStore $store) $taskId).revision}
 }
 function Prepare-And-Request($f,[switch]$Stale){
-    New-MayaQaRun -StoreRoot $f.Store -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -RunId ([guid]::NewGuid().ToString('N')) -RuntimeRoot (Join-Path $f.Store 'runtime')|Out-Null
-    $t=if($f.Mode -eq 'wrong-stage'){Find-RepatoTask (Read-RepatoTaskStore $f.Store) $taskId}else{Update-RepatoTask $f.Store $taskId 'in-progress' 'qa' 'Maya' $null $null}
+    $prepRoot=Join-Path (Split-Path $fixture -Parent) ('..\TestRuns\independent-prep-'+[guid]::NewGuid().ToString('N'));$prepRoot=[IO.Path]::GetFullPath($prepRoot);New-Item $prepRoot -ItemType Directory|Out-Null;$script:prepRoots.Add($prepRoot);$pa=[guid]::NewGuid().ToString('N');$pr=[guid]::NewGuid().ToString('N');$pm=Join-Path $prepRoot 'model.rvt';Copy-Item $fixture $pm;$ph=(Get-FileHash $fixture).Hash;$rq=Join-Path $prepRoot ($pa+'.request.json');$rs=$rq+'.preparation.json';[ordered]@{operation='prepare-disposable-create-plan-views-fixture';taskId=$taskId;workflowId=$workflowId;attemptId=$pa;runId=$pr;requestPath=$rq;modelPath=$pm;modelSha256=$ph;outputPath=$rs}|ConvertTo-Json|Set-Content $rq;[ordered]@{Status='Passed';Operation='prepare-disposable-create-plan-views-fixture';TaskId=$taskId;WorkflowId=$workflowId;AttemptId=$pa;RunId=$pr;ModelPath=$pm;SourceModelSha256=$ph;PreparedModelSha256=$ph}|ConvertTo-Json|Set-Content $rs
+    $run=New-MayaQaRun -StoreRoot $f.Store -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -RunId ([guid]::NewGuid().ToString('N')) -RuntimeRoot (Join-Path $f.Store 'runtime') -FixturePreparationResultPath $rs
+    $t=if($f.Mode -eq 'wrong-stage'){Find-RepatoTask (Read-RepatoTaskStore $f.Store) $taskId}else{Update-RepatoTask $f.Store $taskId 'in-progress' 'qa' 'Maya' $null $null -ExpectedTaskRevision ([long]$run.TaskRevision) -ExpectedWorkflowId $workflowId -ExpectedWorkflowRevision ([long]$run.WorkflowRevision) -ExpectedQaWorkflowId $qaId}
     $revision=[long]$t.revision;if($Stale){$revision--}
     Request-MayaQaCanonicalExecutionApproval -StoreRoot $f.Store -TaskId $taskId -WorkflowId $workflowId -BuildRequestId $buildId -ExpectedTaskRevision $revision -CandidateSourceCommit $commit -CandidateSha256 $candidateHash
 }
 try {
-    [IO.File]::WriteAllBytes($fixture,[byte[]](1..128))
     Case 'independent validation bound to fresh user approval and QA plan' {
         $f=New-ApprovalFixture 'valid';$q=Prepare-And-Request $f;$t=Find-RepatoTask (Read-RepatoTaskStore $f.Store) $taskId;$w=$t.deploymentWorkflows[0];$plan=$q.executionBinding.ExecutionPlan
         if($q.status -cne 'pending' -or $q.requiredLevel -cne 'user' -or $q.executionBinding.DeploymentValidationEvidence.OperationId -cne $f.OperationId -or $q.executionBinding.DeploymentValidationEvidence.RequestId -cne $f.RequestId -or $q.executionBinding.DeploymentValidationEvidence.StagingSuccessClaimed -ne $false -or !$w.qaRunId -or !$w.qaModelPath -or !$w.qaSidecarPath -or !$w.qaFixtureSha256 -or $t.workflowStage -cne 'approval' -or $plan.NextAgent -cne 'Tara'){throw 'Independent evidence or canonical QA plan was not bound.'}
@@ -67,4 +68,4 @@ try {
         $failed=$false;try{Resolve-RepatoTaskApproval $f.Store $taskId approve user 'tampered evidence attempt'|Out-Null}catch{$failed=$true};if(!$failed){throw 'approval accepted changed independent validation response'}
     }
     [pscustomobject]@{Passed=$passed;Total=$total;SyntheticStoresOnly=$true;SyntheticFixtureOnly=$true;ApprovalCreatedOnlyInSyntheticStore=$true;TaraLaunched=$false;RevitLaunched=$false}|ConvertTo-Json -Compress
-} finally {Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue}
+} finally {Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue;foreach($p in $prepRoots){Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue};if($madeFixture){Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue}}

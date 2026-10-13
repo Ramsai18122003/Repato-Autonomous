@@ -151,6 +151,16 @@ function Test-MayaQaFixturePreparationRecord {
     if((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash -ine $SourceSha256 -or [string]$request.operation -cne 'prepare-disposable-create-plan-views-fixture' -or [string]$request.requestPath -ine $requestPath -or [string]$request.outputPath -ine $resultPath -or [string]$request.modelPath -ine $modelPath -or [string]$request.modelSha256 -ine $SourceSha256 -or [string]$request.taskId -cne $TaskId -or [string]$request.workflowId -cne $WorkflowId -or [string]$request.attemptId -cne $Evidence.AttemptId -or [string]$request.runId -cne $Evidence.RunId -or [string]$request.attemptId -cnotmatch '^[a-fA-F0-9]{32}$' -or [string]$request.runId -cnotmatch '^[a-fA-F0-9]{32}$' -or [string]$result.Status -cne 'Passed' -or [string]$result.Operation -cne [string]$request.operation -or [string]$result.TaskId -cne $TaskId -or [string]$result.WorkflowId -cne $WorkflowId -or [string]$result.AttemptId -cne $Evidence.AttemptId -or [string]$result.RunId -cne $Evidence.RunId -or [string]$result.ModelPath -ine $modelPath -or [string]$result.SourceModelSha256 -ine $SourceSha256 -or [string]$result.PreparedModelSha256 -ine $Evidence.PreparedModelSha256){throw 'Recorded fixture preparation request/result identity or model hash mismatch.'}
     $true
 }
+function Read-MayaQaFixturePreparationRecord {
+    param([Parameter(Mandatory)][string]$QaRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$SourcePath,[Parameter(Mandatory)][string]$SourceSha256,[Parameter(Mandatory)][string]$ResultPath)
+    $result=[IO.Path]::GetFullPath($ResultPath);$runs=[IO.Path]::GetFullPath((Join-Path $QaRoot 'TestRuns')).TrimEnd('\')+'\'
+    if(!$result.StartsWith($runs,[StringComparison]::OrdinalIgnoreCase) -or !$result.EndsWith('.request.json.preparation.json',[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $result -PathType Leaf)){throw 'Fixture preparation result path is not an authenticated QA result.'}
+    $request=$result.Substring(0,$result.Length-('.preparation.json'.Length));if(!(Test-Path -LiteralPath $request -PathType Leaf)){throw 'Correlated fixture preparation request is missing.'}
+    try{$rq=Get-Content -LiteralPath $request -Raw|ConvertFrom-Json;$rs=Get-Content -LiteralPath $result -Raw|ConvertFrom-Json}catch{throw 'Fixture preparation request/result is malformed.'}
+    $e=[pscustomobject]@{RequestPath=$request;RequestSha256=(Get-FileHash -LiteralPath $request -Algorithm SHA256).Hash;ResultPath=$result;ResultSha256=(Get-FileHash -LiteralPath $result -Algorithm SHA256).Hash;AttemptId=[string]$rq.attemptId;RunId=[string]$rq.runId;SourceSha256=$SourceSha256;PreparedModelPath=[IO.Path]::GetFullPath([string]$rq.modelPath);PreparedModelSha256=[string]$rs.PreparedModelSha256}
+    $null=Test-MayaQaFixturePreparationRecord -QaRoot $QaRoot -TaskId $TaskId -WorkflowId $WorkflowId -SourcePath $SourcePath -SourceSha256 $SourceSha256 -Evidence $e
+    $e
+}
 function Test-MayaQaHistoricalPacketContinuation {
     param([Parameter(Mandatory)]$Task,[Parameter(Mandatory)]$Packet,[Parameter(Mandatory)]$CurrentAttempt,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaRoot)
     $source=@($Task.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $Packet.AttemptId -and $_.RunId -ceq $Packet.RunId})
@@ -219,7 +229,7 @@ function Recover-MayaQaExpiredExecutionRecord {
     try{Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$nowAttempt=$t.mayaTaraAttempt;$nowExec=$t.mayaTaraExecution;if($t.revision -ne $task.revision -or $nowAttempt.AttemptId -cne $attempt.AttemptId -or $nowAttempt.RunId -cne $attempt.RunId -or $nowExec.AttemptId -cne $old.AttemptId -or $nowExec.RunId -cne $old.RunId){throw 'Recovery compare-and-swap failed: task changed.'};if([DateTimeOffset]::Parse($nowAttempt.RequestExpiresUtc)-gt[DateTimeOffset]::UtcNow){throw 'Current attempt is no longer expired.'};if($packet){$nowPacket=$t.mayaTaraQaPacket;$nowPlan=$t.mayaPlan;$nowWorkflows=@($t.deploymentWorkflows|Where-Object workflowId -ceq $resolved.SelectedWorkflowId);if(!$nowPacket -or (ConvertTo-Json -InputObject $nowPacket -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $packet -Depth 20 -Compress) -or !$nowPlan -or $nowPlan.TaskId -cne $plan.TaskId -or $nowPlan.WorkflowId -cne $plan.WorkflowId -or $nowPlan.QaWorkflowId -cne $plan.QaWorkflowId -or $nowPlan.Stage -cne $plan.Stage -or $nowWorkflows.Count -ne 1 -or [long]$nowWorkflows[0].workflowRevision -ne [long]$workflow.workflowRevision -or $nowWorkflows[0].qaBuildEvidence.ArtifactSha256 -ine $e.ArtifactSha256 -or $nowWorkflows[0].qaBuildEvidence.RunnerManifestSha256 -ine $e.RunnerManifestSha256){throw 'Recovery compare-and-swap failed: packet, plan, or candidate changed.'};if(@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count){throw 'Recovery compare-and-swap failed: pending QA approval appeared.'}};$archived=[pscustomobject]$old;$archived|Add-Member NoteProperty Stage 'expired' -Force;$archived|Add-Member NoteProperty ExecutionStatus 'Expired' -Force;$archived|Add-Member NoteProperty ClaimStatus 'expired' -Force;$archived|Add-Member NoteProperty FailureCode 'attempt-expired' -Force;$archived|Add-Member NoteProperty FailureDetails 'Unclaimed prepared attempt expired before native launch.' -Force;$archived|Add-Member NoteProperty ExpiredUtc (Get-RepatoUtc) -Force;$archived|Add-Member NoteProperty ReplacementAttemptId $newAttempt -Force;$archived|Add-Member NoteProperty ReplacementRunId $newRun -Force;if($t.PSObject.Properties.Name -notcontains 'mayaTaraExecutionHistory'){$t|Add-Member NoteProperty mayaTaraExecutionHistory ([object[]]@()) -Force};if($t.PSObject.Properties.Name -notcontains 'mayaTaraAttemptHistory'){$t|Add-Member NoteProperty mayaTaraAttemptHistory ([object[]]@()) -Force};$t.mayaTaraExecutionHistory=[object[]]@($t.mayaTaraExecutionHistory)+$archived;$t.mayaTaraAttemptHistory=[object[]]@($t.mayaTaraAttemptHistory)+$nowAttempt;$t.mayaTaraAttempt=$newAttemptRecord;$newExec.TaskRevisionAtPrepare=[long]$t.revision;$t.mayaTaraExecution=[pscustomobject]$newExec;if($packet){if($t.PSObject.Properties.Name -notcontains 'mayaTaraQaPacketHistory'){$t|Add-Member NoteProperty mayaTaraQaPacketHistory ([object[]]@()) -Force};$archivedPacket=ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $packet -Depth 20 -Compress);$t.mayaTaraQaPacketHistory=[object[]]@($t.mayaTaraQaPacketHistory)+[pscustomobject]@{Packet=$archivedPacket;AttemptId=$packet.AttemptId;RunId=$packet.RunId;ArchivedUtc=Get-RepatoUtc};$t.mayaTaraQaPacket=[pscustomobject][ordered]@{SchemaVersion='maya-tara-qa-packet-v3';HandoffId=$old.HandoffId;TaskId=$TaskId;WorkflowId=$resolved.SelectedWorkflowId;QaWorkflowId=$resolved.SelectedQaWorkflowId;TestId=$old.TestId;RunId=$newRun;AttemptId=$newAttempt;ArtifactPath=$e.ArtifactPath;ArtifactSha256=$e.ArtifactSha256;ManifestPath=$e.ManifestPath;ManifestSha256=$e.ManifestSha256;RunnerManifestPath=$e.RunnerManifestPath;RunnerManifestSha256=$e.RunnerManifestSha256;ModelPath=$model;SidecarPath=$sidecar;FixturePath=$source;FixtureSha256=$sourceHash;DisposableModelSha256=$modelHash;FixturePreparationEvidence=if($retainPreparationEvidence){$old.FixturePreparationEvidence}else{$null};RequestExpiresUtc=$newExpiry;Stage='prepared';SideEffectsPerformed=$false;StoreRoot=$StoreRoot}};Add-RepatoHistory $t 'maya-tara-attempt-recovered' 'Maya' "expiredAttempt=$($attempt.AttemptId); expiredRun=$($attempt.RunId); replacementAttempt=$newAttempt; replacementRun=$newRun";$t.mayaTaraExecution}}catch{if(!$DryRun -and (Test-Path -LiteralPath $runtime)){Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue};throw}
 }
 function Repair-MayaQaRecoveredFixturePreparation {
-    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][long]$ExpectedTaskRevision,[switch]$DryRun)
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][long]$ExpectedTaskRevision,[string]$FixturePreparationResultPath,[switch]$DryRun)
     $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId;if(!$task -or [long]$task.revision -ne $ExpectedTaskRevision){throw 'Fixture reconciliation task revision is stale.'}
     $attempt=$task.mayaTaraAttempt;$execution=$task.mayaTaraExecution;$packet=$task.mayaTaraQaPacket;$resolved=Resolve-MayaQaTaskStoreIdentity $StoreRoot $TaskId $task.mayaPlan.WorkflowId $task.mayaPlan.QaWorkflowId
     if(@($resolved.Errors).Count){throw ('Fixture reconciliation canonical identity invalid: '+(@($resolved.Errors)-join '; '))}
@@ -229,11 +239,13 @@ function Repair-MayaQaRecoveredFixturePreparation {
     if([DateTimeOffset]::Parse($attempt.RequestExpiresUtc) -le [DateTimeOffset]::UtcNow){throw 'Fixture reconciliation attempt is expired.'}
     if(@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count){throw 'Fixture reconciliation cannot run with a pending QA approval.'}
     $parents=@($task.mayaTaraExecutionHistory|Where-Object {$_.PSObject.Properties.Name -contains 'ReplacementAttemptId' -and $_.PSObject.Properties.Name -contains 'ReplacementRunId' -and $_.ReplacementAttemptId -ceq $attempt.AttemptId -and $_.ReplacementRunId -ceq $attempt.RunId -and $_.TaskId -ceq $TaskId -and $_.WorkflowId -ceq $resolved.SelectedWorkflowId})
-    if($parents.Count -ne 1 -or !$parents[0].FixturePreparationEvidence){throw 'Fixture reconciliation has no unique authoritative preparation record in recovery history.'}
+    if($parents.Count -ne 1){throw 'Fixture reconciliation has no unique authoritative recovery record.'}
     $parent=$parents[0];$workflow=Get-DeployWorkflow $StoreRoot $TaskId $resolved.SelectedWorkflowId;$e=$workflow.qaBuildEvidence;$source=[IO.Path]::GetFullPath($execution.AuthoritativeFixturePath);$sourceHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash;$qa=[IO.Path]::GetFullPath((Get-MayaQaRoot));$runs=[IO.Path]::GetFullPath((Get-MayaQaRuntimeRoot))
     if($parent.HandoffId -cne $execution.HandoffId -or $parent.TestId -cne $execution.TestId -or $parent.ArtifactSha256 -ine $execution.ArtifactSha256 -or $parent.RunnerManifestSha256 -ine $execution.RunnerManifestSha256 -or $parent.AuthoritativeFixturePath -cne $source -or $parent.AuthoritativeFixtureSha256 -ine $sourceHash -or $execution.DisposableModelSha256 -ine $sourceHash -or (Get-FileHash -LiteralPath $execution.DisposableModelPath -Algorithm SHA256).Hash -ine $sourceHash){throw 'Fixture reconciliation current model or recovery evidence does not match the authoritative source fixture.'}
-    $historicalMatches=@();foreach($entry in $task.mayaTaraQaPacketHistory){try{$historic=Test-MayaQaHistoricalPacketContinuation -Task $task -Packet $entry.Packet -CurrentAttempt $attempt -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -QaRoot $qa;if($historic.FixturePreparationEvidence -and (ConvertTo-Json -InputObject $historic.FixturePreparationEvidence -Depth 20 -Compress) -ceq (ConvertTo-Json -InputObject $parent.FixturePreparationEvidence -Depth 20 -Compress) -and $historic.DisposableModelSha256 -ieq [string]$historic.FixturePreparationEvidence.PreparedModelSha256){$historicalMatches+=,$historic}}catch{}}
-    if($historicalMatches.Count -ne 1){throw 'Fixture reconciliation has no unique verified historical packet/preparation record.'};$historicalExecution=$historicalMatches[0];$prep=$historicalExecution.FixturePreparationEvidence
+    $prep=$null
+    if($parent.FixturePreparationEvidence){$historicalMatches=@();foreach($entry in $task.mayaTaraQaPacketHistory){try{$historic=Test-MayaQaHistoricalPacketContinuation -Task $task -Packet $entry.Packet -CurrentAttempt $attempt -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -QaRoot $qa;if($historic.FixturePreparationEvidence -and (ConvertTo-Json -InputObject $historic.FixturePreparationEvidence -Depth 20 -Compress) -ceq (ConvertTo-Json -InputObject $parent.FixturePreparationEvidence -Depth 20 -Compress) -and $historic.DisposableModelSha256 -ieq [string]$historic.FixturePreparationEvidence.PreparedModelSha256){$historicalMatches+=,$historic}}catch{}};if($historicalMatches.Count -ne 1){throw 'Fixture reconciliation has no unique verified historical packet/preparation record.'};$prep=$historicalMatches[0].FixturePreparationEvidence}
+    elseif($FixturePreparationResultPath){$prep=Read-MayaQaFixturePreparationRecord -QaRoot $qa -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -SourcePath $source -SourceSha256 $sourceHash -ResultPath $FixturePreparationResultPath}
+    else{throw 'Fixture reconciliation requires authenticated preparation evidence.'}
     $null=Test-MayaQaFixturePreparationRecord -QaRoot $qa -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -SourcePath $source -SourceSha256 $sourceHash -Evidence $prep
     $policy=$execution.IsolationPolicyPath;if(!$execution.IsolationAllowed -or !(Test-Path -LiteralPath $policy -PathType Leaf) -or (Get-FileHash -LiteralPath $policy -Algorithm SHA256).Hash -ine $execution.IsolationPolicySha256){throw 'Fixture reconciliation isolation policy validation failed.'}
     $null=Test-MayaQaFrozenCandidate -CandidateDirectory $e.CandidateDirectory -CandidateDllPath $e.ArtifactPath -ExpectedSha256 $e.ArtifactSha256 -ExpectedSourceCommit $e.CandidateSourceCommit -QaWorkflowId $resolved.SelectedQaWorkflowId
@@ -243,6 +255,45 @@ function Repair-MayaQaRecoveredFixturePreparation {
     try{New-Item -ItemType Directory -Path $runtime|Out-Null;Copy-Item -LiteralPath $prep.PreparedModelPath -Destination $model;if((Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash -ine $prep.PreparedModelSha256){throw 'Fixture reconciliation prepared model hash mismatch.'};$def=Get-MayaQaWorkflowDefinition $resolved.SelectedQaWorkflowId;$side=[ordered]@{fixtureId=$def.FixtureId;sourceSha256=$sourceHash;preparedModelSha256=$prep.PreparedModelSha256;fixturePreparationRequestPath=$prep.RequestPath;fixturePreparationRequestSha256=$prep.RequestSha256;fixturePreparationResultPath=$prep.ResultPath;fixturePreparationResultSha256=$prep.ResultSha256;fixturePreparationAttemptId=$prep.AttemptId;fixturePreparationRunId=$prep.RunId};$side|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $sidecar -Encoding UTF8;$null=Test-MayaQaCorrelatedDisposableFixtureProvenance -QaRoot $qa -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -FixtureId $def.FixtureId -SourcePath $source -SourceSha256 $sourceHash -RuntimeRoot $runtime -ModelPath $model -ModelSha256 $prep.PreparedModelSha256
         Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$a=$t.mayaTaraAttempt;$x=$t.mayaTaraExecution;$p=$t.mayaTaraQaPacket;$workflows=@($t.deploymentWorkflows|Where-Object workflowId -ceq $resolved.SelectedWorkflowId);if([long]$t.revision -ne $ExpectedTaskRevision -or $a.AttemptId -cne $attempt.AttemptId -or $a.RunId -cne $attempt.RunId -or $x.AttemptId -cne $execution.AttemptId -or $x.RunId -cne $execution.RunId -or $x.Stage -cne 'prepared' -or (ConvertTo-Json -InputObject $p -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $packet -Depth 20 -Compress) -or $workflows.Count -ne 1 -or [long]$workflows[0].workflowRevision -ne [long]$workflow.workflowRevision){throw 'Fixture reconciliation compare-and-swap failed.'};if(@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count){throw 'Fixture reconciliation compare-and-swap found a pending QA approval.'};if($t.PSObject.Properties.Name -notcontains 'mayaTaraQaPacketHistory'){$t|Add-Member NoteProperty mayaTaraQaPacketHistory ([object[]]@()) -Force};$archivedPacket=ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $p -Depth 20 -Compress);$t.mayaTaraQaPacketHistory=[object[]]@($t.mayaTaraQaPacketHistory)+[pscustomobject]@{Packet=$archivedPacket;AttemptId=$p.AttemptId;RunId=$p.RunId;ArchivedUtc=Get-RepatoUtc;Reason='prepared model rebound to verified fixture-preparation evidence'};$x.DisposableRuntimeRoot=$runtime;$x.DisposableModelPath=$model;$x.DisposableModelSha256=$prep.PreparedModelSha256;$x.FixturePreparationEvidence=$prep;$a.RuntimeRoot=$runtime;$p.ModelPath=$model;$p.SidecarPath=$sidecar;$p.DisposableModelSha256=$prep.PreparedModelSha256;$p.FixturePreparationEvidence=$prep;Add-RepatoHistory $t 'maya-tara-recovered-fixture-preparation-reconciled' 'Maya' "attempt=$($a.AttemptId); run=$($a.RunId); sourcePreparationAttempt=$($prep.AttemptId); sourcePreparationRun=$($prep.RunId)";$x}
     }catch{if(Test-Path -LiteralPath $runtime){Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue};throw}
+}
+function Set-MayaQaRecoveredFixtureReadyState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][long]$ExpectedTaskRevision)
+    $snapshot=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    if([long]$snapshot.revision -ne $ExpectedTaskRevision -or $snapshot.status -cne 'in-progress' -or $snapshot.workflowStage -cne 'approval'){throw 'Recovered fixture-ready transition state is stale or incompatible.'}
+    $a=$snapshot.mayaTaraAttempt;$x=$snapshot.mayaTaraExecution;$p=$snapshot.mayaTaraQaPacket
+    if(!$a -or !$x -or !$p -or $x.Stage -cne 'prepared' -or $x.ExecutionStatus -cne 'Prepared' -or $x.ClaimStatus -cne 'unclaimed' -or !$x.FixturePreparationEvidence -or $a.AttemptId -cne $x.AttemptId -or $a.RunId -cne $x.RunId -or $p.AttemptId -cne $x.AttemptId -or $p.RunId -cne $x.RunId){throw 'Recovered fixture-ready transition requires one prepared correlated replacement.'}
+    if([DateTimeOffset]::Parse($a.RequestExpiresUtc) -le [DateTimeOffset]::UtcNow){throw 'Recovered replacement attempt expired before approval preparation.'}
+    if(@($snapshot.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count){throw 'Recovered fixture-ready transition found a pending approval.'}
+    $null=Test-MayaQaFixturePreparationRecord -QaRoot (Get-MayaQaRoot) -TaskId $TaskId -WorkflowId $x.WorkflowId -SourcePath $x.AuthoritativeFixturePath -SourceSha256 $x.AuthoritativeFixtureSha256 -Evidence $x.FixturePreparationEvidence
+    Invoke-RepatoStoreMutation $StoreRoot {param($d,$preview)$t=Find-RepatoTask $d $TaskId;if([long]$t.revision -ne $ExpectedTaskRevision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval' -or $t.mayaTaraAttempt.AttemptId -cne $a.AttemptId -or $t.mayaTaraExecution.AttemptId -cne $x.AttemptId){throw 'Recovered fixture-ready compare-and-swap failed.'};Add-RepatoHistory $t 'maya-tara-recovered-fixture-ready' 'Maya' "attempt=$($a.AttemptId); run=$($a.RunId)";$t.mayaTaraExecution.TaskRevisionAtPrepare=[long]$t.revision;$t}
+}
+function Invoke-MayaQaFixtureBlockedRecovery {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('begin','finalize')][string]$Operation,[Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
+        [long]$ExpectedTaskRevision=0,[string]$RuntimeRoot,[string]$FixturePreparationResultPath,[string]$ReportDirectory,[string]$QaAddinRoot,[string]$RevitInstallDir='E:\revit\Revit 2025',
+        [ValidateRange(7200,86400)][int]$TimeoutSeconds=7200,[string]$ExpiredApprovalRequestId,[string]$ExpiredAttemptId,[string]$ExpiredRunId,
+        [string]$ExpectedCandidateSourceCommit,[string]$ExpectedCandidateSha256,[string]$LaunchAgentRuntimeVersion,[ValidateRange(1,240)][int]$ApprovalExpiryMinutes=180,
+        [scriptblock]$SessionValidationInvoker,[scriptblock]$FixturePlanInvoker,[switch]$DryRun)
+    if($Operation -ceq 'begin'){
+        foreach($n in 'ReportDirectory','QaAddinRoot'){if([string]::IsNullOrWhiteSpace([string](Get-Variable $n -ValueOnly))){throw "Begin recovery requires $n."}}
+        $before=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId;$oldAttemptId=[string]$before.mayaTaraAttempt.AttemptId;$oldRunId=[string]$before.mayaTaraAttempt.RunId
+        $recovered=Recover-MayaQaExpiredExecutionRecord -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -AttemptDurationMinutes 240 -RuntimeRoot $RuntimeRoot -DryRun:$DryRun
+        if($DryRun){return $recovered}
+        $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId;$x=$task.mayaTaraExecution;$def=Get-MayaQaWorkflowDefinition $x.QaWorkflowId
+        Import-Module (Join-Path $PSScriptRoot 'Repato.TaraRevitQa.psm1') -WarningAction SilentlyContinue
+        $context=[pscustomobject]@{QaRoot=(Get-MayaQaRoot);SourceFixturePath=$x.AuthoritativeFixturePath;FixtureId=$def.FixtureId;FixtureSha256=$x.AuthoritativeFixtureSha256;ModelSha256=$x.DisposableModelSha256;FixturePreparationEvidence=$null;TestId=$x.TestId;ArtifactPath=$x.ArtifactPath;ArtifactSha256=$x.ArtifactSha256;ManifestPath=$x.RunnerManifestPath;ManifestSha256=$x.RunnerManifestSha256;TaskId=$x.TaskId;WorkflowId=$x.WorkflowId;QaWorkflowId=$x.QaWorkflowId;HandoffId=$x.HandoffId;AttemptId=$x.AttemptId;RunId=$x.RunId;ClaimId=$null}
+        $plan=if($FixturePlanInvoker){& $FixturePlanInvoker $task $x $context $TimeoutSeconds}else{New-TaraRevitQaPlan -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $x.WorkflowId -QaWorkflowId $x.QaWorkflowId -RunId $x.RunId -ModelPath $x.DisposableModelPath -SidecarPath ($x.DisposableModelPath+'.fixture.json') -ReportDirectory $ReportDirectory -RevitInstallDir $RevitInstallDir -QaAddinRoot $QaAddinRoot -TimeoutSeconds $TimeoutSeconds -Context $context -FixturePreparation -DryRun -SessionValidationInvoker $SessionValidationInvoker}
+        if(!$plan -or [int]$plan.TimeoutSeconds -lt 7200 -or !$plan.FixturePreparation){throw 'Supported fixture-preparation plan did not preserve the required timeout or mode.'}
+        return [pscustomobject]@{Stage='fixture-preparation-authorized';TaskId=$TaskId;OldAttemptId=$oldAttemptId;OldRunId=$oldRunId;NewAttemptId=$task.mayaTaraAttempt.AttemptId;NewRunId=$task.mayaTaraAttempt.RunId;TaskRevision=$task.revision;PreparationPlan=$plan;ApprovalCreated=$false;RevitLaunched=$false}
+    }
+    foreach($n in 'FixturePreparationResultPath','ExpiredApprovalRequestId','ExpiredAttemptId','ExpiredRunId','ExpectedCandidateSourceCommit','ExpectedCandidateSha256','LaunchAgentRuntimeVersion'){if([string]::IsNullOrWhiteSpace([string](Get-Variable $n -ValueOnly))){throw "Finalize recovery requires $n."}}
+    $null=Repair-MayaQaRecoveredFixturePreparation -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -FixturePreparationResultPath $FixturePreparationResultPath
+    $afterRepair=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    $null=Set-MayaQaRecoveredFixtureReadyState -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision ([long]$afterRepair.revision)
+    $ready=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    $approval=Request-MayaQaRecoveredExpiredAttemptApproval -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $ready.mayaTaraExecution.WorkflowId -ExpiredApprovalRequestId $ExpiredApprovalRequestId -ExpiredAttemptId $ExpiredAttemptId -ExpiredRunId $ExpiredRunId -RecoveredAttemptId $ready.mayaTaraAttempt.AttemptId -RecoveredRunId $ready.mayaTaraAttempt.RunId -ExpectedTaskRevision ([long]$ready.revision) -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -LaunchAgentRuntimeVersion $LaunchAgentRuntimeVersion -ExpiryMinutes $ApprovalExpiryMinutes
+    [pscustomobject]@{Stage='approval-required';TaskId=$TaskId;AttemptId=$ready.mayaTaraAttempt.AttemptId;RunId=$ready.mayaTaraAttempt.RunId;ApprovalRequest=$approval.Request;ApprovalRequestId=$approval.Request.requestId;RevitLaunched=$false}
 }
 function Recover-MayaQaTerminalLaunchFailure {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[string]$RuntimeRoot,[ValidateRange(1,1440)][Nullable[int]]$AttemptDurationMinutes,[scriptblock]$ManifestValidationBoundary,[switch]$DryRun)
@@ -739,7 +790,7 @@ function Prepare-MayaQaAfterExpiredFailureRecovery {
     }
 }
 function Get-MayaQaCanonicalNativeResult {
-    param([Parameter(Mandatory)][string]$RequestPath,[string]$ResultPath,[Parameter(Mandatory)][object]$Identity,[ValidateRange(1,3600)][int]$TimeoutSeconds=900)
+    param([Parameter(Mandatory)][string]$RequestPath,[string]$ResultPath,[Parameter(Mandatory)][object]$Identity,[ValidateRange(1,86400)][int]$TimeoutSeconds=900)
     if(!(Test-Path -LiteralPath $RequestPath -PathType Leaf)){throw 'Canonical request is missing.'}
     try{$request=Get-Content -LiteralPath $RequestPath -Raw|ConvertFrom-Json}catch{throw 'Canonical request JSON is malformed.'}
     if($request.PSObject.Properties.Name -contains 'requestId' -and [string]$request.requestId -cne [string]$Identity.NativeRequestId){throw 'Native request identity mismatch: requestId'}
@@ -747,16 +798,18 @@ function Get-MayaQaCanonicalNativeResult {
     $result=if($ResultPath){$ResultPath}else{$RequestPath+'.result.json'};$deadline=[DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
     while(!(Test-Path -LiteralPath $result -PathType Leaf)){if([DateTimeOffset]::UtcNow -ge $deadline){throw 'Canonical native result wait timed out.'};Start-Sleep -Milliseconds 250}
     try{$receipt=Get-Content -LiteralPath $result -Raw|ConvertFrom-Json}catch{throw 'Canonical native result JSON is malformed.'}
-    if(!$receipt -or $receipt.PSObject.Properties.Name -notcontains 'RequestId' -or $receipt.RequestId -cne $Identity.NativeRequestId -or $receipt.RunId -cne $Identity.RunId){throw 'Canonical native result identity mismatch.'}
+    if(!$receipt){throw 'Canonical native result identity mismatch.'}
+    foreach($n in 'RequestId','TaskId','WorkflowId','QaWorkflowId','AttemptId','RunId','ClaimId'){$expected=if($n -ceq 'RequestId'){$Identity.NativeRequestId}else{$Identity.$n};if($receipt.PSObject.Properties.Name -notcontains $n -or [string]$receipt.$n -cne [string]$expected){throw "Canonical native result identity mismatch: $n"}}
     if($receipt.PSObject.Properties.Name -contains 'ExpiresUtc' -and [DateTimeOffset]::Parse($receipt.ExpiresUtc) -lt [DateTimeOffset]::UtcNow){throw 'Canonical native result is stale or expired.'}
     if([string]::IsNullOrWhiteSpace([string]$receipt.ReportPath) -or !(Test-Path -LiteralPath $receipt.ReportPath -PathType Leaf)){throw 'Canonical native report is missing.'}
     try{$report=Get-Content -LiteralPath $receipt.ReportPath -Raw|ConvertFrom-Json}catch{throw 'Canonical native report JSON is malformed.'}
     if($report.TestId -cne $Identity.TestId -or $report.Status -cne 'Passed'){throw 'Canonical native report identity/status failed.'}
+    foreach($n in 'TaskId','AttemptId','RunId'){if($report.PSObject.Properties.Name -notcontains $n -or [string]$report.$n -cne [string]$Identity.$n){throw "Canonical native report identity mismatch: $n"}}
     $assertions=@($report.Assertions);$verified=($assertions.Count -gt 0 -and @($assertions|Where-Object{$_.Passed -isnot [bool] -or !$_.Passed}).Count -eq 0)
     $ep=if($receipt.PSObject.Properties.Name -contains 'EvidencePath' -and $receipt.EvidencePath){$receipt.EvidencePath}else{$receipt.ReportPath};$eh=$null;if(Test-Path -LiteralPath $ep -PathType Leaf){$eh=(Get-FileHash -LiteralPath $ep -Algorithm SHA256).Hash};[pscustomobject]@{RequestId=$Identity.RequestId;TaskId=$Identity.TaskId;WorkflowId=$Identity.WorkflowId;QaWorkflowId=$Identity.QaWorkflowId;TestId=$Identity.TestId;HandoffId=$Identity.HandoffId;AttemptId=$Identity.AttemptId;RunId=$Identity.RunId;ClaimId=$Identity.ClaimId;ResultPath=$result;ReportPath=$receipt.ReportPath;EvidencePath=$ep;EvidenceSha256=$eh;EvidenceValidationStatus=$(if($receipt.Status -ceq 'Passed' -and $report.Status -ceq 'Passed'){'Passed'}else{$null});ReceiptPath=$result;EvidenceAccepted=($receipt.Status -ceq 'Passed' -and $report.Status -ceq 'Passed');RollbackProven=($report.RollbackStatus -ceq 'RolledBack');Verified=$verified}
 }
 function Resume-MayaQaCanonicalExecution {
-    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[string]$ResultPath,[ValidateRange(1,3600)][int]$TimeoutSeconds=900,[switch]$DryRun)
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[string]$ResultPath,[ValidateRange(1,86400)][int]$TimeoutSeconds=900,[switch]$DryRun)
     $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId;$r=$task.mayaTaraExecution
     if(!$r -or $r.Stage -cne 'executing' -or $r.ExecutionStatus -cne 'Executing'){throw 'Canonical execution is not resumable from its current stage.'}
     if(!$r.NativeProcessId){throw 'Canonical executing execution has no native process ID.'};if($r.ClaimId -cne $ClaimId -or $r.ClaimOwner -cne 'Tara'){throw 'Canonical resume claim identity mismatch.'};if(!$r.RequestPath){throw 'Canonical executing execution has no request path.'};if([string]$r.NativeRequestId -notmatch '^[a-fA-F0-9]{32}$'){throw 'Canonical executing execution has no valid persisted native request ID.'}
@@ -938,7 +991,7 @@ function Invoke-MayaQaCanonicalNativeCore {
 }
 function Prepare-MayaQaCanonicalNativeLaunch {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$ReportDirectory,[string]$RevitInstallDir='E:\revit\Revit 2025',[Parameter(Mandatory)][string]$QaAddinRoot,[ValidateRange(1,3600)][int]$TimeoutSeconds=900,[switch]$DryRun,[scriptblock]$SessionValidationInvoker,[scriptblock]$PlanPreflightInvoker)
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$ReportDirectory,[string]$RevitInstallDir='E:\revit\Revit 2025',[Parameter(Mandatory)][string]$QaAddinRoot,[ValidateRange(1,86400)][int]$TimeoutSeconds=900,[switch]$DryRun,[scriptblock]$SessionValidationInvoker,[scriptblock]$PlanPreflightInvoker)
     $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
     if(!$task -or $task.PSObject.Properties.Name -notcontains 'mayaTaraExecution'){throw 'Canonical Maya Tara execution is missing.'}
     $r=$task.mayaTaraExecution;$attempt=$task.mayaTaraAttempt
@@ -959,7 +1012,7 @@ function Prepare-MayaQaCanonicalNativeLaunch {
     if($DryRun){return [pscustomobject]@{Mode='DryRun';Stage='claimed';ReadyToLaunch=$true;ProcessStarted=$false;SideEffectsPerformed=$false;TaskId=$r.TaskId;WorkflowId=$r.WorkflowId;QaWorkflowId=$r.QaWorkflowId;HandoffId=$r.HandoffId;AttemptId=$r.AttemptId;RunId=$r.RunId;ClaimId=$r.ClaimId;Request=$request;Plan=$plan}}
     Write-TaraJsonNew $plan.RequestPath ([pscustomobject]$request)
     $started=Get-RepatoUtc
-    Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'claimed' -or $x.ClaimId -cne $ClaimId -or [long]$t.revision -ne ([long]$x.TaskRevisionAtClaim+1) -or $x.NativeProcessId -or $x.SideEffectsPerformed){throw 'Canonical launch compare-and-swap failed.'};$x.Stage='launching';$x.ExecutionStatus='Launching';$x.LaunchingUtc=$started;$x.RequestPath=$plan.RequestPath;$x|Add-Member NoteProperty NativeRequestId $plan.RequestId -Force;Add-RepatoHistory $t 'maya-tara-native-launching' 'Tara' "claim=$ClaimId; request=$($plan.RequestId)";$x}
+    try{Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'claimed' -or $x.ClaimId -cne $ClaimId -or [long]$t.revision -ne ([long]$x.TaskRevisionAtClaim+1) -or $x.NativeProcessId -or $x.SideEffectsPerformed){throw 'Canonical launch compare-and-swap failed.'};$x.Stage='launching';$x.ExecutionStatus='Launching';$x.LaunchingUtc=$started;$x.RequestPath=$plan.RequestPath;$x|Add-Member NoteProperty NativeRequestId $plan.RequestId -Force;Add-RepatoHistory $t 'maya-tara-native-launching' 'Tara' "claim=$ClaimId; request=$($plan.RequestId)";$x}}catch{if(Test-Path -LiteralPath $plan.RequestPath -PathType Leaf){Remove-Item -LiteralPath $plan.RequestPath -Force -ErrorAction SilentlyContinue};throw}
     [pscustomobject]@{Mode='Prepared';Stage='launching';ProcessStarted=$false;SideEffectsPerformed=$true;RequestPath=$plan.RequestPath;Request=$request;Plan=$plan}
 }
 function Prepare-MayaQaCanonicalLaunchPhase {
@@ -1562,7 +1615,7 @@ function New-MayaQaPersistentPreBuildRequest {
 
 function Invoke-MayaQaRequest {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$UserRequest,[string]$SourceBranch='main',[string]$ProjectPath,
-        [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,[string]$RuntimeRoot,
+        [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',[string]$CandidateDirectory,[string]$CandidateDllPath,[string]$RuntimeRoot,[string]$FixturePreparationResultPath,
         [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,[switch]$StageFrozenCandidateForQa,[switch]$ValidateExistingDeployment,[scriptblock]$QaStagingInvoker,[scriptblock]$DeploymentValidationInvoker,[scriptblock]$HealthInvoker,[scriptblock]$PreflightInvoker,[scriptblock]$RevitProcessProvider,[switch]$DryRun)
     $qaId=Resolve-MayaQaRequestWorkflow $UserRequest
     $def=Get-MayaQaWorkflowDefinition $qaId
@@ -1598,11 +1651,12 @@ function Invoke-MayaQaRequest {
             $deploymentEvidence=$canonical.DeploymentValidation
         }
     }
-    $run=New-MayaQaRun -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -RunId $runId -RuntimeRoot $RuntimeRoot
+    $runTask=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId
+    $run=New-MayaQaRun -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -RunId $runId -RuntimeRoot $RuntimeRoot -FixturePreparationResultPath $FixturePreparationResultPath -ExpectedTaskRevision ([long]$runTask.revision)
     $current=Get-DeployWorkflow $StoreRoot $taskId $workflowId; $taskData=Read-RepatoTaskStore $StoreRoot; $taskNow=Find-RepatoTask $taskData $taskId
     if(@($taskNow.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'}).Count -eq 0){
         if(@($taskNow.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count -eq 0){
-            $qaStage=Update-RepatoTask $StoreRoot $taskId 'in-progress' 'qa' 'Maya' $null $null
+            $qaStage=Update-RepatoTask $StoreRoot $taskId 'in-progress' 'qa' 'Maya' $null $null -ExpectedTaskRevision ([long]$run.TaskRevision) -ExpectedWorkflowId $workflowId -ExpectedWorkflowRevision ([long]$run.WorkflowRevision) -ExpectedQaWorkflowId $qaId
             if($ArtifactMode -ceq 'FrozenCandidate' -and $deploymentEvidence){$approval=Request-MayaQaCanonicalExecutionApproval -StoreRoot $StoreRoot -TaskId $taskId -WorkflowId $workflowId -BuildRequestId $buildRequest.BuildRequestId -ExpectedTaskRevision ([long]$qaStage.revision) -CandidateSourceCommit $ExpectedCandidateSourceCommit -CandidateSha256 $ExpectedCandidateSha256}
             else{Update-RepatoTask $StoreRoot $taskId 'passed' 'qa' 'Tara' $null $null|Out-Null;$null=Request-RepatoTaskApproval $StoreRoot $taskId 'qa-run' 'maya';$approval=@((Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $taskId).approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})[-1]}
         } else {throw 'Existing pending QA approval cannot be reused after candidate staging.'}
@@ -1625,7 +1679,7 @@ function Invoke-MayaQaCanonicalTransaction {
         [string]$SourceBranch = 'current',
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode='Build',
-        [string]$CandidateDirectory,[string]$CandidateDllPath,[string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,
+        [string]$CandidateDirectory,[string]$CandidateDllPath,[string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,[string]$FixturePreparationResultPath,
         [switch]$StageFrozenCandidateForQa,
         [scriptblock]$RequestInvoker,
         [scriptblock]$ExecutionRecordInvoker,
@@ -1639,7 +1693,7 @@ function Invoke-MayaQaCanonicalTransaction {
     if ($RequestInvoker) {
         $request = & $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath
     } else {
-        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -AuthenticatedBuildSource $AuthenticatedBuildSource -StageFrozenCandidateForQa:$StageFrozenCandidateForQa
+        $request = Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -AuthenticatedBuildSource $AuthenticatedBuildSource -FixturePreparationResultPath $FixturePreparationResultPath -StageFrozenCandidateForQa:$StageFrozenCandidateForQa
     }
     if (!$request -or $request.Stage -notin @('handoff-ready','execution-ready')) {
         throw 'Canonical transaction requires an approved Tara handoff.'
@@ -1701,7 +1755,7 @@ function Invoke-MayaQaSingleCanonicalAttempt {
         [string]$ProjectPath = 'Forma.RevitConnector.csproj',
         [ValidateSet('Build','FrozenCandidate')][string]$ArtifactMode = 'Build',
         [string]$CandidateDirectory,[string]$CandidateDllPath,
-        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,
+        [string]$ExpectedCandidateSha256,[string]$ExpectedCandidateSourceCommit,[object]$AuthenticatedBuildSource,[string]$FixturePreparationResultPath,
         [switch]$StageFrozenCandidateForQa,
         [scriptblock]$DeploymentValidationInvoker,
         [scriptblock]$RequestInvoker,[scriptblock]$ApprovalInvoker,
@@ -1710,7 +1764,7 @@ function Invoke-MayaQaSingleCanonicalAttempt {
     )
     if($ApprovalDecision -eq 'approve' -and [string]::IsNullOrWhiteSpace($ApprovalReason)){throw 'Approval reason is required.'}
     $request = if($RequestInvoker){& $RequestInvoker $StoreRoot $UserRequest $SourceBranch $ProjectPath}else{
-        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -AuthenticatedBuildSource $AuthenticatedBuildSource -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -ValidateExistingDeployment:($ArtifactMode -ceq 'FrozenCandidate') -DeploymentValidationInvoker $DeploymentValidationInvoker -DryRun:$DryRun
+        Invoke-MayaQaRequest -StoreRoot $StoreRoot -UserRequest $UserRequest -SourceBranch $SourceBranch -ProjectPath $ProjectPath -ArtifactMode $ArtifactMode -CandidateDirectory $CandidateDirectory -CandidateDllPath $CandidateDllPath -ExpectedCandidateSha256 $ExpectedCandidateSha256 -ExpectedCandidateSourceCommit $ExpectedCandidateSourceCommit -AuthenticatedBuildSource $AuthenticatedBuildSource -FixturePreparationResultPath $FixturePreparationResultPath -StageFrozenCandidateForQa:$StageFrozenCandidateForQa -ValidateExistingDeployment:($ArtifactMode -ceq 'FrozenCandidate') -DeploymentValidationInvoker $DeploymentValidationInvoker -DryRun:$DryRun
     }
     if(!$request){throw 'Canonical request returned no result.'}
     if($request.Stage -eq 'handoff-ready' -or $request.Stage -eq 'execution-ready'){throw 'Single-attempt wrapper received an already-prepared request; refusing to risk reuse.'}
@@ -2218,7 +2272,7 @@ function Request-MayaQaCanonicalExecutionApproval {
     foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties.Name -contains $n -and $task.$n){throw 'Canonical execution approval found existing Tara execution state.'}}
     if($task.PSObject.Properties.Name -contains 'taraRuns' -and @($task.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Canonical execution approval found existing native QA execution.'}
     if(@(Get-Process Revit -ErrorAction SilentlyContinue).Count){throw 'Canonical execution approval requires Revit to be stopped.'}
-    if($workflow.qaRunId -cnotmatch '^[A-Fa-f0-9]{32}$' -or !$workflow.qaModelPath -or !$workflow.qaSidecarPath -or !$workflow.qaFixtureSha256){throw 'Canonical execution plan is incomplete.'}
+    if($workflow.qaRunId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$' -or !$workflow.qaModelPath -or !$workflow.qaSidecarPath -or !$workflow.qaFixtureSha256){throw 'Canonical execution plan is incomplete.'}
     $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\';$storePath=[IO.Path]::GetFullPath($StoreRoot);$runtime=[IO.Path]::GetFullPath($(if($storePath.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){$env:TEMP}else{Get-MayaQaRuntimeRoot}));$model=[IO.Path]::GetFullPath([string]$workflow.qaModelPath);$sidecar=[IO.Path]::GetFullPath([string]$workflow.qaSidecarPath)
     if(!$model.StartsWith($runtime.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !$sidecar.StartsWith($runtime.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $model -PathType Leaf) -or !(Test-Path -LiteralPath $sidecar -PathType Leaf)){throw 'Canonical disposable model is missing or outside the approved QA runtime.'}
     $modelHash=(Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash;$definition=Get-MayaQaWorkflowDefinition $workflow.qaWorkflowId
@@ -2321,7 +2375,7 @@ function Request-MayaQaRecoveredExpiredAttemptApproval {
     )
     $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
     if([long]$task.revision -ne $ExpectedTaskRevision){throw 'Expired attempt task revision is stale.'}
-    if($task.status -cne 'passed' -or $task.workflowStage -cne 'approval'){throw 'Expired attempt task is not in the canonical pre-approval state.'}
+    if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'approval'){throw 'Expired attempt task is not in the canonical pre-approval state.'}
     # Follow the persisted replacement edges backwards. Every hop must have its
     # attempt record and at least one intact packet snapshot; this permits a
     # historical approval to remain bound to an earlier attempt in the chain.
@@ -2358,11 +2412,11 @@ function Request-MayaQaRecoveredExpiredAttemptApproval {
     $binding=[ordered]@{SchemaVersion='maya-qa-expired-prepared-attempt-approval-v1';TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId='create-plan-views-v1';BuildRequestId=[string]$e.BuildRequestId;CandidateSourceCommit=$ExpectedCandidateSourceCommit;CandidateSha256=$ExpectedCandidateSha256;AttemptId=$RecoveredAttemptId;RunId=$RecoveredRunId}
     $bindingJson=ConvertTo-Json -InputObject $binding -Depth 5 -Compress;$sha=[Security.Cryptography.SHA256]::Create();try{$bindingHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($bindingJson)))).Replace('-','')}finally{$sha.Dispose()}
     $runtime=[ordered]@{Name='Repato.QaLaunchAgent';Version=$LaunchAgentRuntimeVersion}
-    $request=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;candidate=[pscustomobject]@{BuildRequestId=[string]$e.BuildRequestId;SourceCommit=$ExpectedCandidateSourceCommit;ArtifactSha256=$ExpectedCandidateSha256};attemptId=$RecoveredAttemptId;runId=$RecoveredRunId;runtime=[pscustomobject]$runtime;previousStatus='passed';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason='Fresh user approval for the replacement of an expired prepared attempt.';consumedUtc=$null}
+    $request=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;candidate=[pscustomobject]@{BuildRequestId=[string]$e.BuildRequestId;SourceCommit=$ExpectedCandidateSourceCommit;ArtifactSha256=$ExpectedCandidateSha256};attemptId=$RecoveredAttemptId;runId=$RecoveredRunId;runtime=[pscustomobject]$runtime;previousStatus='in-progress';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason='Fresh user approval for the replacement of an expired prepared attempt.';consumedUtc=$null}
     Invoke-RepatoStoreMutation $StoreRoot {
         param($data,$preview)
         $t=Find-RepatoTask $data $TaskId
-        if([long]$t.revision -ne $ExpectedTaskRevision -or $t.status -cne 'passed' -or $t.workflowStage -cne 'approval' -or $t.mayaTaraAttempt.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraAttempt.RunId -cne $RecoveredRunId -or $t.mayaTaraExecution.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraExecution.RunId -cne $RecoveredRunId){throw 'Expired attempt approval compare-and-swap failed.'}
+        if([long]$t.revision -ne $ExpectedTaskRevision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval' -or $t.mayaTaraAttempt.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraAttempt.RunId -cne $RecoveredRunId -or $t.mayaTaraExecution.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraExecution.RunId -cne $RecoveredRunId){throw 'Expired attempt approval compare-and-swap failed.'}
         $currentLineage=@($t.mayaTaraExecutionHistory|Where-Object {$_.FailureCode -ceq 'attempt-expired' -and $_.Stage -ceq 'expired' -and $_.ExecutionStatus -ceq 'Expired'}|ForEach-Object {"$($_.AttemptId)/$($_.RunId)>$($_.ReplacementAttemptId)/$($_.ReplacementRunId)"}|Where-Object {$lineageKeys -contains $_})
         $a=@($currentLineage|Where-Object {$lineageKeys -contains $_})
         $prior=@($t.approvalRequests|Where-Object {$_.requestId -ceq $ExpiredApprovalRequestId -and $_.status -ceq 'approved'})
@@ -2435,7 +2489,7 @@ function Repair-MayaQaCanonicalRunIdentity {
     if($t.PSObject.Properties.Name -contains 'nativeAttemptCount' -and [int]$t.nativeAttemptCount -gt 0){throw 'Native QA has already begun.'}
     if($t.PSObject.Properties.Name -contains 'taraRuns' -and @($t.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Native QA has already begun.'}
     if($t.PSObject.Properties.Name -contains 'finishedUtc' -and $t.finishedUtc){throw 'Canonical task is terminal.'}
-    $runId='MAYA-'+[guid]::NewGuid().ToString('N');New-MayaQaRun -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $qaId -RunId $runId -RuntimeRoot $RuntimeRoot -FixturePreparationResultPath $FixturePreparationResultPath
+    $runId='MAYA-'+[guid]::NewGuid().ToString('N');New-MayaQaRun -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $qaId -RunId $runId -RuntimeRoot $RuntimeRoot -FixturePreparationResultPath $FixturePreparationResultPath -ExpectedTaskRevision ([long]$t.revision)
 }
 
 function New-MayaQaCanonicalPreparation {
@@ -2505,37 +2559,130 @@ function Assert-MayaQaPath { param([string]$Path,[string]$Root)
     $p=[IO.Path]::GetFullPath($Path); $r=([IO.Path]::GetFullPath($Root)).TrimEnd('\')+'\'
     if (-not $p.StartsWith($r,[StringComparison]::OrdinalIgnoreCase)) { throw "Path is outside approved QA root: $Path" }; $p
 }
-function New-MayaQaRun { param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$RunId,[string]$RuntimeRoot,[string]$FixturePreparationResultPath,[switch]$DryRun)
+function New-MayaQaRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$QaWorkflowId,
+        [Parameter(Mandatory)][string]$RunId,
+        [string]$RuntimeRoot,
+        [string]$FixturePreparationResultPath,
+        [long]$ExpectedTaskRevision = 0,
+        [switch]$DryRun
+    )
     $QaWorkflowId = Resolve-MayaQaWorkflowId $QaWorkflowId
-    $def=Get-MayaQaWorkflowDefinition $QaWorkflowId; if ($RunId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$'){throw 'Invalid QA run ID.'}
-    $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
-    if ($DryRun) { return [pscustomobject]@{WorkflowId=$WorkflowId;RunId=$RunId;Stage=$w.stage;SideEffectsPerformed=$false} }
+    $def=Get-MayaQaWorkflowDefinition $QaWorkflowId
+    if ($RunId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$'){throw 'Invalid QA run ID.'}
+
+    $data=Read-RepatoTaskStore $StoreRoot
+    $task=Find-RepatoTask $data $TaskId
+    $workflows=@($task.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId)
+    if($workflows.Count -ne 1 -or [string]$workflows[0].taskId -cne $TaskId){throw 'QA run task/workflow identity is invalid.'}
+    $w=$workflows[0]
+    $hasExpectedRevision=$PSBoundParameters.ContainsKey('ExpectedTaskRevision')
+    if($hasExpectedRevision -and $ExpectedTaskRevision -lt 1){throw 'ExpectedTaskRevision must be a positive task revision.'}
+    $expectedRevision=if($hasExpectedRevision){[long]$ExpectedTaskRevision}else{[long]$task.revision}
+    if([long]$task.revision -ne $expectedRevision){throw 'QA run task revision is stale.'}
+    if($DryRun){return [pscustomobject]@{WorkflowId=$WorkflowId;RunId=$RunId;Stage=$w.stage;SideEffectsPerformed=$false}}
+    if($QaWorkflowId -ceq 'create-plan-views-v1'){
+        if([string]$w.stage -cnotin @('planned','validated')){throw 'Create Plan Views QA workflow stage is incompatible with plan preparation.'}
+        $freshPlan=($task.status -ceq 'in-progress' -and $task.workflowStage -ceq 'build-checks')
+        $recoveryPlan=$false
+        if($task.status -ceq 'passed' -and $task.workflowStage -ceq 'approval'){
+            $workflowApprovalId=if($w.PSObject.Properties.Name -contains 'qaApprovalId'){[string]$w.qaApprovalId}else{''}
+            $workflowApprovalStatus=if($w.PSObject.Properties.Name -contains 'qaApprovalStatus'){[string]$w.qaApprovalStatus}else{''}
+            $approved=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.requestId -ceq $workflowApprovalId})
+            $pending=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})
+            $handoff=if($w.PSObject.Properties.Name -contains 'qaHandoff'){$w.qaHandoff}else{$null}
+            $binding=if($approved.Count -eq 1 -and $approved[0].PSObject.Properties.Name -contains 'executionBinding'){$approved[0].executionBinding}else{$null}
+            $buildEvidence=if($w.PSObject.Properties.Name -contains 'qaBuildEvidence'){$w.qaBuildEvidence}else{$null}
+            $evidenceBuildId=if($buildEvidence -and $buildEvidence.PSObject.Properties.Name -contains 'BuildRequestId'){[string]$buildEvidence.BuildRequestId}else{''}
+            $evidenceCommit=if($buildEvidence -and $buildEvidence.PSObject.Properties.Name -contains 'CandidateSourceCommit'){[string]$buildEvidence.CandidateSourceCommit}else{''}
+            $evidenceHash=if($buildEvidence -and $buildEvidence.PSObject.Properties.Name -contains 'ArtifactSha256'){[string]$buildEvidence.ArtifactSha256}else{''}
+            $recoveryPlan=($approved.Count -eq 1 -and $pending.Count -eq 0 -and $workflowApprovalStatus -ceq 'approved' -and $handoff -and $binding -and
+                [string]$handoff.HandoffId -ceq [string]$w.qaHandoffId -and [string]$handoff.TaskId -ceq $TaskId -and
+                [string]$handoff.WorkflowId -ceq $WorkflowId -and [string]$handoff.QaWorkflowId -ceq $QaWorkflowId -and
+                [string]$binding.TaskId -ceq $TaskId -and [string]$binding.WorkflowId -ceq $WorkflowId -and
+                [string]$binding.BuildRequestId -ceq $evidenceBuildId -and
+                [string]$binding.CandidateSourceCommit -ceq $evidenceCommit -and
+                [string]$binding.CandidateSha256 -ieq $evidenceHash)
+        }
+        if(!$freshPlan -and !$recoveryPlan){throw 'Create Plan Views QA planning requires build-checks or a supported approved-run recovery state.'}
+        if($freshPlan -and @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -in @('pending','approved')}).Count){throw 'An active QA approval prevents new plan preparation.'}
+        if($w.PSObject.Properties.Name -contains 'qaRunId' -and ![string]::IsNullOrWhiteSpace([string]$w.qaRunId)){throw 'Create Plan Views QA run already exists.'}
+        if($freshPlan){foreach($n in 'qaModelPath','qaSidecarPath','qaFixturePreparationEvidence'){if($w.PSObject.Properties.Name -contains $n -and $null -ne $w.$n -and ![string]::IsNullOrWhiteSpace([string]$w.$n)){throw 'Create Plan Views QA plan is partially prepared.'}}}
+        foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties.Name -contains $n -and $task.$n){throw 'Existing Tara execution state prevents new plan preparation.'}}
+    }
+    if($w.PSObject.Properties.Name -contains 'qaRunId' -and ![string]::IsNullOrWhiteSpace([string]$w.qaRunId)){throw 'QA run already exists for this workflow.'}
+    if($w.PSObject.Properties.Name -contains 'qaBuildEvidence' -and $w.PSObject.Properties.Name -contains 'qaBuildStatus' -and $w.qaBuildStatus -cne 'succeeded'){throw 'Valid Neil build evidence is required before QA run planning.'}
     if ($w.PSObject.Properties.Name -notcontains 'qaBuildEvidence' -or $w.PSObject.Properties.Name -notcontains 'qaBuildStatus' -or $w.qaBuildStatus -ne 'succeeded') { throw 'Valid Neil build evidence is required before QA run planning.' }
     foreach($pair in @(@($w.qaBuildEvidence.ArtifactPath,$w.qaBuildEvidence.ArtifactSha256),@($w.qaBuildEvidence.ManifestPath,$w.qaBuildEvidence.ManifestSha256))){if(!(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine $pair[1]){throw 'Neil build evidence hash validation failed.'}}
-    $qa=Get-MayaQaRoot; $runs=if([string]::IsNullOrWhiteSpace($RuntimeRoot)){Get-MayaQaRuntimeRoot}else{[IO.Path]::GetFullPath($RuntimeRoot)}; if(!(Test-Path -LiteralPath $runs)){New-Item -ItemType Directory -Path $runs -Force|Out-Null}; $run=[IO.Path]::GetFullPath((Join-Path $runs ($WorkflowId+'-'+$RunId))); $runsPrefix=([IO.Path]::GetFullPath($runs)).TrimEnd('\')+'\'; if(!$run.StartsWith($runsPrefix,[StringComparison]::OrdinalIgnoreCase)){throw "Run path escaped QA runtime root: $run"}
-    if (Test-Path -LiteralPath $run) { throw 'QA run directory already exists.' }
-    $source=Join-Path (Join-Path $qa 'Fixtures') $def.Source; if (!(Test-Path -LiteralPath $source -PathType Leaf)){throw "Approved fixture missing: $source"}
-    $fixtureHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash; $preparation=$null
+
+    $qa=Get-MayaQaRoot
+    $runs=if([string]::IsNullOrWhiteSpace($RuntimeRoot)){Get-MayaQaRuntimeRoot}else{[IO.Path]::GetFullPath($RuntimeRoot)}
+    $run=[IO.Path]::GetFullPath((Join-Path $runs ($WorkflowId+'-'+$RunId)))
+    $runsPrefix=([IO.Path]::GetFullPath($runs)).TrimEnd('\')+'\'
+    if(!$run.StartsWith($runsPrefix,[StringComparison]::OrdinalIgnoreCase)){throw "Run path escaped QA runtime root: $run"}
+    if(Test-Path -LiteralPath $run){throw 'QA run directory already exists.'}
+    $source=Join-Path (Join-Path $qa 'Fixtures') $def.Source
+    if(!(Test-Path -LiteralPath $source -PathType Leaf)){throw "Approved fixture missing: $source"}
+    $fixtureHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+    $preparation=$null
+    if($QaWorkflowId -ceq 'create-plan-views-v1' -and [string]::IsNullOrWhiteSpace($FixturePreparationResultPath)){
+        throw 'Create Plan Views QA run requires correlated fixture-preparation evidence before approval or execution preparation.'
+    }
     if($FixturePreparationResultPath){
         if($QaWorkflowId -cne 'create-plan-views-v1'){throw 'Prepared-fixture provenance is supported only for Create Plan Views.'}
-        $prepResultPath=Assert-MayaQaPath $FixturePreparationResultPath (Join-Path $qa 'TestRuns');if(!(Test-Path -LiteralPath $prepResultPath -PathType Leaf)){throw 'Fixture preparation result is missing.'}
+        $prepResultPath=Assert-MayaQaPath $FixturePreparationResultPath (Join-Path $qa 'TestRuns')
+        if(!(Test-Path -LiteralPath $prepResultPath -PathType Leaf)){throw 'Fixture preparation result is missing.'}
         if(!$prepResultPath.EndsWith('.request.json.preparation.json',[StringComparison]::OrdinalIgnoreCase)){throw 'Fixture preparation result path is not a supported canonical result name.'}
-        $prepRequestPath=$prepResultPath.Substring(0,$prepResultPath.Length-('.preparation.json'.Length));if(!(Test-Path -LiteralPath $prepRequestPath -PathType Leaf)){throw 'Correlated fixture preparation request is missing.'}
-        $prepRequest=Get-Content -LiteralPath $prepRequestPath -Raw|ConvertFrom-Json;$prepResult=Get-Content -LiteralPath $prepResultPath -Raw|ConvertFrom-Json
-        $prepRequestHash=(Get-FileHash -LiteralPath $prepRequestPath -Algorithm SHA256).Hash;$prepResultHash=(Get-FileHash -LiteralPath $prepResultPath -Algorithm SHA256).Hash
+        $prepRequestPath=$prepResultPath.Substring(0,$prepResultPath.Length-('.preparation.json'.Length))
+        if(!(Test-Path -LiteralPath $prepRequestPath -PathType Leaf)){throw 'Correlated fixture preparation request is missing.'}
+        $prepRequest=Get-Content -LiteralPath $prepRequestPath -Raw|ConvertFrom-Json
+        $prepResult=Get-Content -LiteralPath $prepResultPath -Raw|ConvertFrom-Json
+        $prepRequestHash=(Get-FileHash -LiteralPath $prepRequestPath -Algorithm SHA256).Hash
+        $prepResultHash=(Get-FileHash -LiteralPath $prepResultPath -Algorithm SHA256).Hash
         foreach($pair in @(@('operation','prepare-disposable-create-plan-views-fixture'),@('taskId',$TaskId),@('workflowId',$WorkflowId))){if([string]$prepRequest.($pair[0]) -cne [string]$pair[1]){throw "Fixture preparation request identity mismatch: $($pair[0])."}}
         if([string]$prepResult.Status -cne 'Passed' -or [string]$prepResult.Operation -cne 'prepare-disposable-create-plan-views-fixture' -or [string]$prepResult.TaskId -cne $TaskId -or [string]$prepResult.WorkflowId -cne $WorkflowId -or [string]$prepResult.AttemptId -cne [string]$prepRequest.AttemptId -or [string]$prepResult.RunId -cne [string]$prepRequest.RunId -or [IO.Path]::GetFullPath([string]$prepResult.ModelPath) -ine [IO.Path]::GetFullPath([string]$prepRequest.modelPath)){throw 'Fixture preparation result identity does not correlate to its request.'}
         if([string]$prepRequest.modelSha256 -ine $fixtureHash -or [string]$prepResult.SourceModelSha256 -ine $fixtureHash -or [string]$prepResult.PreparedModelSha256 -notmatch '^[a-fA-F0-9]{64}$' -or !(Test-Path -LiteralPath $prepRequest.modelPath -PathType Leaf) -or (Get-FileHash -LiteralPath $prepRequest.modelPath -Algorithm SHA256).Hash -ine [string]$prepResult.PreparedModelSha256){throw 'Fixture preparation source/prepared model hash validation failed.'}
         if([IO.Path]::GetFullPath([string]$prepRequest.outputPath) -ine $prepResultPath -or [string]$prepRequest.attemptId -notmatch '^[a-fA-F0-9]{32}$' -or [string]$prepRequest.runId -notmatch '^[a-fA-F0-9]{32}$'){throw 'Fixture preparation request/result path or identity binding failed.'}
         $preparation=[pscustomobject]@{RequestPath=$prepRequestPath;RequestSha256=$prepRequestHash;ResultPath=$prepResultPath;ResultSha256=$prepResultHash;AttemptId=[string]$prepRequest.attemptId;RunId=[string]$prepRequest.runId;SourceSha256=$fixtureHash;PreparedModelPath=[IO.Path]::GetFullPath([string]$prepRequest.modelPath);PreparedModelSha256=[string]$prepResult.PreparedModelSha256}
     }
-    New-Item -ItemType Directory -Path $run -Force | Out-Null; $model=Join-Path $run 'model.rvt'; if($preparation){Copy-Item -LiteralPath $preparation.PreparedModelPath -Destination $model}else{Copy-Item -LiteralPath $source -Destination $model}
-    $modelHash=(Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash;if($preparation -and $modelHash -ine $preparation.PreparedModelSha256){throw 'Canonical disposable model does not match the prepared-model result hash.'};$sidecar=Join-Path $run 'model.rvt.fixture.json'
-    $side=[ordered]@{fixtureId=$def.FixtureId;sourceSha256=$fixtureHash};if($preparation){$side.preparedModelSha256=$preparation.PreparedModelSha256;$side.fixturePreparationRequestPath=$preparation.RequestPath;$side.fixturePreparationRequestSha256=$preparation.RequestSha256;$side.fixturePreparationResultPath=$preparation.ResultPath;$side.fixturePreparationResultSha256=$preparation.ResultSha256;$side.fixturePreparationAttemptId=$preparation.AttemptId;$side.fixturePreparationRunId=$preparation.RunId}; if($QaWorkflowId -eq 'grid-bubble-visibility-v1' -or $QaWorkflowId -eq 'grid-bubble-offset-v1'){$side.requiredGridNames=@('A','B','C','D','1','2','3','4')}; if($QaWorkflowId -eq 'grid-resequence-v1'){$side.requiredGridNames=@('1','2','3','3.2','4','A','A.1','B','C')}
-    $side | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $sidecar -Encoding UTF8
-    if($WorkflowId -eq 'grid-bubble-visibility-v1'){$check=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json;$expected=@('A','B','C','D','1','2','3','4');if($check.fixtureId -cne 'GridBubbleVisibilityEmpty' -or $check.sourceSha256 -ine $fixtureHash -or (@($check.requiredGridNames)-join '|') -cne ($expected -join '|')){throw 'Grid Bubble Visibility sidecar identity is invalid.'}}    $d=Read-RepatoTaskStore $StoreRoot;$t=Find-RepatoTask $d $TaskId
-    $nativeTestId=Get-MayaQaNativeTestId $def;$m=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $w.workflowRevision $t.revision { param($x) foreach($v in @(@('qaWorkflowId',$QaWorkflowId),@('qaRunId',$RunId),@('qaModelPath',$model),@('qaSidecarPath',$sidecar),@('qaFixtureId',$def.FixtureId),@('qaFixtureSha256',$fixtureHash),@('qaFixturePreparationEvidence',$preparation),@('qaDisposableModelSha256',$modelHash),@('qaTestId',$nativeTestId),@('qaReportPath',$null),@('qaReportSha256',$null),@('qaEvidence',$null),@('qaVerificationStatus',$null),@('qaCompletionStatus',$null),@('qaCompletedUtc',$null))){$x|Add-Member -NotePropertyName $v[0] -NotePropertyValue $v[1] -Force}; if($x.PSObject.Properties.Name -contains 'qaHandoff' -and $x.qaHandoff){$x.qaHandoff | Add-Member -NotePropertyName ModelPath -NotePropertyValue $model -Force;$x.qaHandoff | Add-Member -NotePropertyName SidecarPath -NotePropertyValue $sidecar -Force}; return $x })[-1]
-    [pscustomobject]@{WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;ModelPath=$model;SidecarPath=$sidecar;FixtureId=$def.FixtureId;FixtureSha256=$fixtureHash;ModelSha256=$modelHash;FixturePreparation=$preparation;Stage=$m.Workflow.stage;WorkflowRevision=$m.Workflow.workflowRevision;TaskRevision=$m.TaskRevision;SideEffectsPerformed=$true}
+
+    $model=Join-Path $run 'model.rvt'
+    $sidecar=Join-Path $run 'model.rvt.fixture.json'
+    $created=[pscustomobject]@{Run=$false;RunsRoot=$false;ModelHash=$null}
+    $transform={
+        param($current)
+        if(Test-Path -LiteralPath $run){throw 'QA run directory already exists.'}
+        if(!(Test-Path -LiteralPath $runs -PathType Container)){New-Item -ItemType Directory -Path $runs -Force|Out-Null;$created.RunsRoot=$true}
+        New-Item -ItemType Directory -Path $run -ErrorAction Stop|Out-Null
+        $created.Run=$true
+        if($preparation){Copy-Item -LiteralPath $preparation.PreparedModelPath -Destination $model -ErrorAction Stop}else{Copy-Item -LiteralPath $source -Destination $model -ErrorAction Stop}
+        $created.ModelHash=(Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
+        if($preparation -and $created.ModelHash -ine $preparation.PreparedModelSha256){throw 'Canonical disposable model does not match the prepared-model result hash.'}
+        $side=[ordered]@{fixtureId=$def.FixtureId;sourceSha256=$fixtureHash}
+        if($preparation){$side.preparedModelSha256=$preparation.PreparedModelSha256;$side.fixturePreparationRequestPath=$preparation.RequestPath;$side.fixturePreparationRequestSha256=$preparation.RequestSha256;$side.fixturePreparationResultPath=$preparation.ResultPath;$side.fixturePreparationResultSha256=$preparation.ResultSha256;$side.fixturePreparationAttemptId=$preparation.AttemptId;$side.fixturePreparationRunId=$preparation.RunId}
+        if($QaWorkflowId -eq 'grid-bubble-visibility-v1' -or $QaWorkflowId -eq 'grid-bubble-offset-v1'){$side.requiredGridNames=@('A','B','C','D','1','2','3','4')}
+        if($QaWorkflowId -eq 'grid-resequence-v1'){$side.requiredGridNames=@('1','2','3','3.2','4','A','A.1','B','C')}
+        $side|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $sidecar -Encoding UTF8
+        if($WorkflowId -eq 'grid-bubble-visibility-v1'){$check=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json;$expected=@('A','B','C','D','1','2','3','4');if($check.fixtureId -cne 'GridBubbleVisibilityEmpty' -or $check.sourceSha256 -ine $fixtureHash -or (@($check.requiredGridNames)-join '|') -cne ($expected -join '|')){throw 'Grid Bubble Visibility sidecar identity is invalid.'}}
+        foreach($v in @(@('qaWorkflowId',$QaWorkflowId),@('qaRunId',$RunId),@('qaModelPath',$model),@('qaSidecarPath',$sidecar),@('qaFixtureId',$def.FixtureId),@('qaFixtureSha256',$fixtureHash),@('qaFixturePreparationEvidence',$preparation),@('qaDisposableModelSha256',$created.ModelHash),@('qaTestId',(Get-MayaQaNativeTestId $def)),@('qaReportPath',$null),@('qaReportSha256',$null),@('qaEvidence',$null),@('qaVerificationStatus',$null),@('qaCompletionStatus',$null),@('qaCompletedUtc',$null))){$current|Add-Member -NotePropertyName $v[0] -NotePropertyValue $v[1] -Force}
+        if($current.PSObject.Properties.Name -contains 'qaHandoff'){
+            if($current.qaHandoff){$current.qaHandoff|Add-Member -NotePropertyName ModelPath -NotePropertyValue $model -Force;$current.qaHandoff|Add-Member -NotePropertyName SidecarPath -NotePropertyValue $sidecar -Force}
+        }
+        return $current
+    }.GetNewClosure()
+    try{
+        $m=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $w.workflowRevision $expectedRevision $transform)[-1]
+    }catch{
+        if($created.Run -and (Test-Path -LiteralPath $run -PathType Container)){Remove-Item -LiteralPath $run -Recurse -Force -ErrorAction SilentlyContinue}
+        if($created.RunsRoot -and (Test-Path -LiteralPath $runs -PathType Container) -and @((Get-ChildItem -LiteralPath $runs -Force -ErrorAction SilentlyContinue)).Count -eq 0){Remove-Item -LiteralPath $runs -Force -ErrorAction SilentlyContinue}
+        throw
+    }
+    [pscustomobject]@{WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;ModelPath=$model;SidecarPath=$sidecar;FixtureId=$def.FixtureId;FixtureSha256=$fixtureHash;ModelSha256=$created.ModelHash;FixturePreparation=$preparation;Stage=$m.Workflow.stage;WorkflowRevision=$m.Workflow.workflowRevision;TaskRevision=$m.TaskRevision;SideEffectsPerformed=$true}
 }
 function Register-MayaQaReport { param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[Parameter(Mandatory)][string]$ReportPath,[string]$ReportRoot,[switch]$DryRun)
     $def=Get-MayaQaWorkflowDefinition $QaWorkflowId; $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
@@ -2612,6 +2759,22 @@ function Complete-MayaQaWorkflow { param([Parameter(Mandatory)][string]$StoreRoo
     $m=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId $w.workflowRevision $t.revision {param($x)$x|Add-Member -NotePropertyName qaVerificationStatus -NotePropertyValue 'verified' -Force;$x|Add-Member -NotePropertyName qaCompletionStatus -NotePropertyValue 'completed' -Force;$x|Add-Member -NotePropertyName qaCompletedUtc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('O')) -Force;return $x})[-1]
     $updated=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
     [pscustomobject]@{WorkflowId=$WorkflowId;QaVerificationStatus=$updated.qaVerificationStatus;QaCompletionStatus=$updated.qaCompletionStatus;CoordinatorRunId=$updated.qaEvidence.CoordinatorRunId;NativeRunId=$updated.qaEvidence.NativeRunId;WorkflowRevision=$m.Workflow.workflowRevision;TaskRevision=$m.TaskRevision;SideEffectsPerformed=$true}
+}
+function Complete-MayaQaTaskClosure {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[Parameter(Mandatory)][string]$QaWorkflowId,[switch]$DryRun)
+    $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
+    if($workflow.qaCompletionStatus -cne 'completed' -or $workflow.qaVerificationStatus -cne 'verified'){throw 'Verified completed QA workflow is required before task closure.'}
+    $receipt=Get-MayaQaReceiptStatus -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId
+    if($receipt.ReceiptStatus -cne 'Valid' -or !$receipt.ReceiptHashValid -or @($receipt.ReferencedHashes|Where-Object {!$_.Valid}).Count){throw 'Valid immutable QA receipt evidence is required before task closure.'}
+    if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'approval'){throw 'Parent task is not in the verified QA closure state.'}
+    $approved=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.requestId -ceq $workflow.qaApprovalId})
+    if($approved.Count -ne 1){throw 'Exact approved QA request is required before task closure.'}
+    if($DryRun){return [pscustomobject]@{TaskId=$TaskId;WorkflowId=$WorkflowId;ReceiptSha256=$receipt.ReceiptSha256;WouldComplete=$true;SideEffectsPerformed=$false}}
+    $expectedRevision=[long]$task.revision
+    $closed=Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$t=Find-RepatoTask $data $TaskId;if([long]$t.revision -ne $expectedRevision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval'){throw 'QA task closure compare-and-swap failed.'};$w=@($t.deploymentWorkflows|Where-Object {$_.workflowId -ceq $WorkflowId -and $_.taskId -ceq $TaskId});$a=@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.requestId -ceq $workflow.qaApprovalId -and $_.runId -ceq $workflow.qaEvidence.NativeRunId});if($w.Count -ne 1 -or $w[0].qaCompletionStatus -cne 'completed' -or $w[0].qaVerificationStatus -cne 'verified' -or $w[0].qaApprovalId -cne $workflow.qaApprovalId -or $a.Count -ne 1){throw 'Verified QA task closure evidence changed during compare-and-swap.'};$t.status='completed';$t.workflowStage='completed';$t.finishedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'completed' 'Maya' 'verified QA receipt and approved run closed the task';$t}
+    [pscustomobject]@{TaskId=$TaskId;WorkflowId=$WorkflowId;ReceiptSha256=$receipt.ReceiptSha256;Status=$closed.status;WorkflowStage=$closed.workflowStage;SideEffectsPerformed=$true}
 }
 function New-MayaQaReceipt {
     param(
@@ -2970,8 +3133,11 @@ function Invoke-MayaQaOverview { param([Parameter(Mandatory)][ValidateSet('qa-ca
 Export-ModuleMember -Function Prepare-MayaQaCanonicalLaunchPhase,Start-MayaQaCanonicalProcessPhase,Accept-MayaQaCanonicalEvidencePhase,Verify-MayaQaCanonicalRollbackPhase,Verify-MayaQaCanonicalExecutionPhase
 Export-ModuleMember -Function Wait-MayaQaCanonicalResultPhase,Complete-MayaQaCanonicalExecutionPhase
 Export-ModuleMember -Function Invoke-MayaQaTaraExecute,Resolve-MayaQaRequestWorkflow,Resolve-MayaQaWorkflowId,Resolve-MayaQaTaskStoreIdentity,New-MayaQaExecutionRecord,Claim-MayaQaExecutionRecord,Prepare-MayaQaCanonicalNativeLaunch,Invoke-MayaQaCanonicalNativeCore,Get-MayaQaAttemptDurationMinutes,Recover-MayaQaExpiredExecutionRecord,Recover-MayaQaTerminalLaunchFailure,Recover-MayaQaAbandonedNativeExecution,Repair-MayaQaPreparedExecutionLifecycle,Get-MayaQaCanonicalNativeResult,Resume-MayaQaCanonicalExecution,Get-MayaQaNativeTestId,Invoke-MayaQaRequest,New-MayaQaPersistentPreBuildRequest,Invoke-MayaQaCanonicalTransaction,Invoke-MayaQaSingleCanonicalAttempt,Get-MayaQaWorkflowDefinition,Get-MayaQaWorkflowCatalog,Get-MayaQaCatalogDryRun,Get-MayaQaWorkflowStatus,Invoke-MayaQaIntake,New-MayaQaBuildRequest,New-MayaQaCandidateReplacementBuildRequest,Invoke-MayaQaBuildExecute,New-MayaQaHandoff,Submit-MayaQaReport,Get-MayaQaDashboard,Invoke-MayaQaOverview,New-MayaQaBootstrap,New-MayaQaRun,Register-MayaQaReport,Complete-MayaQaWorkflow,New-MayaQaReceipt,Get-MayaQaReceiptStatus
+Export-ModuleMember -Function Complete-MayaQaTaskClosure
 Export-ModuleMember -Function Recover-MayaQaInvalidNativeClaim
 Export-ModuleMember -Function Recover-MayaQaCorrelatedNativeFailure
+Export-ModuleMember -Function Repair-MayaQaRecoveredFixturePreparation,Set-MayaQaRecoveredFixtureReadyState,Read-MayaQaFixturePreparationRecord
+Export-ModuleMember -Function Invoke-MayaQaFixtureBlockedRecovery
 Export-ModuleMember -Function Prepare-MayaQaAfterExpiredFailureRecovery
 Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
 Export-ModuleMember -Function Complete-MayaQaRunnerStartupFailureReconciliation

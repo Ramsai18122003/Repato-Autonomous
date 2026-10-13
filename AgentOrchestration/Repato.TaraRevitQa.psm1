@@ -72,7 +72,7 @@ function Test-TaraLegacyDeploymentManifestCompatibility {
     $true
 }
 function New-TaraRevitQaPlan {
-    param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,3600)][int]$TimeoutSeconds=900,[switch]$DryRun,[switch]$LevelInventory,[switch]$FixturePreparation,[switch]$ManualLoadOnce,[Parameter(Mandatory)]$Context,[scriptblock]$SessionValidationInvoker)
+    param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,86400)][int]$TimeoutSeconds=900,[switch]$DryRun,[switch]$LevelInventory,[switch]$FixturePreparation,[switch]$ManualLoadOnce,[Parameter(Mandatory)]$Context,[scriptblock]$SessionValidationInvoker)
     if($LevelInventory -and $FixturePreparation){throw 'Level inventory and fixture preparation modes are mutually exclusive.'}
     $QaWorkflowId=$QaWorkflowId.Trim()
     $runners=@{
