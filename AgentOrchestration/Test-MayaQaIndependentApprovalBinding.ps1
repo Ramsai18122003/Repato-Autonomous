@@ -59,6 +59,11 @@ try {
         if($q.status -cne 'pending' -or $q.requiredLevel -cne 'user' -or $q.executionBinding.DeploymentValidationEvidence.OperationId -cne $f.OperationId -or $q.executionBinding.DeploymentValidationEvidence.RequestId -cne $f.RequestId -or $q.executionBinding.DeploymentValidationEvidence.StagingSuccessClaimed -ne $false -or !$w.qaRunId -or !$w.qaModelPath -or !$w.qaSidecarPath -or !$w.qaFixtureSha256 -or $t.workflowStage -cne 'approval' -or $plan.NextAgent -cne 'Tara'){throw 'Independent evidence or canonical QA plan was not bound.'}
         Resolve-RepatoTaskApproval $f.Store $taskId approve user 'synthetic binding verification'|Out-Null
     }
+    Case 'active repository candidate approval resolves without legacy manifest provenance' {
+        $f=New-ApprovalFixture 'valid';Invoke-RepatoStoreMutation $f.Store {param($d,$p)$w=@((Find-RepatoTask $d $taskId).deploymentWorkflows|Where-Object workflowId -ceq $workflowId)[0];$w.qaBuildEvidence.PSObject.Properties.Remove('OriginalRunnerManifestPath');$d}|Out-Null
+        $q=Prepare-And-Request $f;Resolve-RepatoTaskApproval $f.Store $taskId approve user 'synthetic active-root approval verification'|Out-Null
+        $t=Find-RepatoTask (Read-RepatoTaskStore $f.Store) $taskId;if($t.status -cne 'in-progress' -or @($t.approvalRequests|Where-Object {$_.requestId -ceq $q.requestId -and $_.status -ceq 'approved'}).Count -ne 1){throw 'Active repository candidate did not resolve after optional legacy provenance was omitted.'}
+    }
     foreach($mode in @('operation-id','request-id','response-id','candidate','manifest','identity','isolation','staging-claim','wrong-build')){Case "$mode rejected" {$f=New-ApprovalFixture $mode;$failed=$false;try{Prepare-And-Request $f|Out-Null}catch{$failed=$true};$t=Find-RepatoTask (Read-RepatoTaskStore $f.Store) $taskId;if(!$failed -or @($t.approvalRequests|Where-Object status -ceq 'pending').Count){throw "$mode crossed approval boundary"}}}
     Case 'stale revision rejected' {$f=New-ApprovalFixture 'valid';$failed=$false;try{Prepare-And-Request $f -Stale|Out-Null}catch{$failed=$true};if(!$failed){throw 'stale revision was accepted'}}
     Case 'duplicate approval rejected' {$f=New-ApprovalFixture 'duplicate';$failed=$false;try{Prepare-And-Request $f|Out-Null}catch{$failed=$true};if(!$failed){throw 'duplicate approval was accepted'}}
