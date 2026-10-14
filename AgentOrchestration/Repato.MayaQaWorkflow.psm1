@@ -2218,7 +2218,8 @@ function New-MayaQaPersistedCandidateEvidence {
     if(!$sourceRunnerHash -or $sourceRunnerHash -ine $e.RunnerManifestSha256 -or [IO.Path]::GetFullPath($e.RunnerManifestPath) -notin @($runnerPath,$installedPath,$externalRunnerPath)){throw 'Persisted candidate runner manifest does not match trusted source evidence.'}
     if([IO.Path]::GetFullPath($e.RunnerManifestPath) -ine $runnerPath -and (!(Test-Path -LiteralPath $e.RunnerManifestPath -PathType Leaf) -or (Get-FileHash -LiteralPath $e.RunnerManifestPath -Algorithm SHA256).Hash -ine $sourceRunnerHash)){throw 'Persisted candidate runner manifest copy differs from trusted source evidence.'}
     $candidate=New-RepatoCandidateEvidence -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateSourceCommit $e.CandidateSourceCommit -CandidateDirectory $e.CandidateDirectory -CandidateDllPath $e.ArtifactPath -CandidateDllSha256 $e.ArtifactSha256 -NeilBuildArtifactSha256 $e.ArtifactSha256 -RunnerManifestPath $runnerPath -RunnerManifestSha256 $e.RunnerManifestSha256 -CandidateProvenancePath $e.CandidateProvenancePath
-    $root=[IO.Path]::GetFullPath('C:\Repato-Autonomous\Worktrees\create-plan-views-buildfix-4f2cbba22ba9\DeploymentCandidates\AgentBuilds')
+    $activeRepositoryRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $root=[IO.Path]::GetFullPath((Join-Path $activeRepositoryRoot 'DeploymentCandidates\AgentBuilds'))
     $null=Resolve-RepatoCandidateEvidence -Evidence $candidate -AuthenticatedEvidence $candidate -ApprovedCandidateRoot $root -ApprovedRunnerManifestRoot $runnerRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
     $candidate
 }
