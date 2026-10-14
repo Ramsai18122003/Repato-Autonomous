@@ -128,7 +128,8 @@ public static class AddinIsolationPolicy
                 else
                 {
                     string name = Path.GetFileName(path);
-                    bool selectedPlanViewsManifest = name.Equals("Repato.CreatePlanViews.TestRunner.addin", StringComparison.OrdinalIgnoreCase) &&
+                    bool selectedPlanViewsManifest = (name.Equals("Repato.CreatePlanViews.TestRunner.addin", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("Repato.CreateRcpViews.TestRunner.addin", StringComparison.OrdinalIgnoreCase)) &&
                         selectedManifestPath is not null && selectedManifestSha256 is not null &&
                         Path.GetFullPath(path).Equals(Path.GetFullPath(selectedManifestPath), StringComparison.OrdinalIgnoreCase);
                     if (selectedPlanViewsManifest)
@@ -138,7 +139,7 @@ public static class AddinIsolationPolicy
                         allowed = Regex.IsMatch(selectedManifestSha256!, @"\A[0-9a-fA-F]{64}\z") &&
                             hash.Equals(selectedManifestSha256, StringComparison.OrdinalIgnoreCase) &&
                             hash.Equals(Hash(source), StringComparison.OrdinalIgnoreCase);
-                        reason = allowed ? "Selected Create Plan Views manifest matches request and trusted source SHA-256." : "Selected Create Plan Views manifest does not match request or trusted source.";
+                        reason = allowed ? "Selected QA manifest matches request and trusted source SHA-256." : "Selected QA manifest does not match request or trusted source.";
                     }
                     else if (name.Equals("Repato.CreateLevels.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleVisibility.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleOffset.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridResequence.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.WelcomeSmoke.TestRunner.addin", StringComparison.OrdinalIgnoreCase))
                     {

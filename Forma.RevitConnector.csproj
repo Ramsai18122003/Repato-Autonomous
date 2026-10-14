@@ -35,6 +35,8 @@
     <Compile Remove="QaLaunchAgent.ProtocolInteropTests\**\*.cs" />
     <Compile Remove="TestRunner.ContractTests\**\*.cs" />
     <Compile Remove="ReflectedCeilingPlans.ContractTests\**\*.cs" />
+    <Compile Remove="RcpQaRunner\**\*.cs" />
+    <Compile Remove="RcpQaRunner.ContractTests\**\*.cs" />
     <Compile Remove="CandidateRunnerBindingCheck\**\*.cs" />
   </ItemGroup>
 

@@ -155,4 +155,31 @@ var failedReportJson = JsonSerializer.Serialize(new Dictionary<string, object?>(
 Check(!CreatePlanViewsResultContract.IsPassing(JsonSerializer.Serialize(failedReceipt), failedReportJson, request, artifactHash), "failed report and its exact error are retained but cannot pass");
 Reject(() => CreatePlanViewsResultContract.CreateReceipt(request, request.RequestId, request.TaskId, request.WorkflowId,
     request.TestId, request.AttemptId, Guid.NewGuid().ToString("N"), request.ClaimId, "Passed", reportPath), "mismatched result run identity rejected");
+string isolationRoot = Path.Combine(Path.GetTempPath(), "repato-isolation-contract-" + Guid.NewGuid().ToString("N"));
+string machineRoot = Path.Combine(isolationRoot, "machine"), userRoot = Path.Combine(isolationRoot, "user");
+string sourceRoot = Path.Combine(isolationRoot, "trusted-source"), policyPath = Path.Combine(isolationRoot, "allowlist.json");
+Directory.CreateDirectory(machineRoot); Directory.CreateDirectory(userRoot); Directory.CreateDirectory(sourceRoot);
+try
+{
+    string rcpName = "Repato.CreateRcpViews.TestRunner.addin";
+    string sourceManifest = Path.Combine(sourceRoot, rcpName), installedManifest = Path.Combine(userRoot, rcpName);
+    string contents = "<RevitAddIns><AddIn Type=\"Application\"><FullClassName>Repato.RcpQaRunner.RcpQaApplication</FullClassName></AddIn></RevitAddIns>";
+    File.WriteAllText(sourceManifest, contents); File.Copy(sourceManifest, installedManifest);
+    string policy = JsonSerializer.Serialize(new { schemaVersion = 1, machineWideRoot = machineRoot, approvedMachineWideManifests = Array.Empty<object>() });
+    File.WriteAllText(policyPath, policy);
+    string selectedHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(sourceManifest)));
+    var allowed = AddinIsolationPolicy.Inspect(policyPath, machineRoot, userRoot, sourceRoot, installedManifest, selectedHash);
+    Check(allowed.Allowed, "RCP selected manifest passes exact source-hash isolation binding");
+    var notSelected = AddinIsolationPolicy.Inspect(policyPath, machineRoot, userRoot, sourceRoot,
+        Path.Combine(userRoot, "Repato.CreatePlanViews.TestRunner.addin"), new string('B', 64));
+    Check(!notSelected.Allowed, "RCP manifest is not allowlisted during a different QA workflow");
+    File.WriteAllText(installedManifest, contents + "tampered");
+    var mismatch = AddinIsolationPolicy.Inspect(policyPath, machineRoot, userRoot, sourceRoot, installedManifest, selectedHash);
+    Check(!mismatch.Allowed, "tampered RCP selected manifest fails isolation");
+    File.Copy(sourceManifest, installedManifest, true);
+    File.WriteAllText(Path.Combine(userRoot, "unexpected.addin"), "<RevitAddIns />");
+    var extra = AddinIsolationPolicy.Inspect(policyPath, machineRoot, userRoot, sourceRoot, installedManifest, selectedHash);
+    Check(!extra.Allowed, "unexpected user-profile add-in fails RCP isolation");
+}
+finally { Directory.Delete(isolationRoot, recursive: true); }
 Console.WriteLine("Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations.");

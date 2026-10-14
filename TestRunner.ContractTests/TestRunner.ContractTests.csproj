@@ -11,5 +11,6 @@
     <Compile Include="..\TestRunner\CreatePlanViewsResultContract.cs" Link="CreatePlanViewsResultContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsFixturePreparationRequest.cs" Link="CreatePlanViewsFixturePreparationRequest.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsPreparationEvidenceContract.cs" Link="CreatePlanViewsPreparationEvidenceContract.cs" />
+    <Compile Include="..\TestRunner\AddinIsolationPolicy.cs" Link="AddinIsolationPolicy.cs" />
   </ItemGroup>
 </Project>
