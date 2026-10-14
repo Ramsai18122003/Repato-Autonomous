@@ -659,6 +659,7 @@ function Recover-MayaQaCorrelatedNativeFailure {
     if($null -eq $AttemptDurationMinutes){$AttemptDurationMinutes=Get-MayaQaAttemptDurationMinutes};
     $data=Read-RepatoTaskStore $StoreRoot;
     $task=Find-RepatoTask $data $TaskId;
+    if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'approval'){throw 'Native-failure recovery requires the canonical in-progress approval stage.'}
     $old=$task.mayaTaraExecution;
     $attempt=$task.mayaTaraAttempt
     if(!$old -or !$attempt -or $old.Stage -cne 'executing' -or $old.ExecutionStatus -cne 'Executing' -or $old.ClaimOwner -cne 'Tara' -or [string]::IsNullOrWhiteSpace([string]$old.ClaimId) -or !$old.NativeProcessId -or !$old.RequestPath){throw 'Execution is not an eligible executing Tara failure.'};
@@ -684,6 +685,7 @@ function Recover-MayaQaCorrelatedNativeFailure {
     if(!(Test-Path -LiteralPath $resultPath -PathType Leaf)){throw 'Correlated native result is missing.'};
     try{$request=Get-Content $old.RequestPath -Raw|ConvertFrom-Json;
     $receipt=Get-Content $resultPath -Raw|ConvertFrom-Json}catch{throw 'Correlated native request/result is malformed.'};
+    if([IO.Path]::GetFullPath([string]$request.modelPath) -ine [IO.Path]::GetFullPath([string]$old.DisposableModelPath) -or [string]$request.modelSha256 -ine [string]$old.DisposableModelSha256){throw 'Native request model path/hash does not match the canonical disposable model binding.'}
     foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','HandoffId','AttemptId','RunId','ClaimId'){$v=if($request.PSObject.Properties.Name -contains ('canonical'+$n)){$request.('canonical'+$n)}else{$request.$n};
     if([string]$v -cne [string]$identity.$n){throw "Request identity mismatch: $n"}};
     if([string]$request.requestId -cne [string]$old.NativeRequestId -or [string]$receipt.RequestId -cne [string]$old.NativeRequestId -or [string]$receipt.RunId -cne [string]$old.RunId -or [string]$receipt.Status -cne 'Failed'){throw 'Native result correlation/status failed.'};
@@ -692,6 +694,21 @@ function Recover-MayaQaCorrelatedNativeFailure {
     try{$report=Get-Content $receipt.ReportPath -Raw|ConvertFrom-Json}catch{throw 'Correlated native report is malformed.'};
     if($report.TestId -cne $old.TestId -or [string]$report.RunId -cne [string]$receipt.RunId -or $report.Status -cne 'Failed'){throw 'Native report identity/status failed.'};
     foreach($n in 'RequestId','TaskId','WorkflowId','AttemptId','ClaimId'){if([string]$report.$n -cne [string]$(if($n -ceq 'RequestId'){$old.NativeRequestId}else{$identity.$n})){throw "Native report identity mismatch: $n"}};
+    $modelPathFailure=@($report.Errors|Where-Object {[string]$_ -match 'An existing \.rvt file is required\.'}).Count -gt 0
+    $reportDocumentPath=if($report.PSObject.Properties.Name -contains 'DocumentPath'){[string]$report.DocumentPath}else{''}
+    if($modelPathFailure -and ($report.RollbackStatus -cne 'NotStarted' -or ![string]::IsNullOrWhiteSpace($reportDocumentPath) -or @($report.CreatedIds).Count -or @($report.ChangedIds).Count -or @($report.DeletedIds).Count -or @($report.Screenshots).Count)){throw 'Model-path failure report contains document, mutation, rollback, or screenshot evidence inconsistent with pre-open rejection.'}
+    if([string]::IsNullOrWhiteSpace([string]$old.LaunchedUtc)){throw 'Correlated native failure has no recorded launch timestamp.'}
+    try{$launchedUtc=[DateTimeOffset]::Parse([string]$old.LaunchedUtc);$attemptExpiresUtc=[DateTimeOffset]::Parse([string]$attempt.RequestExpiresUtc)}catch{throw 'Correlated native launch or attempt expiry timestamp is invalid.'}
+    if($launchedUtc -ge $attemptExpiresUtc){throw 'Recorded native launch did not occur within the exact attempt authorization window.'}
+    $matchingApprovals=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.attemptId -ceq $old.AttemptId -and $_.runId -ceq $old.RunId})
+    if($matchingApprovals.Count -ne 1){throw 'Exactly one approved qa-run request bound to the failed attempt and run is required for consumption bookkeeping.'}
+    $approvedRequest=$matchingApprovals[0];$approvalBinding=if($approvedRequest.PSObject.Properties.Name -contains 'recoveryBinding'){$approvedRequest.recoveryBinding}elseif($approvedRequest.PSObject.Properties.Name -contains 'executionBinding'){$approvedRequest.executionBinding}else{$null}
+    if(!$approvalBinding -or $approvedRequest.requiredLevel -cne 'user' -or $approvedRequest.decidedBy -cne 'user' -or !$approvedRequest.approvedRevision){throw 'Failed execution has no exact human-approved QA binding.'}
+    $bindingJson=ConvertTo-Json -InputObject $approvalBinding -Depth 20 -Compress;$bindingSha=[Security.Cryptography.SHA256]::Create();try{$actualBindingHash=([BitConverter]::ToString($bindingSha.ComputeHash([Text.Encoding]::UTF8.GetBytes($bindingJson)))).Replace('-','')}finally{$bindingSha.Dispose()}
+    foreach($pair in @(@('TaskId',$TaskId),@('WorkflowId',[string]$old.WorkflowId),@('QaWorkflowId',[string]$old.QaWorkflowId),@('AttemptId',[string]$old.AttemptId),@('RunId',[string]$old.RunId),@('CandidateSha256',[string]$old.ArtifactSha256),@('ModelPath',[string]$old.DisposableModelPath),@('ModelSha256',[string]$old.DisposableModelSha256))){if([string]$approvalBinding.($pair[0]) -ine [string]$pair[1]){throw "Human approval binding mismatch: $($pair[0])"}}
+    if($actualBindingHash -ine [string]$approvedRequest.bindingHash -or [DateTimeOffset]::Parse([string]$approvedRequest.expiresUtc) -le $launchedUtc -or [DateTimeOffset]::Parse([string]$approvedRequest.requestedUtc) -gt $launchedUtc -or [DateTimeOffset]::Parse([string]$approvedRequest.decidedUtc) -gt $launchedUtc){throw 'Human approval hash, decision time, or expiry does not authorize the recorded launch.'}
+    if($approvalBinding.PSObject.Properties.Name -contains 'SourceRunnerManifestPath' -and ([string]$approvalBinding.SourceRunnerManifestPath -ine [string]$old.RunnerManifestPath -or [string]$approvalBinding.SourceRunnerManifestSha256 -ine [string]$old.RunnerManifestSha256)){throw 'Human approval source runner-manifest binding mismatch.'}
+    if($approvalBinding.PSObject.Properties.Name -contains 'DeployedRunnerManifestPath' -and ([string]$approvalBinding.DeployedRunnerManifestPath -ine [string]$old.ValidatedRunnerManifestPath -or [string]$approvalBinding.DeployedRunnerManifestSha256 -ine [string]$old.ValidatedRunnerManifestSha256)){throw 'Human approval deployed runner-manifest binding mismatch.'}
     $failureDetails = 'Native QA report returned Failed without failure details.'
     $failureDetailsProperty = $report.PSObject.Properties['FailureDetails']
     if ($null -ne $failureDetailsProperty) {
@@ -734,6 +751,13 @@ function Recover-MayaQaCorrelatedNativeFailure {
     }
     if(!$manifestValidated){throw 'Runner manifest validation failed.'}
     if(!$old.IsolationAllowed){throw 'Isolation is not allowed.'}
+    $oldSidecar=Get-Content -LiteralPath ($oldModel+'.fixture.json') -Raw|ConvertFrom-Json
+    $preparationEvidence=$old.FixturePreparationEvidence
+    if(!$preparationEvidence){$preparationEvidence=Read-MayaQaFixturePreparationRecord -QaRoot (Get-MayaQaRoot) -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -SourcePath $source -SourceSha256 $old.AuthoritativeFixtureSha256 -ResultPath ([string]$oldSidecar.fixturePreparationResultPath)}
+    $null=Test-MayaQaFixturePreparationRecord -QaRoot (Get-MayaQaRoot) -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -SourcePath $source -SourceSha256 $old.AuthoritativeFixtureSha256 -Evidence $preparationEvidence
+    if([string]$preparationEvidence.PreparedModelSha256 -ine [string]$old.DisposableModelSha256){throw 'Correlated fixture-preparation evidence does not match the failed disposable model.'}
+    $replacementModelSource=[IO.Path]::GetFullPath([string]$preparationEvidence.PreparedModelPath)
+    $replacementModelHash=[string]$preparationEvidence.PreparedModelSha256
     $runs=[IO.Path]::GetFullPath($(if($RuntimeRoot){$RuntimeRoot}else{Get-MayaQaRuntimeRoot}));
     $newAttempt=[guid]::NewGuid().ToString('N');
     $newRun=[guid]::NewGuid().ToString('N');
@@ -741,12 +765,16 @@ function Recover-MayaQaCorrelatedNativeFailure {
     $model=Join-Path $runtime 'model.rvt';
     $sidecar=$model+'.fixture.json';
     New-Item $runtime -ItemType Directory -Force|Out-Null;
-    Copy-Item $source $model -Force;
+    Copy-Item -LiteralPath $replacementModelSource -Destination $model -Force;
     $hash=(Get-FileHash $model -Algorithm SHA256).Hash;
     $def=$fixtureDefinition;
-    [ordered]@{fixtureId=$def.FixtureId;
-    sourceSha256=$hash}|ConvertTo-Json|Set-Content $sidecar -Encoding UTF8;
-    if(!(Test-Path $model) -or !(Test-Path $sidecar)){throw 'Replacement model/sidecar preparation failed.'}
+    $side=[ordered]@{fixtureId=$def.FixtureId;sourceSha256=$old.AuthoritativeFixtureSha256}
+    $side.preparedModelSha256=$preparationEvidence.PreparedModelSha256;$side.fixturePreparationRequestPath=$preparationEvidence.RequestPath;$side.fixturePreparationRequestSha256=$preparationEvidence.RequestSha256;$side.fixturePreparationResultPath=$preparationEvidence.ResultPath;$side.fixturePreparationResultSha256=$preparationEvidence.ResultSha256;$side.fixturePreparationAttemptId=$preparationEvidence.AttemptId;$side.fixturePreparationRunId=$preparationEvidence.RunId
+    if($resolved.SelectedQaWorkflowId -eq 'grid-bubble-visibility-v1' -or $resolved.SelectedQaWorkflowId -eq 'grid-bubble-offset-v1'){$side.requiredGridNames=@('A','B','C','D','1','2','3','4')}
+    if($resolved.SelectedQaWorkflowId -eq 'grid-resequence-v1' -or $resolved.SelectedQaWorkflowId -eq 'grid-resequence-all-directions-v1'){$side.requiredGridNames=@('1','2','3','3.2','4','A','A.1','B','C')}
+    $side|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $sidecar -Encoding UTF8;
+    if(!(Test-Path -LiteralPath $model -PathType Leaf) -or !(Test-Path -LiteralPath $sidecar -PathType Leaf) -or $hash -ine $replacementModelHash){throw 'Replacement model/sidecar preparation failed.'}
+    $null=Test-MayaQaCorrelatedDisposableFixtureProvenance -QaRoot (Get-MayaQaRoot) -TaskId $TaskId -WorkflowId $resolved.SelectedWorkflowId -FixtureId $def.FixtureId -SourcePath $source -SourceSha256 $old.AuthoritativeFixtureSha256 -RuntimeRoot $runtime -ModelPath $model -ModelSha256 $hash
     $expiry=[DateTimeOffset]::UtcNow.AddMinutes($AttemptDurationMinutes).ToString('O');
     $newAttemptRecord=[pscustomobject][ordered]@{SchemaVersion='maya-tara-execution-request-v1';
     AttemptId=$newAttempt;
@@ -765,6 +793,7 @@ function Recover-MayaQaCorrelatedNativeFailure {
     $newExec.DisposableRuntimeRoot=$runtime;
     $newExec.DisposableModelPath=$model;
     $newExec.DisposableModelSha256=$hash;
+    $newExec.FixturePreparationEvidence=$preparationEvidence;
     $newExec.ClaimOwner=$null;
     $newExec.ClaimId=$null;
     $newExec.ClaimedUtc=$null;
@@ -791,7 +820,11 @@ function Recover-MayaQaCorrelatedNativeFailure {
     $newExec.SideEffectsPerformed=$false
     Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;
     $x=$t.mayaTaraExecution;
-    if($t.revision -ne $task.revision -or $x.AttemptId -cne $old.AttemptId -or $x.RunId -cne $old.RunId -or $x.ClaimId -cne $old.ClaimId -or $x.Stage -cne 'executing' -or $x.NativeProcessId -ne $old.NativeProcessId){throw 'QA failure recovery compare-and-swap failed.'};
+    if($t.revision -ne $task.revision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval' -or $x.AttemptId -cne $old.AttemptId -or $x.RunId -cne $old.RunId -or $x.ClaimId -cne $old.ClaimId -or $x.Stage -cne 'executing' -or $x.NativeProcessId -ne $old.NativeProcessId){throw 'QA failure recovery compare-and-swap failed.'};
+    $currentApprovals=@($t.approvalRequests|Where-Object {$_.requestId -ceq $approvedRequest.requestId -and $_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.attemptId -ceq $old.AttemptId -and $_.runId -ceq $old.RunId -and $_.bindingHash -ceq $approvedRequest.bindingHash})
+    if($currentApprovals.Count -ne 1 -or $currentApprovals[0].decidedBy -cne 'user'){throw 'Failed attempt human approval changed during recovery compare-and-swap.'}
+    if($currentApprovals[0].consumedUtc -and [DateTimeOffset]::Parse([string]$currentApprovals[0].consumedUtc) -ne $launchedUtc){throw 'Human approval consumption timestamp conflicts with the recorded native launch.'}
+    if(!$currentApprovals[0].consumedUtc){$currentApprovals[0].consumedUtc=$launchedUtc.ToString('O')}
     $arch=[pscustomobject]$x;
     $arch|Add-Member NoteProperty Stage 'qa-failed' -Force;
     $arch|Add-Member NoteProperty ExecutionStatus 'QaFailed' -Force;
@@ -813,6 +846,7 @@ function Recover-MayaQaCorrelatedNativeFailure {
     $t.mayaTaraAttempt=$newAttemptRecord;
     $newExec.TaskRevisionAtPrepare=[long]$t.revision;
     $t.mayaTaraExecution=[pscustomobject]$newExec;
+    $t.status='in-progress';$t.workflowStage='approval'
     Add-RepatoHistory $t 'maya-tara-correlated-native-failure-recovered' 'Tara' "failedAttempt=$($old.AttemptId);
      failedRun=$($old.RunId);
      replacementAttempt=$newAttempt;
@@ -847,6 +881,58 @@ function Prepare-MayaQaAfterExpiredFailureRecovery {
         foreach($q in @($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -in @('pending','approved')})){$q.status='superseded';$q.reason='Replaced after archived request-expired attempt before fresh canonical preparation.'}
         Add-RepatoHistory $t 'maya-tara-expired-failure-preparation-reset' 'Maya' "failedAttempt=$FailedAttemptId; unlaunchedRecoveryAttempt=$($attempt.AttemptId); result=$($failed.ResultPath); report=$($failed.ReportPath)"
         [pscustomobject]@{TaskId=$TaskId;WorkflowId=$failed.WorkflowId;FailedAttemptId=$FailedAttemptId;EvidencePreserved=$true;ApprovalRefreshRequired=$true;QaLaunchPerformed=$false}
+    }
+}
+
+function Archive-MayaQaRecoveredAttemptForCandidateReplacement {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$FailedAttemptId,
+        [Parameter(Mandatory)][string]$RecoveredAttemptId,
+        [Parameter(Mandatory)][string]$RecoveredRunId,
+        [Parameter(Mandatory)][long]$ExpectedTaskRevision,
+        [scriptblock]$ProcessProvider,
+        [switch]$DryRun
+    )
+    $data=Read-RepatoTaskStore $StoreRoot;$task=Find-RepatoTask $data $TaskId
+    if(!$task -or [long]$task.revision -ne $ExpectedTaskRevision){throw 'Candidate-replacement retirement task revision is stale.'}
+    if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'approval'){throw 'Candidate-replacement retirement requires the recovered in-progress approval state.'}
+    $attempt=$task.mayaTaraAttempt;$execution=$task.mayaTaraExecution
+    if(!$attempt -or !$execution -or $attempt.AttemptId -cne $RecoveredAttemptId -or $attempt.RunId -cne $RecoveredRunId -or $execution.AttemptId -cne $RecoveredAttemptId -or $execution.RunId -cne $RecoveredRunId -or $execution.TaskId -cne $TaskId -or $execution.WorkflowId -cne $WorkflowId){throw 'Recovered candidate-replacement attempt identity mismatch.'}
+    if($attempt.Stage -cne 'prepared' -or $execution.Stage -cne 'prepared' -or $execution.ExecutionStatus -cne 'Prepared' -or $execution.ClaimStatus -cne 'unclaimed' -or $execution.SideEffectsPerformed){throw 'Only the exact unlaunched recovered prepared attempt may be retired.'}
+    foreach($n in 'ClaimId','ClaimOwner','ClaimedUtc','NativeProcessId','RequestPath','ResultPath','ReportPath','ReceiptPath','LaunchingUtc','LaunchedUtc','ExecutingUtc') { if(($attempt.PSObject.Properties.Name -contains $n -and $attempt.$n) -or ($execution.PSObject.Properties.Name -contains $n -and $execution.$n)){throw "Recovered prepared attempt contains prohibited launch evidence: $n"} }
+    if(!$execution.FixturePreparationEvidence -or !$execution.DisposableModelPath -or !$execution.DisposableModelSha256 -or !(Test-Path -LiteralPath $execution.DisposableModelPath -PathType Leaf) -or (Get-FileHash -LiteralPath $execution.DisposableModelPath -Algorithm SHA256).Hash -ine $execution.DisposableModelSha256){throw 'Recovered prepared model binding is missing or invalid.'}
+    $failed=@($task.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $FailedAttemptId -and $_.FailureCode -ceq 'native-qa-failed' -and $_.ReplacementAttemptId -ceq $RecoveredAttemptId -and $_.ReplacementRunId -ceq $RecoveredRunId})
+    if($failed.Count -ne 1){throw 'Exact archived native QA failure and recovered-attempt edge are required.'}
+    foreach($pair in @(@($failed[0].ResultPath,$failed[0].ResultSha256),@($failed[0].ReportPath,$failed[0].ReportSha256))){if(!$pair[0] -or !$pair[1] -or !(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine $pair[1]){throw 'Archived failed receipt/report hash validation failed.'}}
+    $approved=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.attemptId -ceq $FailedAttemptId -and $_.runId -ceq $failed[0].RunId -and $_.status -ceq 'approved' -and $_.consumedUtc})
+    if($approved.Count -ne 1){throw 'Exact consumed approval for the failed native attempt is required before candidate replacement.'}
+    $workflows=@($task.deploymentWorkflows|Where-Object {$_.workflowId -ceq $WorkflowId -and $_.taskId -ceq $TaskId})
+    if($workflows.Count -ne 1){throw 'Candidate-replacement workflow identity is ambiguous.'};$workflow=$workflows[0]
+    if($workflow.qaWorkflowId -cne [string]$execution.QaWorkflowId -or $workflow.qaRunId -cne $RecoveredRunId -or [IO.Path]::GetFullPath([string]$workflow.qaModelPath) -ine [IO.Path]::GetFullPath([string]$execution.DisposableModelPath)){throw 'Workflow run/model binding does not match the recovered attempt.'}
+    $processes=@();if($ProcessProvider){$processes=@(& $ProcessProvider)}else{$processes=@(Get-Process -Name Revit -ErrorAction SilentlyContinue)};if($processes.Count){throw 'Candidate-replacement retirement is blocked while Revit is running.'}
+    $workflowRevision=[long]$workflow.workflowRevision
+    if($task.PSObject.Properties.Name -contains 'mayaQaCandidateReplacementRetirement' -and $task.mayaQaCandidateReplacementRetirement -and $task.mayaQaCandidateReplacementRetirement.RecoveredAttemptId -ceq $RecoveredAttemptId){throw 'Recovered attempt was already retired for candidate replacement.'}
+    $snapshot=[pscustomobject][ordered]@{ArchivedUtc=Get-RepatoUtc;Reason='Runner correction requires a versioned candidate; recovered attempt was prepared but never claimed or launched';FailedAttemptId=$FailedAttemptId;RecoveredAttemptId=$RecoveredAttemptId;RecoveredRunId=$RecoveredRunId;PreparedAttempt=[pscustomobject]$attempt;PreparedExecution=[pscustomobject]$execution;QaPacket=$task.mayaTaraQaPacket;Plan=$task.mayaPlan;WorkflowRunId=$workflow.qaRunId;WorkflowModelPath=$workflow.qaModelPath;WorkflowHandoffId=$workflow.qaHandoffId;WorkflowHandoff=$workflow.qaHandoff;ApprovalRequestId=$approved[0].requestId}
+    if($DryRun){return [pscustomobject]@{Status='DryRun';TaskId=$TaskId;FailedAttemptId=$FailedAttemptId;RecoveredAttemptId=$RecoveredAttemptId;RecoveredRunId=$RecoveredRunId;FailedEvidencePreserved=$true;ConsumedApprovalPreserved=$true;RevitAbsent=$true;NativeLaunchPerformed=$false;SideEffectsPerformed=$false}}
+    Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)
+        $t=Find-RepatoTask $current $TaskId;$ws=@($t.deploymentWorkflows|Where-Object {$_.workflowId -ceq $WorkflowId -and $_.taskId -ceq $TaskId})
+        if([long]$t.revision -ne $ExpectedTaskRevision -or $ws.Count -ne 1 -or [long]$ws[0].workflowRevision -ne $workflowRevision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval' -or $t.mayaTaraAttempt.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraExecution.AttemptId -cne $RecoveredAttemptId){throw 'Candidate-replacement retirement compare-and-swap failed.'}
+        $q=@($t.approvalRequests|Where-Object {$_.requestId -ceq $approved[0].requestId -and $_.status -ceq 'approved' -and $_.consumedUtc -ceq $approved[0].consumedUtc -and $_.attemptId -ceq $FailedAttemptId});if($q.Count -ne 1){throw 'Consumed failure approval changed during candidate-replacement retirement.'}
+        $archAttempt=[pscustomobject]$t.mayaTaraAttempt;$archAttempt.Stage='abandoned-preparation';$archAttempt|Add-Member NoteProperty CleanupReason 'Retired before claim/native launch to build corrected replacement candidate.' -Force;$archAttempt|Add-Member NoteProperty ArchivedUtc (Get-RepatoUtc) -Force
+        $archExecution=[pscustomobject]$t.mayaTaraExecution;$archExecution.Stage='abandoned-preparation';$archExecution.ExecutionStatus='PreparedAttemptSuperseded';$archExecution|Add-Member NoteProperty FailureCode 'candidate-replacement-required' -Force;$archExecution|Add-Member NoteProperty FailureDetails 'Prepared recovered attempt was never claimed or launched; a corrected versioned candidate is required.' -Force;$archExecution|Add-Member NoteProperty ArchivedUtc (Get-RepatoUtc) -Force;$archExecution|Add-Member NoteProperty RuntimePreserved $true -Force
+        if($t.PSObject.Properties.Name -notcontains 'mayaTaraAttemptHistory'){$t|Add-Member NoteProperty mayaTaraAttemptHistory ([object[]]@()) -Force};$t.mayaTaraAttemptHistory=[object[]]@($t.mayaTaraAttemptHistory)+$archAttempt
+        $t.mayaTaraExecutionHistory=[object[]]@($t.mayaTaraExecutionHistory)+$archExecution
+        if($t.PSObject.Properties.Name -notcontains 'mayaQaCandidateReplacementHistory'){$t|Add-Member NoteProperty mayaQaCandidateReplacementHistory ([object[]]@()) -Force};$t.mayaQaCandidateReplacementHistory=[object[]]@($t.mayaQaCandidateReplacementHistory)+$snapshot
+        foreach($n in 'mayaPlan','mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){$t.PSObject.Properties.Remove($n)}
+        $w=$ws[0];if($w.PSObject.Properties.Name -notcontains 'qaHandoffHistory'){$w|Add-Member NoteProperty qaHandoffHistory ([object[]]@()) -Force};$w.qaHandoffHistory=[object[]]@($w.qaHandoffHistory)+[pscustomobject]@{HandoffId=$w.qaHandoffId;Handoff=$w.qaHandoff;RunId=$w.qaRunId;ArchivedUtc=Get-RepatoUtc;Reason='Superseded before fresh candidate build; no native launch occurred'}
+        foreach($n in 'qaHandoffId','qaHandoff','qaApprovalId','qaApprovalStatus','qaRunId','qaModelPath','qaSidecarPath','qaFixtureId','qaFixtureSha256','qaTestId','qaReportPath','qaReportSha256','qaEvidence','qaVerificationStatus','qaCompletionStatus','qaCompletedUtc'){$w.PSObject.Properties.Remove($n)};$w.workflowRevision=[long]$w.workflowRevision+1
+        $t|Add-Member NoteProperty mayaQaCandidateReplacementRetirement ([pscustomobject]@{WorkflowId=$WorkflowId;FailedAttemptId=$FailedAttemptId;RecoveredAttemptId=$RecoveredAttemptId;RecoveredRunId=$RecoveredRunId;RetiredUtc=Get-RepatoUtc;ApprovalRequestId=$approved[0].requestId;ConsumedApprovalPreserved=$true;NativeLaunchAbsent=$true}) -Force
+        $t.status='in-progress';$t.workflowStage='build-checks';Add-RepatoHistory $t 'maya-qa-recovered-attempt-retired-for-candidate-replacement' 'Maya' "failedAttempt=$FailedAttemptId; recoveredAttempt=$RecoveredAttemptId; run=$RecoveredRunId; consumedApprovalPreserved=true"
+        [pscustomobject]@{Status='Retired';TaskId=$TaskId;WorkflowId=$WorkflowId;FailedAttemptId=$FailedAttemptId;RecoveredAttemptId=$RecoveredAttemptId;RecoveredRunId=$RecoveredRunId;FailedEvidencePreserved=$true;ConsumedApprovalPreserved=$true;TaskStage='build-checks';NativeLaunchPerformed=$false}
     }
 }
 function Get-MayaQaCanonicalNativeResult {
@@ -1290,7 +1376,10 @@ function New-MayaQaCandidateReplacementBuildRequest {
     $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
     $activeAttempt=($task.PSObject.Properties.Name -contains 'mayaTaraAttempt') -and [bool]$task.mayaTaraAttempt
     $activeExecution=($task.PSObject.Properties.Name -contains 'mayaTaraExecution') -and [bool]$task.mayaTaraExecution
-    if($workflow.qaWorkflowId -cne $QaWorkflowId -or $task.status -cne 'passed' -or $task.workflowStage -cne 'approval' -or $activeAttempt -or $activeExecution){throw 'Candidate replacement build requires the approved QA workflow with no active attempt or execution.'}
+    $retirement=$task.mayaQaCandidateReplacementRetirement
+    $retirementReady=($retirement -and $retirement.WorkflowId -ceq $WorkflowId -and $retirement.FailedAttemptId -and $retirement.RecoveredAttemptId -and $retirement.RecoveredRunId -and $retirement.ConsumedApprovalPreserved -eq $true -and $retirement.NativeLaunchAbsent -eq $true -and $task.status -ceq 'in-progress' -and $task.workflowStage -ceq 'build-checks')
+    $legacyPassedReady=($task.status -ceq 'passed' -and $task.workflowStage -ceq 'approval')
+    if($workflow.qaWorkflowId -cne $QaWorkflowId -or (!$legacyPassedReady -and !$retirementReady) -or $activeAttempt -or $activeExecution){throw 'Candidate replacement build requires a passed approval state or an exact recovered-attempt retirement state, with no active attempt or execution.'}
     if(@(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count){throw 'Revit is running; candidate replacement build request is blocked.'}
     if($workflow.qaBuildStatus -cne 'succeeded' -or !$workflow.qaBuildEvidence -or !$workflow.qaBuildRequest){throw 'Existing authenticated candidate evidence is required before replacement.'}
     if($workflow.qaBuildRequest.PSObject.Properties.Name -contains 'ReplacementSourceCommit' -and $workflow.qaBuildRequest.ReplacementSourceCommit -ceq $commit -and $workflow.qaBuildStatus -eq 'requested'){
@@ -2335,7 +2424,7 @@ function Request-MayaQaCanonicalExecutionApproval {
     if(!$task -or $workflow.qaBuildStatus -cne 'succeeded' -or !$e -or $e.BuildRequestId -cne $BuildRequestId -or $e.BuildStatus -cne 'succeeded' -or $e.EvidenceSource -cne 'FrozenCandidate' -or $e.SourceCommit -cne $CandidateSourceCommit -or $e.CandidateSourceCommit -cne $CandidateSourceCommit -or $e.ArtifactSha256 -ine $CandidateSha256){throw 'Canonical approval candidate identity is invalid.'}
     if($e.DeploymentValidation -ne $true -or $e.ManifestIntegrityValidation -ne $true -or $e.QaIsolation -ne $true){throw 'Candidate deployment validation, manifest integrity, and isolation must pass before approval.'}
     if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'qa'){throw 'Canonical execution approval requires the validated in-progress QA-ready state.'}
-    if(@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -in @('pending','approved')}).Count){throw 'An active or previously approved QA request prevents fresh approval creation.'}
+    if(@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and !$_.consumedUtc))}).Count){throw 'An active or previously approved QA request prevents fresh approval creation.'}
     foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties.Name -contains $n -and $task.$n){throw 'Canonical execution approval found existing Tara execution state.'}}
     if($task.PSObject.Properties.Name -contains 'taraRuns' -and @($task.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Canonical execution approval found existing native QA execution.'}
     if(@(Get-Process Revit -ErrorAction SilentlyContinue).Count){throw 'Canonical execution approval requires Revit to be stopped.'}
@@ -2351,7 +2440,7 @@ function Request-MayaQaCanonicalExecutionApproval {
     $binding=[ordered]@{SchemaVersion='maya-qa-canonical-execution-approval-v1';TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$workflow.qaWorkflowId;BuildRequestId=$BuildRequestId;CandidateSourceCommit=$CandidateSourceCommit;CandidateSha256=$CandidateSha256;CandidateProvenancePath=$e.CandidateProvenancePath;CandidateProvenanceSha256=(Get-FileHash -LiteralPath $e.CandidateProvenancePath -Algorithm SHA256).Hash;RunnerManifestPath=$candidate.RunnerManifestPath;RunnerManifestSha256=$candidate.RunnerManifestSha256;DeploymentValidation=$true;ManifestIntegrityValidation=$true;QaIsolation=$true;DeploymentValidationEvidence=$deploymentBinding;ExecutionPlan=$plan;RunId=$workflow.qaRunId;ModelPath=$model;ModelSha256=$modelHash;SidecarPath=$sidecar;SidecarSha256=(Get-FileHash -LiteralPath $sidecar -Algorithm SHA256).Hash;FixtureId=$workflow.qaFixtureId;FixtureSha256=$workflow.qaFixtureSha256;RequiredExecutor='Tara';RevitVersion='2025'}
     $json=ConvertTo-Json -InputObject $binding -Depth 20 -Compress;$sha=[Security.Cryptography.SHA256]::Create();try{$bindingHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','')}finally{$sha.Dispose()}
     $expectedRevision=[long]$ExpectedTaskRevision
-    $updated=Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$current=Find-RepatoTask $data $TaskId;if([long]$current.revision -ne $expectedRevision -or $current.status -cne 'in-progress' -or $current.workflowStage -cne 'qa'){throw 'Canonical approval compare-and-swap state changed.'};if(@($current.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -in @('pending','approved')}).Count){throw 'A QA approval appeared during request creation.'};$ws=@($current.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId);if($ws.Count -ne 1 -or $ws[0].qaBuildEvidence.ArtifactSha256 -ine $CandidateSha256 -or $ws[0].qaBuildEvidence.CandidateSourceCommit -cne $CandidateSourceCommit -or $ws[0].qaBuildEvidence.RunnerManifestSha256 -ine $binding.RunnerManifestSha256){throw 'Candidate or manifest changed during approval creation.'};$latestProof=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $current -Workflow $ws[0] -BuildRequestId $BuildRequestId -CandidateSourceCommit $CandidateSourceCommit -CandidateSha256 $CandidateSha256 -RunnerManifestPath $binding.RunnerManifestPath -RunnerManifestSha256 $binding.RunnerManifestSha256;if((ConvertTo-Json -InputObject $latestProof -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $binding.DeploymentValidationEvidence -Depth 20 -Compress)){throw 'Deployment-validation evidence changed during approval creation.'};$q=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;executionBinding=$binding;previousStatus='in-progress';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason=$null;consumedUtc=$null};$current.approvalRequests=[object[]]@($current.approvalRequests)+$q;$current.status='awaiting-approval';$current.workflowStage='approval';Add-RepatoHistory $current 'approval-requested' 'Maya' 'qa-run bound to validated candidate, deployment evidence, manifest, isolation, and execution plan';$q.requestedRevision=[long]$current.revision;$current}
+    $updated=Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$current=Find-RepatoTask $data $TaskId;if([long]$current.revision -ne $expectedRevision -or $current.status -cne 'in-progress' -or $current.workflowStage -cne 'qa'){throw 'Canonical approval compare-and-swap state changed.'};if(@($current.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and !$_.consumedUtc))}).Count){throw 'An active QA approval appeared during request creation.'};$ws=@($current.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId);if($ws.Count -ne 1 -or $ws[0].qaBuildEvidence.ArtifactSha256 -ine $CandidateSha256 -or $ws[0].qaBuildEvidence.CandidateSourceCommit -cne $CandidateSourceCommit -or $ws[0].qaBuildEvidence.RunnerManifestSha256 -ine $binding.RunnerManifestSha256){throw 'Candidate or manifest changed during approval creation.'};$latestProof=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $current -Workflow $ws[0] -BuildRequestId $BuildRequestId -CandidateSourceCommit $CandidateSourceCommit -CandidateSha256 $CandidateSha256 -RunnerManifestPath $binding.RunnerManifestPath -RunnerManifestSha256 $binding.RunnerManifestSha256;if((ConvertTo-Json -InputObject $latestProof -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $binding.DeploymentValidationEvidence -Depth 20 -Compress)){throw 'Deployment-validation evidence changed during approval creation.'};$q=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;executionBinding=$binding;previousStatus='in-progress';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason=$null;consumedUtc=$null};$current.approvalRequests=[object[]]@($current.approvalRequests)+$q;$current.status='awaiting-approval';$current.workflowStage='approval';Add-RepatoHistory $current 'approval-requested' 'Maya' 'qa-run bound to validated candidate, deployment evidence, manifest, isolation, and execution plan';$q.requestedRevision=[long]$current.revision;$current}
     @($updated.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})[-1]
 }
 
@@ -2392,7 +2481,7 @@ function Request-MayaQaRecoveredNativeFailureApproval {
     )
     $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
     if([long]$task.revision -ne $ExpectedTaskRevision){throw 'Recovered task revision is stale.'}
-    if($task.status -cne 'passed' -or $task.workflowStage -cne 'approval'){throw 'Recovered task is not in the canonical pre-approval state.'}
+    if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'approval'){throw 'Recovered task is not in the canonical in-progress approval state.'}
     $archives=@($task.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $FailedAttemptId -and $_.FailureCode -ceq 'native-qa-failed' -and $_.ReplacementAttemptId -ceq $RecoveredAttemptId -and $_.ReplacementRunId -ceq $RecoveredRunId})
     if($archives.Count -ne 1 -or $archives[0].ExecutionStatus -cne 'QaFailed' -or $archives[0].Stage -cne 'qa-failed'){throw 'Exact archived native-qa-failed recovery identity is required.'}
     $failed=$archives[0]
@@ -2404,20 +2493,20 @@ function Request-MayaQaRecoveredNativeFailureApproval {
     if($workflow.qaWorkflowId -cne 'create-plan-views-v1' -or $workflow.qaBuildStatus -cne 'succeeded' -or !$e -or $e.BuildStatus -cne 'succeeded' -or $e.EvidenceSource -cne 'FrozenCandidate' -or $e.SourceCommit -cne $ExpectedCandidateSourceCommit -or $e.CandidateSourceCommit -cne $ExpectedCandidateSourceCommit -or $e.ArtifactSha256 -ine $ExpectedCandidateSha256 -or $execution.ArtifactSha256 -ine $ExpectedCandidateSha256 -or !$e.DeploymentValidation -or !$e.ManifestIntegrityValidation -or !$e.QaIsolation){throw 'Recovered attempt candidate evidence does not match the expected QA product candidate.'}
     $pending=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})
     if($pending.Count){throw 'A pending qa-run approval already exists.'}
-    foreach($q in @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})){try{$expiry=[DateTimeOffset]::Parse([string]$q.expiresUtc)}catch{throw 'Existing qa-run approval has an invalid expiry.'};if($expiry -gt [DateTimeOffset]::UtcNow){throw 'An existing qa-run approval has not expired.'}}
+    foreach($q in @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and !$_.consumedUtc})){try{$expiry=[DateTimeOffset]::Parse([string]$q.expiresUtc)}catch{throw 'Existing qa-run approval has an invalid expiry.'};if($expiry -gt [DateTimeOffset]::UtcNow){throw 'An existing unconsumed qa-run approval has not expired.'}}
     $binding=[ordered]@{SchemaVersion='maya-qa-recovered-native-failure-approval-v1';TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId='create-plan-views-v1';BuildRequestId=[string]$e.BuildRequestId;CandidateSourceCommit=$ExpectedCandidateSourceCommit;CandidateSha256=$ExpectedCandidateSha256;AttemptId=$RecoveredAttemptId;RunId=$RecoveredRunId}
     $bindingJson=ConvertTo-Json -InputObject $binding -Depth 5 -Compress;$sha=[Security.Cryptography.SHA256]::Create();try{$bindingHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($bindingJson)))).Replace('-','')}finally{$sha.Dispose()}
     $runtime=[ordered]@{Name='Repato.QaLaunchAgent';Version=$LaunchAgentRuntimeVersion}
-    $request=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;candidate=[pscustomobject]@{BuildRequestId=[string]$e.BuildRequestId;SourceCommit=$ExpectedCandidateSourceCommit;ArtifactSha256=$ExpectedCandidateSha256};attemptId=$RecoveredAttemptId;runId=$RecoveredRunId;runtime=[pscustomobject]$runtime;previousStatus='passed';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason='Fresh user approval for the existing recovered native-qa-failed attempt.';consumedUtc=$null}
+    $request=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;candidate=[pscustomobject]@{BuildRequestId=[string]$e.BuildRequestId;SourceCommit=$ExpectedCandidateSourceCommit;ArtifactSha256=$ExpectedCandidateSha256};attemptId=$RecoveredAttemptId;runId=$RecoveredRunId;runtime=[pscustomobject]$runtime;previousStatus='in-progress';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason='Fresh user approval for the existing recovered native-qa-failed attempt.';consumedUtc=$null}
     Invoke-RepatoStoreMutation $StoreRoot {
         param($data,$preview)
         $t=Find-RepatoTask $data $TaskId
-        if([long]$t.revision -ne $ExpectedTaskRevision -or $t.status -cne 'passed' -or $t.workflowStage -cne 'approval' -or $t.mayaTaraAttempt.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraAttempt.RunId -cne $RecoveredRunId -or $t.mayaTaraExecution.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraExecution.RunId -cne $RecoveredRunId){throw 'Recovered approval compare-and-swap failed.'}
+        if([long]$t.revision -ne $ExpectedTaskRevision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval' -or $t.mayaTaraAttempt.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraAttempt.RunId -cne $RecoveredRunId -or $t.mayaTaraExecution.AttemptId -cne $RecoveredAttemptId -or $t.mayaTaraExecution.RunId -cne $RecoveredRunId){throw 'Recovered approval compare-and-swap failed.'}
         $current=@($t.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $FailedAttemptId -and $_.FailureCode -ceq 'native-qa-failed' -and $_.ReplacementAttemptId -ceq $RecoveredAttemptId -and $_.ReplacementRunId -ceq $RecoveredRunId})
         $w=@($t.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId)
         if($current.Count -ne 1 -or $w.Count -ne 1 -or [string]$w[0].qaBuildEvidence.CandidateSourceCommit -cne $ExpectedCandidateSourceCommit -or [string]$w[0].qaBuildEvidence.ArtifactSha256 -ine $ExpectedCandidateSha256){throw 'Recovered approval identity or candidate changed during compare-and-swap.'}
         if(@($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'}).Count){throw 'A pending qa-run approval appeared during compare-and-swap.'}
-        foreach($q in @($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved'})){$q.status='superseded';$q.reason='Expired approval superseded for the recovered native-failure attempt.'}
+        foreach($q in @($t.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and !$_.consumedUtc})){$expiry=[DateTimeOffset]::Parse([string]$q.expiresUtc);if($expiry -gt [DateTimeOffset]::UtcNow){throw 'An unconsumed qa-run approval became active during recovery compare-and-swap.'};$q.status='superseded';$q.reason='Expired approval superseded for the recovered native-failure attempt.'}
         $t.approvalRequests=[object[]]@($t.approvalRequests)+$request;$t.status='awaiting-approval';$t.workflowStage='approval'
         Add-RepatoHistory $t 'maya-tara-native-failure-approval-requested' 'Maya' "request=$($request.requestId); attempt=$RecoveredAttemptId; run=$RecoveredRunId; candidate=$ExpectedCandidateSourceCommit; runtime=$LaunchAgentRuntimeVersion"
         $request.requestedRevision=[long]$t.revision
@@ -2733,7 +2822,7 @@ function New-MayaQaRun {
                 [string]$binding.CandidateSha256 -ieq $evidenceHash)
         }
         if(!$freshPlan -and !$recoveryPlan){throw 'Create Plan Views QA planning requires build-checks or a supported approved-run recovery state.'}
-        if($freshPlan -and @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -in @('pending','approved')}).Count){throw 'An active QA approval prevents new plan preparation.'}
+        if($freshPlan -and @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and !$_.consumedUtc))}).Count){throw 'An active QA approval prevents new plan preparation.'}
         if($w.PSObject.Properties.Name -contains 'qaRunId' -and ![string]::IsNullOrWhiteSpace([string]$w.qaRunId)){throw 'Create Plan Views QA run already exists.'}
         if($freshPlan){foreach($n in 'qaModelPath','qaSidecarPath','qaFixturePreparationEvidence'){if($w.PSObject.Properties.Name -contains $n -and $null -ne $w.$n -and ![string]::IsNullOrWhiteSpace([string]$w.$n)){throw 'Create Plan Views QA plan is partially prepared.'}}}
         foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties.Name -contains $n -and $task.$n){throw 'Existing Tara execution state prevents new plan preparation.'}}
@@ -3263,7 +3352,7 @@ Export-ModuleMember -Function Request-MayaQaRecoveredLaunchFailureApproval
 Export-ModuleMember -Function Repair-MayaQaRecoveredLaunchApprovalRevision
 Export-ModuleMember -Function Repair-MayaQaRecoveredFixturePreparation,Set-MayaQaRecoveredFixtureReadyState,Read-MayaQaFixturePreparationRecord
 Export-ModuleMember -Function Invoke-MayaQaFixtureBlockedRecovery
-Export-ModuleMember -Function Prepare-MayaQaAfterExpiredFailureRecovery
+Export-ModuleMember -Function Prepare-MayaQaAfterExpiredFailureRecovery,Archive-MayaQaRecoveredAttemptForCandidateReplacement
 Export-ModuleMember -Function Complete-MayaQaTerminalLaunchFailureCleanup
 Export-ModuleMember -Function Complete-MayaQaRunnerStartupFailureReconciliation
 Export-ModuleMember -Function Complete-MayaQaPreAttemptOrphanRuntimeCleanup

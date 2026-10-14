@@ -275,8 +275,8 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
                 throw new InvalidOperationException("Disposable model SHA-256 does not match the launch request.");
             string fixture = QAPathPolicy.ValidatePath(Path.Combine(QAPathPolicy.RepositoryRoot, "QA", "Fixtures", "CreatePlanViewsEmpty.rvt"),
                 Path.Combine(QAPathPolicy.RepositoryRoot, "QA", "Fixtures"), true);
-            string preparationRequestPath = QAPathPolicy.ValidatePath(request.FixturePreparationRequestPath, QAPathPolicy.RunsRoot, true);
-            string preparationResultPath = QAPathPolicy.ValidatePath(request.FixturePreparationResultPath, QAPathPolicy.RunsRoot, true);
+            string preparationRequestPath = QAPathPolicy.ValidatePreparationEvidencePath(request.FixturePreparationRequestPath, QAPathPolicy.RunsRoot);
+            string preparationResultPath = QAPathPolicy.ValidatePreparationEvidencePath(request.FixturePreparationResultPath, QAPathPolicy.RunsRoot);
             CreatePlanViewsPreparationEvidenceContract.Verify(request, fixture, model);
             string sidecar = QAPathPolicy.ValidatePath(model + ".fixture.json", QAPathPolicy.RunsRoot, false);
             using (var provenance = JsonDocument.Parse(File.ReadAllText(sidecar)))

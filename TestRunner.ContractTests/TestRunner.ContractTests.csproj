@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\TestRunner\QAPathPolicy.cs" Link="QAPathPolicy.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsRequestContract.cs" Link="CreatePlanViewsRequestContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsResultContract.cs" Link="CreatePlanViewsResultContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsFixturePreparationRequest.cs" Link="CreatePlanViewsFixturePreparationRequest.cs" />

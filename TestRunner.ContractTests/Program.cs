@@ -4,6 +4,24 @@ using Repato.Revit.TestRunner;
 static void Check(bool value, string reason) { if (!value) throw new InvalidOperationException("FAILED: " + reason); }
 static void Reject(Action action, string reason) { try { action(); } catch { return; } throw new InvalidOperationException("FAILED: " + reason); }
 
+string pathPolicyRoot = Path.Combine(Path.GetTempPath(), "repato-runner-path-policy-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(pathPolicyRoot);
+try
+{
+    string prepRequest = Path.Combine(pathPolicyRoot, "fixture.request.json");
+    string prepResult = Path.Combine(pathPolicyRoot, "fixture.result.json");
+    string modelPath = Path.Combine(pathPolicyRoot, "model.rvt");
+    File.WriteAllText(prepRequest, "{}"); File.WriteAllText(prepResult, "{}"); File.WriteAllBytes(modelPath, new byte[] { 1 });
+    Check(QAPathPolicy.ValidatePreparationEvidencePath(prepRequest, pathPolicyRoot) == Path.GetFullPath(prepRequest), "JSON preparation request path accepted under the attempt root");
+    Check(QAPathPolicy.ValidatePreparationEvidencePath(prepResult, pathPolicyRoot) == Path.GetFullPath(prepResult), "JSON preparation result path accepted under the attempt root");
+    Check(QAPathPolicy.ValidatePath(modelPath, pathPolicyRoot, requireRvt: true) == Path.GetFullPath(modelPath), "existing RVT model remains required");
+    Reject(() => QAPathPolicy.ValidatePath(prepRequest, pathPolicyRoot, requireRvt: true), "JSON evidence cannot satisfy a model path check");
+    Reject(() => QAPathPolicy.ValidatePath(Path.Combine(pathPolicyRoot, "missing.rvt"), pathPolicyRoot, requireRvt: true), "missing RVT model is rejected");
+    Reject(() => QAPathPolicy.ValidatePreparationEvidencePath(Path.Combine(pathPolicyRoot, "..", "outside.json"), pathPolicyRoot), "preparation evidence cannot escape its allowed attempt root");
+    Reject(() => QAPathPolicy.ValidatePreparationEvidencePath(Path.Combine(pathPolicyRoot, "missing.json"), pathPolicyRoot), "preparation evidence must already exist");
+}
+finally { Directory.Delete(pathPolicyRoot, recursive: true); }
+
 string preparationDirectory = Path.Combine(Path.GetTempPath(), "repato-fixture-prep-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(preparationDirectory);
 try

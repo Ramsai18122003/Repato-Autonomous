@@ -9,7 +9,9 @@ $module=Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Fo
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.Deployment.v4.psm1') -Force -WarningAction SilentlyContinue
 $runtimeModule=Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaStartupRetest.psm1') -Force -PassThru -WarningAction SilentlyContinue
+Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
+Import-Module (Join-Path $PSScriptRoot 'Repato.Deployment.v4.psm1') -Force -WarningAction SilentlyContinue
 $store=Join-Path (Split-Path $PSScriptRoot -Parent) 'QA/MayaRuns'
 $id='task-bf61fe7f22d74df7a92599681da5919e'
 $t=Find-RepatoTask (Read-RepatoTaskStore $store) $id;$x=$t.mayaTaraExecution;$a=$t.mayaTaraAttempt
