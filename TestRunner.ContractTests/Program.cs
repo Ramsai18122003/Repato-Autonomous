@@ -182,4 +182,222 @@ try
     Check(!extra.Allowed, "unexpected user-profile add-in fails RCP isolation");
 }
 finally { Directory.Delete(isolationRoot, recursive: true); }
-Console.WriteLine("Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations.");
+
+// === Preparation-aware safety gate provenance regression tests ===
+string sourceHash2 = new string('A', 64), preparedHash2 = new string('B', 64);
+string prepAttemptId = Guid.NewGuid().ToString("N"), prepRunIdVal = Guid.NewGuid().ToString("N");
+
+// Helper: build a sidecar JSON element from a dictionary
+JsonElement MakeSidecar(Dictionary<string, object?> fields)
+{
+    string json = JsonSerializer.Serialize(fields);
+    return JsonDocument.Parse(json).RootElement;
+}
+
+Dictionary<string, object?> MakePreparationAwareSidecar() => new()
+{
+    ["fixtureId"] = "CreatePlanViewsEmpty",
+    ["sourceSha256"] = sourceHash2,
+    ["preparedModelSha256"] = preparedHash2,
+    ["fixturePreparationRequestPath"] = @"C:\Repato-Autonomous\Source\QA\TestRuns\test\prep.request.json",
+    ["fixturePreparationRequestSha256"] = new string('C', 64),
+    ["fixturePreparationResultPath"] = @"C:\Repato-Autonomous\Source\QA\TestRuns\test\prep.result.json",
+    ["fixturePreparationResultSha256"] = new string('D', 64),
+    ["fixturePreparationAttemptId"] = prepAttemptId,
+    ["fixturePreparationRunId"] = prepRunIdVal
+};
+
+CreatePlanViewsRequest MakeQaRequest() => new(
+    Guid.NewGuid().ToString("N"), "task-contract", Guid.NewGuid().ToString("N"), CreatePlanViewsRequest.Test,
+    CreatePlanViewsRequest.Test, prepAttemptId, prepRunIdVal, Guid.NewGuid().ToString("N"),
+    @"C:\Repato-Autonomous\Source\QA\TestRuns\test\launch.request.json", new string('E', 64),
+    @"C:\Repato-Autonomous\Source\QA\TestRuns\test\model.rvt", preparedHash2, sourceHash2,
+    @"C:\Repato-Autonomous\Source\QA\TestRuns\test\prep.request.json", new string('C', 64),
+    @"C:\Repato-Autonomous\Source\QA\TestRuns\test\prep.result.json", new string('D', 64),
+    prepAttemptId, prepRunIdVal, @"C:\Repato-Autonomous\Source\QA\TestRuns\test\runner.addin",
+    new string('F', 64), DateTimeOffset.UtcNow.AddMinutes(5));
+
+// 1. Valid legacy sidecar (no preparation) — runtime model matches source
+{
+    var sidecar = MakeSidecar(new() { ["fixtureId"] = "GridResequenceEmpty", ["sourceSha256"] = sourceHash2 });
+    TestSafetyGateProvenance.Verify(sidecar, sourceHash2, sourceHash2);
+    Check(true, "legacy sidecar: source fixture and runtime model both match sourceSha256");
+}
+
+// 2. Valid preparation-aware sidecar — runtime model matches preparedModelSha256
+{
+    var sidecar = MakeSidecar(MakePreparationAwareSidecar());
+    TestSafetyGateProvenance.Verify(sidecar, sourceHash2, preparedHash2, MakeQaRequest());
+    Check(true, "preparation-aware sidecar: source fixture matches sourceSha256, runtime matches preparedModelSha256");
+}
+
+// 3. Wrong runtime model hash against prepared fixture
+Reject(() =>
+{
+    var sidecar = MakeSidecar(MakePreparationAwareSidecar());
+    TestSafetyGateProvenance.Verify(sidecar, sourceHash2, new string('F', 64), MakeQaRequest());
+}, "preparation-aware: wrong runtime model hash rejected");
+
+// 4. Wrong source fixture hash
+Reject(() =>
+{
+    var sidecar = MakeSidecar(MakePreparationAwareSidecar());
+    TestSafetyGateProvenance.Verify(sidecar, new string('E', 64), preparedHash2, MakeQaRequest());
+}, "preparation-aware: wrong source fixture hash rejected");
+
+// 5. Legacy sidecar: runtime model does not match source
+Reject(() =>
+{
+    var sidecar = MakeSidecar(new() { ["fixtureId"] = "GridResequenceEmpty", ["sourceSha256"] = sourceHash2 });
+    TestSafetyGateProvenance.Verify(sidecar, sourceHash2, preparedHash2);
+}, "legacy sidecar: runtime model hash mismatch rejected");
+
+// 6. Legacy sidecar: source fixture does not match
+Reject(() =>
+{
+    var sidecar = MakeSidecar(new() { ["fixtureId"] = "GridResequenceEmpty", ["sourceSha256"] = sourceHash2 });
+    TestSafetyGateProvenance.Verify(sidecar, new string('E', 64), sourceHash2);
+}, "legacy sidecar: source fixture hash mismatch rejected");
+
+// 7. Invalid preparedModelSha256 format
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["preparedModelSha256"] = "not-a-hash";
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: invalid prepared hash format rejected");
+
+// 8. Prepared hash equals source hash (identity must change)
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["preparedModelSha256"] = sourceHash2;
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, sourceHash2, MakeQaRequest());
+}, "preparation-aware: prepared=source hash collision rejected");
+
+// 9. Missing fixturePreparationRequestPath
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields.Remove("fixturePreparationRequestPath");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: missing preparation request path rejected");
+
+// 10. Missing fixturePreparationRequestSha256
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields.Remove("fixturePreparationRequestSha256");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: missing preparation request sha256 rejected");
+
+// 11. Missing fixturePreparationResultPath
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields.Remove("fixturePreparationResultPath");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: missing preparation result path rejected");
+
+// 12. Missing fixturePreparationResultSha256
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields.Remove("fixturePreparationResultSha256");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: missing preparation result sha256 rejected");
+
+// 13. Missing fixturePreparationAttemptId
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields.Remove("fixturePreparationAttemptId");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: missing preparation attempt ID rejected");
+
+// 14. Missing fixturePreparationRunId
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields.Remove("fixturePreparationRunId");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: missing preparation run ID rejected");
+
+// 15. Invalid fixturePreparationAttemptId format (not N-format GUID)
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationAttemptId"] = "not-a-guid";
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: invalid preparation attempt ID format rejected");
+
+// 16. Invalid fixturePreparationRunId format
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationRunId"] = Guid.NewGuid().ToString("D"); // D-format not N-format
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: D-format preparation run ID rejected");
+
+// 17. Invalid fixturePreparationRequestSha256 format
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationRequestSha256"] = "ZZZZ";
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2);
+}, "preparation-aware: invalid request sha256 format rejected");
+
+// 18. Empty fixturePreparationRequestPath
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationRequestPath"] = "";
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2);
+}, "preparation-aware: empty preparation request path rejected");
+
+// 19-24. Well-formed but mismatched preparation binding values are rejected.
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationAttemptId"] = Guid.NewGuid().ToString("N");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: different canonical attempt ID rejected");
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationRunId"] = Guid.NewGuid().ToString("N");
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: different canonical run ID rejected");
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationRequestSha256"] = new string('1', 64);
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: mismatched request evidence hash rejected");
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationResultSha256"] = new string('2', 64);
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: mismatched result evidence hash rejected");
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["fixturePreparationResultPath"] = @"C:\Repato-Autonomous\Source\QA\TestRuns\test\other.result.json";
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: mismatched result evidence path rejected");
+Reject(() =>
+{
+    var fields = MakePreparationAwareSidecar();
+    fields["preparedModelSha256"] = 42;
+    TestSafetyGateProvenance.Verify(MakeSidecar(fields), sourceHash2, preparedHash2, MakeQaRequest());
+}, "preparation-aware: malformed prepared hash type rejected");
+
+// 25. Invalid sourceSha256 format
+Reject(() =>
+{
+    var sidecar = MakeSidecar(new() { ["fixtureId"] = "Test", ["sourceSha256"] = "not-hex" });
+    TestSafetyGateProvenance.Verify(sidecar, "not-hex", "not-hex");
+}, "invalid sourceSha256 format rejected");
+
+Console.WriteLine("Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations, preparation-aware safety gate provenance (25 assertions).");

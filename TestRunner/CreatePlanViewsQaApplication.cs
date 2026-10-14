@@ -298,7 +298,7 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
             app.OpenAndActivateDocument(model);
             if (request.ExpiresUtc <= DateTimeOffset.UtcNow) throw new InvalidOperationException("QA request expired while opening the disposable model.");
             Document document = app.ActiveUIDocument?.Document ?? throw new InvalidOperationException("QA model did not become active.");
-            TestSafetyGate.Verify(document, report, "CreatePlanViewsEmpty");
+            TestSafetyGate.Verify(document, report, "CreatePlanViewsEmpty", request);
             Execute(document, report);
             report.RuntimeModelSha256 = TestRunReport.Hash(model);
             report.Assert("runtime-model-restored", report.RuntimeModelSha256.Equals(request.ModelSha256, StringComparison.OrdinalIgnoreCase), request.ModelSha256, report.RuntimeModelSha256);

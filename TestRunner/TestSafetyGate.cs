@@ -13,7 +13,8 @@ internal static class TestSafetyGate
     internal const string ReportsRoot = RepositoryRoot + @"\QA\Reports";
     private const string FixturesRoot = RepositoryRoot + @"\QA\Fixtures";
 
-    internal static void Verify(Document document, TestRunReport report, string? requiredFixtureId = null)
+    internal static void Verify(Document document, TestRunReport report, string? requiredFixtureId = null,
+        CreatePlanViewsRequest? request = null)
     {
         if (document.IsFamilyDocument || document.IsLinked || document.IsReadOnly || document.IsModified || document.IsModifiable ||
             document.IsWorkshared || document.IsModelInCloud || document.IsDetached)
@@ -52,9 +53,9 @@ internal static class TestSafetyGate
                 throw new InvalidOperationException("Fixture sidecar does not declare the exact approved grid set.");
         }
         string fixturePath = QAPathPolicy.ValidatePath(Path.Combine(FixturesRoot, fixtureId + ".rvt"), FixturesRoot, true);
-        if (!string.Equals(TestRunReport.Hash(fixturePath), expectedHash, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(TestRunReport.Hash(path), expectedHash, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Run copy must exactly match the approved controlled fixture and its SHA-256.");
+
+        TestSafetyGateProvenance.Verify(json.RootElement, TestRunReport.Hash(fixturePath), TestRunReport.Hash(path), request);
+
         report.FixtureId = fixtureId;
         report.FixtureSha256 = expectedHash;
         report.Assert("safety-gate", true, "Controlled local disposable fixture", path);
