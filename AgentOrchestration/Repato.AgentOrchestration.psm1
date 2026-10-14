@@ -210,10 +210,38 @@ function Claim-RepatoTask([string]$StoreRoot,[string]$TaskId,[string]$Agent,[swi
 }
 
 function Update-RepatoTask {
-    param([string]$StoreRoot,[string]$TaskId,[string]$Status,[string]$WorkflowStage,[string]$Agent,[string]$LogPath,[string]$ErrorDetails,[switch]$DryRun)
+    param([string]$StoreRoot,[string]$TaskId,[string]$Status,[string]$WorkflowStage,[string]$Agent,[string]$LogPath,[string]$ErrorDetails,
+        [long]$ExpectedTaskRevision=0,[string]$ExpectedWorkflowId,[long]$ExpectedWorkflowRevision=0,[string]$ExpectedQaWorkflowId,[switch]$DryRun)
+    if(($ExpectedWorkflowId -and $ExpectedTaskRevision -lt 1) -or ($ExpectedWorkflowRevision -gt 0 -and !$ExpectedWorkflowId)){throw 'Expected task/workflow compare-and-swap arguments must be supplied together.'}
     Invoke-RepatoStoreMutation $StoreRoot {
         param($data,$preview);$task=Find-RepatoTask $data $TaskId
+        if($ExpectedTaskRevision -gt 0 -and [long]$task.revision -ne $ExpectedTaskRevision){throw 'Task compare-and-swap revision changed.'}
         if($task.status -in @('completed','failed')){throw 'Completed and failed tasks are preserved and terminal.'}
+        if($ExpectedWorkflowId){
+            $matched=@($task.deploymentWorkflows|Where-Object workflowId -ceq $ExpectedWorkflowId)
+            if($ExpectedWorkflowRevision -lt 1 -or $matched.Count -ne 1 -or [string]$matched[0].taskId -cne $TaskId -or [long]$matched[0].workflowRevision -ne $ExpectedWorkflowRevision -or [string]$matched[0].qaWorkflowId -cne $ExpectedQaWorkflowId){throw 'Task/workflow compare-and-swap identity changed.'}
+        }
+        $taskWorkflows=if($task.PSObject.Properties.Name -contains 'deploymentWorkflows'){@($task.deploymentWorkflows)}else{@()}
+        $canonicalQaTransition=($WorkflowStage -ceq 'qa' -and $task.workflowStage -ceq 'build-checks' -and @($taskWorkflows|Where-Object {$_.qaWorkflowId -ceq 'create-plan-views-v1'}).Count -gt 0)
+        if($WorkflowStage -ceq 'qa' -and $ExpectedQaWorkflowId -ceq 'create-plan-views-v1' -and !$canonicalQaTransition){throw 'Create Plan Views QA transition is duplicate or starts from an incompatible task stage.'}
+        if($canonicalQaTransition){
+            if($ExpectedTaskRevision -lt 1 -or !$ExpectedWorkflowId -or $ExpectedWorkflowRevision -lt 1 -or $ExpectedQaWorkflowId -cne 'create-plan-views-v1'){throw 'Create Plan Views build-checks to QA transition requires task and workflow compare-and-swap bindings.'}
+            $canonicalWorkflows=@($taskWorkflows|Where-Object {$_.qaWorkflowId -ceq 'create-plan-views-v1'})
+            $workflow=@($task.deploymentWorkflows|Where-Object workflowId -ceq $ExpectedWorkflowId)
+            if($task.status -cne 'in-progress' -or $canonicalWorkflows.Count -ne 1 -or [string]$canonicalWorkflows[0].workflowId -cne $ExpectedWorkflowId -or $workflow.Count -ne 1 -or [string]$workflow[0].qaRunId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$' -or
+               [string]$workflow[0].stage -notin @('planned','validated') -or
+               @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and [string]::IsNullOrWhiteSpace([string]$_.consumedUtc)))}).Count -gt 0 -or
+               ($task.PSObject.Properties.Name -contains 'mayaTaraAttempt' -and $task.mayaTaraAttempt) -or
+               ($task.PSObject.Properties.Name -contains 'mayaTaraExecution' -and $task.mayaTaraExecution) -or
+               ($task.PSObject.Properties.Name -contains 'mayaTaraQaPacket' -and $task.mayaTaraQaPacket) -or
+               ($task.PSObject.Properties.Name -contains 'mayaTaraExecutionEvidence' -and $task.mayaTaraExecutionEvidence) -or
+               [string]::IsNullOrWhiteSpace([string]$workflow[0].qaModelPath) -or [string]::IsNullOrWhiteSpace([string]$workflow[0].qaSidecarPath) -or
+               !(Test-Path -LiteralPath $workflow[0].qaModelPath -PathType Leaf) -or !(Test-Path -LiteralPath $workflow[0].qaSidecarPath -PathType Leaf) -or
+               [string]$workflow[0].qaDisposableModelSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or (Get-FileHash -LiteralPath $workflow[0].qaModelPath -Algorithm SHA256).Hash -ine [string]$workflow[0].qaDisposableModelSha256 -or
+               [string]$workflow[0].qaFixtureSha256 -notmatch '^[A-Fa-f0-9]{64}$') {throw 'Create Plan Views QA transition prerequisites are stale, duplicated, or inconsistent.'}
+            $sidecar=Get-Content -LiteralPath $workflow[0].qaSidecarPath -Raw|ConvertFrom-Json
+            if([string]$sidecar.fixtureId -cne [string]$workflow[0].qaFixtureId -or [string]$sidecar.sourceSha256 -ine [string]$workflow[0].qaFixtureSha256){throw 'Create Plan Views QA transition sidecar provenance changed.'}
+        }
         if($Agent){Assert-RepatoValue Agent $Agent $script:Agents;$task.assignedAgent=$Agent}
         if($Status){Assert-RepatoValue Status $Status $script:TaskStatuses;if($Status -in @('awaiting-approval','completed')){throw 'Use the dedicated approval or completion command for this status.'};$task.status=$Status}
         if($WorkflowStage){Assert-RepatoValue WorkflowStage $WorkflowStage $script:WorkflowStages;$old=[array]::IndexOf($script:WorkflowStages,[string]$task.workflowStage);$new=[array]::IndexOf($script:WorkflowStages,$WorkflowStage);if($new-lt$old-and$task.status-cne'blocked'){throw 'Workflow stages cannot move backward.'};if($new-gt($old+1)){throw 'Workflow stages cannot be skipped.'};if($WorkflowStage -in @('approval','completed')){throw 'Use the dedicated approval or completion command for this stage.'};$task.workflowStage=$WorkflowStage}
