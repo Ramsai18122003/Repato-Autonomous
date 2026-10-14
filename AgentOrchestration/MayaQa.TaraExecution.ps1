@@ -12,7 +12,7 @@ function Invoke-MayaQaTaraExecute {
         [Parameter(Mandatory)][string]$ReportDirectory,
         [string]$RevitInstallDir = 'E:\revit\Revit 2025',
         [Parameter(Mandatory)][string]$QaAddinRoot,
-        [ValidateRange(1,3600)][int]$TimeoutSeconds = 900,
+        [ValidateRange(1,86400)][int]$TimeoutSeconds = 900,
         [switch]$LocalRun,
         [switch]$DryRun,
         [switch]$IntegrationTest

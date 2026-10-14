@@ -18,6 +18,6 @@ try {
   if($source -notmatch '(?s)\$requestId=\[guid\]::NewGuid\(\)\.ToString\(''N''\).*?requestId=\$requestId.*?NativeRequestId \$requestId'){throw 'Canonical transport request ID is not independently generated and durably bound before transmission.'}
   if($source -notmatch '\$plan=if\(\$PlanPreflightInvoker\)\{.*\}else\{New-TaraRevitQaPlan'){throw 'Canonical native preflight does not invoke the default plan builder when no test seam is supplied.'}
   if($source -match 'Start-Process'){throw 'Direct Start-Process fallback remains.'}
-  foreach($mark in 'ExecutionStatus=''LaunchFailed''','FailureCode=''native-process-start-failed''','Duplicate native launch rejected.','if($x.Stage -cne ''launching'' -or $x.NativeProcessId)'){if($source -notmatch [regex]::Escape($mark)){throw "Missing canonical fail-closed marker: $mark"}}
+  foreach($mark in 'ExecutionStatus=''LaunchOutcomeUnknown''','FailureCode=''native-launch-outcome-unknown''','Duplicate native launch rejected.','if($x.Stage -cne ''launching'' -or $x.NativeProcessId)'){if($source -notmatch [regex]::Escape($mark)){throw "Missing canonical fail-closed marker: $mark"}}
   'Maya v2 focused negative transport checks passed: 16'
 } finally {if(Test-Path $root){Remove-Item $root -Recurse -Force}}
