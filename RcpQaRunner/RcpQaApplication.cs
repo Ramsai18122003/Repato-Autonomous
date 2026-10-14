@@ -45,6 +45,7 @@ public sealed class RcpQaApplication : IExternalApplication
         string claimId = "";
         string status = "Failed";
         string rollbackStatus = "NotStarted";
+        string cleanupStatus = "NotStarted";
         bool baselineRestored = false;
         string[] expectedNames = [];
         string[] createdNames = [];
@@ -150,16 +151,17 @@ public sealed class RcpQaApplication : IExternalApplication
         {
             if (document is not null)
             {
-                try { document.Close(false); }
-                catch (Exception ex) { errors.Add("Cleanup failed: " + ex); status = "Failed"; }
+                try { document.Close(false); cleanupStatus = "Closed"; }
+                catch (Exception ex) { cleanupStatus = "Failed"; errors.Add("Cleanup failed: " + ex); status = "Failed"; }
             }
+            else cleanupStatus = "NotRequired";
             if (request is not null && reportPath is not null)
             {
                 try
                 {
                     var report = new RcpQaReport(1, requestId, request.RequestSha256, taskId, workflowId, RcpQaRequest.Test, RcpQaRequest.Test,
                         attemptId, runId, claimId, status, fixtureId, fixtureSha, modelSha, artifactSha, supportArtifactSha, viewTypeName,
-                        expectedNames, createdNames, createdViews, rollbackStatus, baselineRestored, errors.ToArray(), assertions.ToArray(), DateTimeOffset.UtcNow);
+                        expectedNames, createdNames, createdViews, rollbackStatus, baselineRestored, cleanupStatus, errors.ToArray(), assertions.ToArray(), DateTimeOffset.UtcNow);
                     WriteNew(reportPath, report);
                     string resultPath = requestPath! + ".result.json";
                     var receipt = new RcpQaReceipt(1, requestId, request.RequestSha256, taskId, workflowId, RcpQaRequest.Test, RcpQaRequest.Test,

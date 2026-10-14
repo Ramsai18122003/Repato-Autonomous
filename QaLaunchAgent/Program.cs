@@ -22,7 +22,9 @@ internal static class Program
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive) return 3;
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
-        var coordinator = new LaunchCoordinator(options, identity, new FileReplayLedger(options.ReplayLedgerPath), new RevitChildProcessLauncher(), new StrictChildProcessVerifier());
+        // RCP remains fail-closed until an authorized deployment supplies protected,
+        // version-specific roots. Never trust a QA-writable runtime directory as a candidate root.
+        var coordinator = new LaunchCoordinator(options, identity, new FileReplayLedger(options.ReplayLedgerPath), new RevitChildProcessLauncher(), new StrictChildProcessVerifier(), new RevitRcpChildProcessLauncher(), new StrictRcpChildProcessVerifier());
         var server = new NamedPipeLaunchServer(options, coordinator);
         try { while (!stop.IsCancellationRequested) server.ServeOnceAsync(stop.Token).GetAwaiter().GetResult(); } catch (OperationCanceledException) { }
         return 0;

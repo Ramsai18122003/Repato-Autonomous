@@ -64,7 +64,7 @@ public sealed record RcpQaReport(
     string TestId, string AttemptId, string RunId, string ClaimId, string Status,
     string FixtureId, string FixtureSha256, string ModelSha256, string ArtifactSha256, string SupportArtifactSha256,
     string ViewTypeName, string[] ExpectedViewNames, string[] CreatedViewNames, RcpCreatedViewEvidence[] CreatedViews,
-    string RollbackStatus, bool BaselineRestored, string[] Errors, string[] Assertions,
+    string RollbackStatus, bool BaselineRestored, string CleanupStatus, string[] Errors, string[] Assertions,
     DateTimeOffset FinishedUtc);
 
 public sealed record RcpCreatedViewEvidence(string ElementId, string Name, string ViewFamily, string ViewFamilyType, string LevelName, string LevelId);
@@ -81,7 +81,7 @@ public static class RcpQaResultContract
         try { return receipt.SchemaVersion == 1 && report.SchemaVersion == 1 &&
             Same(request, receipt.RequestId, receipt.RequestSha256, receipt.TaskId, receipt.WorkflowId, receipt.QaWorkflowId, receipt.TestId, receipt.AttemptId, receipt.RunId, receipt.ClaimId) &&
             Same(request, report.RequestId, report.RequestSha256, report.TaskId, report.WorkflowId, report.QaWorkflowId, report.TestId, report.AttemptId, report.RunId, report.ClaimId) &&
-            receipt.Status == "Passed" && report.Status == "Passed" && report.RollbackStatus == "RolledBack" && report.BaselineRestored &&
+            receipt.Status == "Passed" && report.Status == "Passed" && report.RollbackStatus == "RolledBack" && report.BaselineRestored && report.CleanupStatus == "Closed" &&
             report.Errors.Length == 0 && report.Assertions.Length > 0 && report.Assertions.All(value => value.StartsWith("PASS:", StringComparison.Ordinal)) &&
             report.FixtureId == request.FixtureId && report.FixtureSha256.Equals(request.FixtureSha256, StringComparison.OrdinalIgnoreCase) &&
             report.ModelSha256.Equals(request.ModelSha256, StringComparison.OrdinalIgnoreCase) &&

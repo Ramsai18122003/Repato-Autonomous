@@ -55,7 +55,7 @@ try
         [new("100", "Level 0 - RCP", "CeilingPlan", "Ceiling Plan", "Level 0", "1"),
          new("101", "Level 1 - RCP", "CeilingPlan", "Ceiling Plan", "Level 1", "2"),
          new("102", "Level 2 - RCP", "CeilingPlan", "Ceiling Plan", "Level 2", "3")],
-        "RolledBack", true, [], ["PASS:views", "PASS:rollback", "PASS:model-hash"], DateTimeOffset.UtcNow);
+        "RolledBack", true, "Closed", [], ["PASS:views", "PASS:rollback", "PASS:model-hash"], DateTimeOffset.UtcNow);
     File.WriteAllText(reportPath, JsonSerializer.Serialize(report));
     var receipt = new RcpQaReceipt(1, request.RequestId, request.RequestSha256, request.TaskId, request.WorkflowId, request.QaWorkflowId, request.TestId,
         request.AttemptId, request.RunId, request.ClaimId, "Passed", reportPath, Hash(File.ReadAllBytes(reportPath)), request.ArtifactSha256, request.SupportArtifactSha256);
@@ -63,6 +63,7 @@ try
     Check(!RcpQaResultContract.IsPassing(request, receipt with { ClaimId = Guid.NewGuid().ToString("N") }, report, request.ArtifactSha256), "claim mismatch rejected");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report with { RollbackStatus = "Committed" }, request.ArtifactSha256), "rollback failure rejected");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report with { BaselineRestored = false }, request.ArtifactSha256), "baseline integrity failure rejected");
+    Check(!RcpQaResultContract.IsPassing(request, receipt, report with { CleanupStatus = "Failed" }, request.ArtifactSha256), "cleanup failure rejected for passing receipt");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report, new string('B', 64)), "artifact mismatch rejected");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report with { SupportArtifactSha256 = new string('E', 64) }, request.ArtifactSha256), "shared support artifact mismatch rejected");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report with { CreatedViews = [report.CreatedViews[0] with { ViewFamily = "FloorPlan" }, report.CreatedViews[1], report.CreatedViews[2]] }, request.ArtifactSha256), "wrong created view family rejected");
@@ -70,6 +71,6 @@ try
     Check(!RcpQaResultContract.IsPassing(request, receipt with { ReportPath = Path.Combine(dir, "missing.json") }, report, request.ArtifactSha256), "missing report remains non-passing");
     File.AppendAllText(reportPath, " ");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report, request.ArtifactSha256), "report bytes changed after receipt hash rejected");
-    Console.WriteLine("RCP runner synthetic contracts passed: assertions=25; Revit invoked=false; store mutated=false.");
+    Console.WriteLine("RCP runner synthetic contracts passed: assertions=26; Revit invoked=false; store mutated=false.");
 }
 finally { Directory.Delete(dir, recursive: true); }

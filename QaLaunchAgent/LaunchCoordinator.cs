@@ -3,8 +3,43 @@ using System.Security.Principal;
 
 namespace Repato.QaLaunchAgent;
 
-public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionProvider identity, IReplayLedger ledger, IChildProcessLauncher launcher, IChildProcessVerifier verifier)
+public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionProvider identity, IReplayLedger ledger, IChildProcessLauncher launcher, IChildProcessVerifier verifier, IRcpChildProcessLauncher? rcpLauncher = null, IRcpChildProcessVerifier? rcpVerifier = null)
 {
+    public RcpQaLaunchResponse HandleRcp(RcpQaLaunchRequest? request, DateTimeOffset now, string rawJson)
+    {
+        RcpQaLaunchResponse Reject(string code, bool? accepted = false, string disposition = "rejected") => new(1,
+            RcpQaLaunchPolicy.Operation, request?.RequestId ?? "", request?.TaskId ?? "", request?.WorkflowId ?? "",
+            request?.QaWorkflowId ?? "", request?.TestId ?? "", request?.AttemptId ?? "", request?.RunId ?? "",
+            request?.ClaimId ?? "", accepted, disposition, null, identity.User, identity.Sid, identity.SessionId, null, code);
+
+        if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive)
+            return Reject("wrong-agent-identity");
+        if (request is null) return Reject("request-invalid");
+        if (string.IsNullOrWhiteSpace(options.RcpCandidateRoot) || string.IsNullOrWhiteSpace(options.RcpManifestRoot) || string.IsNullOrWhiteSpace(options.RcpIsolationRoot))
+            return Reject("rcp-deployment-not-authorized");
+        try
+        {
+            var binding = new RcpQaLaunchPolicy.ToolQaDescriptorBinding(RcpQaLaunchPolicy.ToolId, RcpQaLaunchPolicy.ToolId,
+                "Repato.RcpQaRunner.RcpQaApplication", "Repato.CreateRcpViews.TestRunner.addin", 1, RcpQaLaunchPolicy.RunnerRequestOperation);
+            RcpQaLaunchPolicy.Validate(request, rawJson, new RcpQaLaunchRoots(options.RuntimeRoot, options.RcpCandidateRoot,
+                options.RcpManifestRoot, options.RcpIsolationRoot, options.ExpectedUser, options.ExpectedUserSid), binding, now,
+                identity.User, identity.Sid, identity.Interactive);
+        }
+        catch { return Reject("request-or-artifact-validation-failed"); }
+        if (!ledger.TryReserve(request.RequestId, now)) return Reject("request-replayed");
+        if (rcpLauncher is null || rcpVerifier is null) return Reject("rcp-native-dispatch-unavailable");
+        try
+        {
+            var child = rcpLauncher.Launch(request, options.RevitExe);
+            if (!rcpVerifier.Verify(child, request, options.RevitExe, options.ExpectedUser, options.ExpectedUserSid, identity.SessionId))
+                return Reject("process-correlation-failed", null, "unknown");
+            return new(1, RcpQaLaunchPolicy.Operation, request.RequestId, request.TaskId, request.WorkflowId, request.QaWorkflowId,
+                request.TestId, request.AttemptId, request.RunId, request.ClaimId, true, "accepted", child.Pid, child.User,
+                options.ExpectedUserSid, child.SessionId, child.LaunchUtc, null);
+        }
+        catch { return Reject("native-disposition-unknown", null, "unknown"); }
+    }
+
     public QaStageResponse HandleStage(QaStageRequest? request, DateTimeOffset now)
     {
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive) return StageReject(request, "wrong-agent-identity");

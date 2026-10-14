@@ -20,10 +20,12 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         var line = await reader.ReadLineAsync(cancellationToken);
         if (line is null || line.Length > 32768) throw new InvalidDataException("Bounded request rejected.");
         object response;
+        string? observedOperation = null;
         try
         {
             using var document = JsonDocument.Parse(line);
             var operation = document.RootElement.TryGetProperty("operation", out var op) ? op.GetString() : null;
+            observedOperation = operation;
             if (operation == QaLaunchPolicy.HealthOperation)
             {
                 var identity = WindowsIdentity.GetCurrent();
@@ -46,21 +48,43 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
             }
             else
             {
-                var request = JsonSerializer.Deserialize<QaLaunchRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();
-                response = coordinator.Handle(request, DateTimeOffset.UtcNow, line);
+                response = RouteLaunchRequest(line, coordinator, DateTimeOffset.UtcNow);
             }
         }
-        catch { response = new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request"); }
+        catch
+        {
+            response = observedOperation == RcpQaLaunchPolicy.Operation
+                ? new RcpQaLaunchResponse(1, RcpQaLaunchPolicy.Operation, "", "", "", RcpQaLaunchPolicy.ToolId, RcpQaLaunchPolicy.ToolId, "", "", "", false, "rejected", null, WindowsIdentity.GetCurrent().Name, WindowsIdentity.GetCurrent().User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, null, "malformed-request")
+                : new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request");
+        }
         try
         {
             using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
             await writer.WriteLineAsync(SerializeResponse(response));
         }
+
         catch (IOException)
         {
             // A client may time out while a bounded staging/validation adapter is still running.
             // Its disconnect must not terminate the long-lived scheduled-task listener.
         }
+    }
+
+    public static object RouteLaunchRequest(string line, LaunchCoordinator coordinator, DateTimeOffset now)
+    {
+        using var document = JsonDocument.Parse(line);
+        string? operation = document.RootElement.TryGetProperty("operation", out var op) ? op.GetString() : null;
+        if (operation == RcpQaLaunchPolicy.Operation)
+        {
+            var request = JsonSerializer.Deserialize<RcpQaLaunchRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();
+            return coordinator.HandleRcp(request, now, line);
+        }
+        if (operation == QaLaunchPolicy.Operation)
+        {
+            var request = JsonSerializer.Deserialize<QaLaunchRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();
+            return coordinator.Handle(request, now, line);
+        }
+        return new { schemaVersion = 1, operation = operation ?? "", accepted = false, disposition = "rejected", failureCode = "unsupported-operation" };
     }
 
     public static string SerializeResponse(object response) =>

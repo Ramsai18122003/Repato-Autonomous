@@ -3,7 +3,7 @@ using System.Security.Principal;
 
 namespace Repato.QaLaunchAgent;
 
-public sealed record QaAgentOptions(string RevitExe, string RuntimeRoot, string QaProfileRoot, string ReplayLedgerPath, string LogRoot, string ExpectedUser = QaLaunchPolicy.ExpectedUser, string ExpectedUserSid = QaLaunchPolicy.ExpectedUserSid, string ClientAccount = QaLaunchPolicy.ClientAccount, string ClientSid = QaLaunchPolicy.ClientSid, string PipeName = "Repato\\QaLaunch");
+public sealed record QaAgentOptions(string RevitExe, string RuntimeRoot, string QaProfileRoot, string ReplayLedgerPath, string LogRoot, string ExpectedUser = QaLaunchPolicy.ExpectedUser, string ExpectedUserSid = QaLaunchPolicy.ExpectedUserSid, string ClientAccount = QaLaunchPolicy.ClientAccount, string ClientSid = QaLaunchPolicy.ClientSid, string PipeName = "Repato\\QaLaunch", string? RcpCandidateRoot = null, string? RcpManifestRoot = null, string? RcpIsolationRoot = null);
 
 public sealed class QaLaunchAgent(QaAgentOptions options)
 {
