@@ -1,6 +1,7 @@
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Repato.ToolQaFramework;
 
 namespace Repato.Revit.TestRunner;
 
@@ -14,6 +15,7 @@ internal sealed record CreatePlanViewsRequest(
     string ManifestPath, string ManifestSha256, DateTimeOffset ExpiresUtc)
 {
     internal const string Test = "create-plan-views-v1";
+    internal const string RunnerIdentity = "Repato.Revit.TestRunner.CreatePlanViewsQaApplication";
 
     internal static CreatePlanViewsRequest Parse(string json, string actualPath)
     {
@@ -43,6 +45,7 @@ internal sealed record CreatePlanViewsRequest(
             throw new InvalidDataException("Canonical Create Plan Views launch request is invalid or not bound to this file.");
         if (!CanonicalSha256(json).Equals(request.RequestSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Canonical request SHA-256 mismatch.");
+        ToolQaRegistry.LoadBuiltIn().ValidateRunner(Test, RunnerIdentity);
         return request;
     }
 

@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\ToolQaFramework\ToolQaDescriptor.cs" Link="ToolQaDescriptor.cs" />
+    <EmbeddedResource Include="..\QA\ToolQaRegistry.v1.json" LogicalName="Repato.ToolQaRegistry.v1.json" />
     <Compile Include="..\TestRunner\QAPathPolicy.cs" Link="QAPathPolicy.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsRequestContract.cs" Link="CreatePlanViewsRequestContract.cs" />
     <Compile Include="..\TestRunner\CreatePlanViewsResultContract.cs" Link="CreatePlanViewsResultContract.cs" />

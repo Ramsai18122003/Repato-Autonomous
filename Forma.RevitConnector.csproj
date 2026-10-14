@@ -16,6 +16,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="QA\ToolQaRegistry.v1.json" LogicalName="Repato.ToolQaRegistry.v1.json" />
     <Reference Include="RevitAPI">
       <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
       <Private>false</Private>
@@ -37,6 +38,7 @@
     <Compile Remove="ReflectedCeilingPlans.ContractTests\**\*.cs" />
     <Compile Remove="RcpQaRunner\**\*.cs" />
     <Compile Remove="RcpQaRunner.ContractTests\**\*.cs" />
+    <Compile Remove="ToolQaFramework.ContractTests\**\*.cs" />
     <Compile Remove="CandidateRunnerBindingCheck\**\*.cs" />
   </ItemGroup>
 

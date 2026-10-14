@@ -7,5 +7,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\RcpQaRunner\RcpQaContracts.cs" Link="RcpQaContracts.cs" />
+    <Compile Include="..\ToolQaFramework\ToolQaDescriptor.cs" Link="ToolQaDescriptor.cs" />
+    <EmbeddedResource Include="..\QA\ToolQaRegistry.v1.json" LogicalName="Repato.ToolQaRegistry.v1.json" />
+    <Content Include="..\QA\Fixtures\CreateRcpViewsEmpty.fixture-spec.json" Link="CreateRcpViewsEmpty.fixture-spec.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

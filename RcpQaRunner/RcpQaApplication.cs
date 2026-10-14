@@ -4,6 +4,7 @@ using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Events;
 using Repato.Revit.TestRunner;
+using Repato.ToolQaFramework;
 
 namespace Repato.RcpQaRunner;
 
@@ -60,6 +61,7 @@ public sealed class RcpQaApplication : IExternalApplication
         try
         {
             string fullRequestPath = ValidateLocalPath(requestPath!, requireExisting: true);
+            ToolQaRegistry.LoadBuiltIn().ValidateRunner(RcpQaRequest.Test, typeof(RcpQaApplication).FullName!);
             request = RcpQaRequest.Parse(File.ReadAllText(fullRequestPath), fullRequestPath);
             requestId = request.RequestId; taskId = request.TaskId; workflowId = request.WorkflowId;
             attemptId = request.AttemptId; runId = request.RunId; claimId = request.ClaimId;
@@ -82,9 +84,10 @@ public sealed class RcpQaApplication : IExternalApplication
             using (JsonDocument sidecar = JsonDocument.Parse(File.ReadAllText(sidecarPath)))
             {
                 JsonElement root = sidecar.RootElement;
+                string expectedFixtureSpec = ToolQaRegistry.LoadBuiltIn().Get(RcpQaRequest.Test).FixtureSpecId;
                 if (root.GetProperty("fixtureId").GetString() != request.FixtureId ||
                     !root.GetProperty("sourceSha256").GetString()!.Equals(request.FixtureSha256, StringComparison.OrdinalIgnoreCase) ||
-                    !root.GetProperty("fixtureSpecId").GetString()!.Equals("rcp-empty-three-levels-v1", StringComparison.Ordinal))
+                    !root.GetProperty("fixtureSpecId").GetString()!.Equals(expectedFixtureSpec, StringComparison.Ordinal))
                     throw new InvalidOperationException("RCP disposable fixture provenance mismatch.");
             }
             using (BasicFileInfo info = BasicFileInfo.Extract(request.ModelPath))

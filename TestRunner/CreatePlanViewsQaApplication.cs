@@ -3,6 +3,7 @@ using System.Text.Json;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Events;
+using Repato.ToolQaFramework;
 
 namespace Repato.Revit.TestRunner;
 
@@ -247,6 +248,7 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
             receiptPath = QAPathPolicy.ValidatePath(path + ".result.json", QAPathPolicy.RunsRoot, false);
             if (File.Exists(receiptPath)) throw new InvalidOperationException("This QA request already has a result; prepare a new attempt.");
             string json = File.ReadAllText(path);
+            ToolQaRegistry.LoadBuiltIn().ValidateRunner(CreatePlanViewsRequest.Test, typeof(CreatePlanViewsQaApplication).FullName!);
             request = CreatePlanViewsRequest.Parse(json, path);
             report.RunId = request.RunId;
             report.RequestId = request.RequestId;
@@ -282,8 +284,9 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
             using (var provenance = JsonDocument.Parse(File.ReadAllText(sidecar)))
             {
                 JsonElement root = provenance.RootElement;
+                string expectedFixture = ToolQaRegistry.LoadBuiltIn().Get(CreatePlanViewsRequest.Test).FixtureSpecId;
                 string fixtureHash = root.GetProperty("sourceSha256").GetString() ?? "";
-                if (root.GetProperty("fixtureId").GetString() != "CreatePlanViewsEmpty" ||
+                if (root.GetProperty("fixtureId").GetString() != expectedFixture ||
                     !fixtureHash.Equals(request.FixtureSha256, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Controlled CreatePlanViewsEmpty fixture provenance failed.");
                 report.FixtureSha256 = fixtureHash;

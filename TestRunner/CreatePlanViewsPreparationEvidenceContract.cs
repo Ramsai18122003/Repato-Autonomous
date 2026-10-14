@@ -1,6 +1,7 @@
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Repato.ToolQaFramework;
 
 namespace Repato.Revit.TestRunner;
 
@@ -34,6 +35,13 @@ internal static class CreatePlanViewsPreparationEvidenceContract
             !Text("SourceModelSha256").Equals(request.FixtureSha256, StringComparison.OrdinalIgnoreCase) ||
             !Text("PreparedModelSha256").Equals(request.ModelSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Fixture-preparation evidence identity or source/prepared hash correlation failed.");
+
+        var descriptor = ToolQaRegistry.LoadBuiltIn().Get(request.QaWorkflowId);
+        ToolQaGate.ValidateFixture(new ToolQaFixtureEvidence(preparationRequest.TaskId, preparationRequest.WorkflowId,
+            request.QaWorkflowId, preparationRequest.AttemptId, preparationRequest.RunId, descriptor.FixtureContractId,
+            request.FixtureSha256, request.FixturePreparationResultPath, request.FixturePreparationResultSha256), request.TaskId, request.WorkflowId,
+            request.QaWorkflowId, request.FixturePreparationAttemptId, request.FixturePreparationRunId,
+            descriptor.FixtureContractId, request.FixtureSha256);
     }
 
     private static string Hash(string path)

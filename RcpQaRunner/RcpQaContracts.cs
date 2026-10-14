@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Xml;
+using Repato.ToolQaFramework;
 
 namespace Repato.RcpQaRunner;
 
@@ -12,6 +13,7 @@ public sealed record RcpQaRequest(
     string[] LevelNames, string ViewTypeName, string NameSuffix)
 {
     public const string Test = "create-rcp-views-v1";
+    public const string RunnerIdentity = "Repato.RcpQaRunner.RcpQaApplication";
 
     public static RcpQaRequest Parse(string json, string actualPath, DateTimeOffset? now = null)
     {
@@ -32,6 +34,7 @@ public sealed record RcpQaRequest(
             !Hash(request.ModelSha256) || !Hash(request.FixtureSha256) || !Hash(request.ManifestSha256) || !Hash(request.ArtifactSha256) || !Hash(request.SupportArtifactSha256) ||
             request.ExpiresUtc <= (now ?? DateTimeOffset.UtcNow))
             throw new InvalidDataException("RCP QA request identity, expiry, paths, inputs, or hashes are invalid.");
+        ToolQaRegistry.LoadBuiltIn().ValidateRunner(Test, RunnerIdentity);
         return request;
     }
 

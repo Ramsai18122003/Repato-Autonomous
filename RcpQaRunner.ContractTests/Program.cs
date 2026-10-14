@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Repato.RcpQaRunner;
+using Repato.ToolQaFramework;
 
 static void Check(bool condition, string message) { if (!condition) throw new InvalidOperationException("FAILED: " + message); }
 static void Reject(Action action, string message) { try { action(); } catch { return; } throw new InvalidOperationException("FAILED: " + message); }
@@ -20,6 +21,13 @@ try
     json = JsonSerializer.Serialize(request);
     RcpQaRequest parsed = RcpQaRequest.Parse(json, requestPath);
     Check(parsed.TestId == RcpQaRequest.Test && parsed.LevelNames.Length == 3, "strict RCP identity and deterministic inputs parse");
+    Check(RcpQaRequest.RunnerIdentity == "Repato.RcpQaRunner.RcpQaApplication", "RCP uses registered shared runner identity");
+    using (JsonDocument spec = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "CreateRcpViewsEmpty.fixture-spec.json"))))
+    {
+        ToolQaDescriptor descriptor = ToolQaRegistry.LoadBuiltIn().Get(RcpQaRequest.Test);
+        Check(spec.RootElement.GetProperty("fixtureSpecId").GetString() == descriptor.FixtureSpecId &&
+            spec.RootElement.GetProperty("fixtureId").GetString() == request.FixtureId, "registered RCP fixture spec matches runner contract");
+    }
     string runnerAssembly = Path.Combine(dir, "Repato.RcpQaRunner.dll"); File.WriteAllBytes(runnerAssembly, [5, 6, 7]);
     string manifestXml = "<RevitAddIns><AddIn Type=\"Application\"><Assembly>.\\Repato.RcpQaRunner.dll</Assembly><FullClassName>Repato.RcpQaRunner.RcpQaApplication</FullClassName></AddIn></RevitAddIns>";
     File.WriteAllText(manifest, manifestXml);
@@ -62,6 +70,6 @@ try
     Check(!RcpQaResultContract.IsPassing(request, receipt with { ReportPath = Path.Combine(dir, "missing.json") }, report, request.ArtifactSha256), "missing report remains non-passing");
     File.AppendAllText(reportPath, " ");
     Check(!RcpQaResultContract.IsPassing(request, receipt, report, request.ArtifactSha256), "report bytes changed after receipt hash rejected");
-    Console.WriteLine("RCP runner synthetic contracts passed: assertions=24; Revit invoked=false; store mutated=false.");
+    Console.WriteLine("RCP runner synthetic contracts passed: assertions=25; Revit invoked=false; store mutated=false.");
 }
 finally { Directory.Delete(dir, recursive: true); }
