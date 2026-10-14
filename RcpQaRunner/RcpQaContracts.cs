@@ -60,9 +60,11 @@ public sealed record RcpQaReport(
     int SchemaVersion, string RequestId, string RequestSha256, string TaskId, string WorkflowId, string QaWorkflowId,
     string TestId, string AttemptId, string RunId, string ClaimId, string Status,
     string FixtureId, string FixtureSha256, string ModelSha256, string ArtifactSha256, string SupportArtifactSha256,
-    string ViewTypeName, string[] ExpectedViewNames, string[] CreatedViewNames,
+    string ViewTypeName, string[] ExpectedViewNames, string[] CreatedViewNames, RcpCreatedViewEvidence[] CreatedViews,
     string RollbackStatus, bool BaselineRestored, string[] Errors, string[] Assertions,
     DateTimeOffset FinishedUtc);
+
+public sealed record RcpCreatedViewEvidence(string ElementId, string Name, string ViewFamily, string ViewFamilyType, string LevelName, string LevelId);
 
 public sealed record RcpQaReceipt(
     int SchemaVersion, string RequestId, string RequestSha256, string TaskId, string WorkflowId, string QaWorkflowId,
@@ -73,7 +75,7 @@ public static class RcpQaResultContract
 {
     public static bool IsPassing(RcpQaRequest request, RcpQaReceipt receipt, RcpQaReport report, string expectedArtifactSha256)
     {
-        return receipt.SchemaVersion == 1 && report.SchemaVersion == 1 &&
+        try { return receipt.SchemaVersion == 1 && report.SchemaVersion == 1 &&
             Same(request, receipt.RequestId, receipt.RequestSha256, receipt.TaskId, receipt.WorkflowId, receipt.QaWorkflowId, receipt.TestId, receipt.AttemptId, receipt.RunId, receipt.ClaimId) &&
             Same(request, report.RequestId, report.RequestSha256, report.TaskId, report.WorkflowId, report.QaWorkflowId, report.TestId, report.AttemptId, report.RunId, report.ClaimId) &&
             receipt.Status == "Passed" && report.Status == "Passed" && report.RollbackStatus == "RolledBack" && report.BaselineRestored &&
@@ -84,9 +86,18 @@ public static class RcpQaResultContract
             receipt.ArtifactSha256.Equals(expectedArtifactSha256, StringComparison.OrdinalIgnoreCase) &&
             report.SupportArtifactSha256.Equals(request.SupportArtifactSha256, StringComparison.OrdinalIgnoreCase) &&
             receipt.SupportArtifactSha256.Equals(request.SupportArtifactSha256, StringComparison.OrdinalIgnoreCase) &&
+            report.ViewTypeName == request.ViewTypeName &&
+            report.CreatedViews.Length == request.LevelNames.Length &&
+            report.CreatedViews.Select(view => view.ElementId).Distinct(StringComparer.Ordinal).Count() == request.LevelNames.Length &&
+            report.CreatedViews.Select(view => view.LevelId).Distinct(StringComparer.Ordinal).Count() == request.LevelNames.Length &&
+            report.CreatedViews.Select((view, index) => view.Name == request.LevelNames[index] + " - RCP" &&
+                view.LevelName == request.LevelNames[index] && view.ViewFamily == "CeilingPlan" &&
+                view.ViewFamilyType == request.ViewTypeName && !string.IsNullOrWhiteSpace(view.ElementId) &&
+                !string.IsNullOrWhiteSpace(view.LevelId)).All(valid => valid) &&
             receipt.ReportSha256.Equals(SHA256.HashData(File.ReadAllBytes(receipt.ReportPath)).ToHex(), StringComparison.OrdinalIgnoreCase) &&
             report.ExpectedViewNames.SequenceEqual(request.LevelNames.Select(name => name + " - RCP"), StringComparer.Ordinal) &&
             report.CreatedViewNames.SequenceEqual(report.ExpectedViewNames, StringComparer.Ordinal);
+        } catch { return false; }
     }
 
     private static bool Same(RcpQaRequest request, string requestId, string requestSha256, string taskId, string workflowId, string qaWorkflowId,

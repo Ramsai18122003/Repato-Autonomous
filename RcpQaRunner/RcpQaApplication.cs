@@ -47,6 +47,7 @@ public sealed class RcpQaApplication : IExternalApplication
         bool baselineRestored = false;
         string[] expectedNames = [];
         string[] createdNames = [];
+        RcpCreatedViewEvidence[] createdViews = [];
         var errors = new List<string>();
         var assertions = new List<string>();
         string fixtureId = "";
@@ -115,6 +116,7 @@ public sealed class RcpQaApplication : IExternalApplication
                     using var transaction = new Transaction(document, "Create RCP Views QA");
                     if (transaction.Start() != TransactionStatus.Started) throw new InvalidOperationException("Could not start RCP QA transaction.");
                     var observed = new List<string>();
+                    var observedViews = new List<RcpCreatedViewEvidence>();
                     foreach (Level level in selected)
                     {
                         ViewPlan view = ViewPlan.Create(document, ceilingTypes[0].Id, level.Id);
@@ -122,9 +124,12 @@ public sealed class RcpQaApplication : IExternalApplication
                         if (view.ViewType != ViewType.CeilingPlan || view.GenLevel?.Id != level.Id || view.GetTypeId() != ceilingTypes[0].Id || view.Name != level.Name + " - RCP")
                             throw new InvalidOperationException("Created view did not match the RCP type/level/name contract.");
                         observed.Add(view.Name);
+                        observedViews.Add(new RcpCreatedViewEvidence(view.Id.Value.ToString(), view.Name, view.ViewType.ToString(),
+                            ceilingTypes[0].Name, view.GenLevel!.Name, view.GenLevel.Id.Value.ToString()));
                         assertions.Add("PASS:created:" + view.Name);
                     }
                     createdNames = observed.ToArray();
+                    createdViews = observedViews.ToArray();
                     if (transaction.Commit() != TransactionStatus.Committed) throw new InvalidOperationException("RCP QA transaction did not commit for inspection.");
                 }
                 finally { rollbackStatus = group.RollBack().ToString(); }
@@ -151,7 +156,7 @@ public sealed class RcpQaApplication : IExternalApplication
                 {
                     var report = new RcpQaReport(1, requestId, request.RequestSha256, taskId, workflowId, RcpQaRequest.Test, RcpQaRequest.Test,
                         attemptId, runId, claimId, status, fixtureId, fixtureSha, modelSha, artifactSha, supportArtifactSha, viewTypeName,
-                        expectedNames, createdNames, rollbackStatus, baselineRestored, errors.ToArray(), assertions.ToArray(), DateTimeOffset.UtcNow);
+                        expectedNames, createdNames, createdViews, rollbackStatus, baselineRestored, errors.ToArray(), assertions.ToArray(), DateTimeOffset.UtcNow);
                     WriteNew(reportPath, report);
                     string resultPath = requestPath! + ".result.json";
                     var receipt = new RcpQaReceipt(1, requestId, request.RequestSha256, taskId, workflowId, RcpQaRequest.Test, RcpQaRequest.Test,
