@@ -54,7 +54,16 @@ function Get-TaraQaTrustConfiguration($QaAddinRoot,$QaRoot,$Inventory){
     $records=@();foreach($n in $names){$p=Join-Path (Split-Path $QaAddinRoot -Parent) $n;$source=Join-Path $QaRoot $n;if(!(Test-Path $source -PathType Leaf)){continue};$h=Get-TaraSha256 $source;$records+=[pscustomobject]@{Name=$n;Path=$p;Sha256=$h}}
     $installed=@(Get-ChildItem -LiteralPath (Split-Path $QaAddinRoot -Parent) -Filter '*.addin' -File -ErrorAction Stop)
     $dllHash=Get-TaraSha256 (Join-Path $QaAddinRoot 'Repato.Revit.dll');$promptRecords=@();foreach($file in $installed){$match=$records|Where-Object Name -ceq $file.Name;if($null -eq $match){throw "Unexpected RepatoQA manifest installed: $($file.Name)"};$promptRecords+=[pscustomobject]@{ManifestName=$file.Name;ManifestPath=$file.FullName;ManifestSha256=$match.Sha256;DllPath=(Join-Path $QaAddinRoot 'Repato.Revit.dll');DllSha256=$dllHash;Approved=$true;PromptDetected=$false;PromptAction='Pending';Timestamp=(Get-Date).ToUniversalTime().ToString('O')}}
-    [pscustomobject]@{Path=(Join-Path $QaAddinRoot 'RepatoQA.trust.json');ApprovedManifests=$records;PromptRecords=$promptRecords;PromptFree=$false;ProfileRoot=$QaAddinRoot;Diagnostic='Approved unsigned add-in prompt handler is required before Revit launch.'}
+    [pscustomobject]@{Path=(Join-Path $QaAddinRoot 'RepatoQA.trust.json');ApprovedManifests=$records;PromptRecords=$promptRecords;PromptFree=$false;ProfileRoot=$QaAddinRoot;Diagnostic='Persistent Autodesk trust is a human decision for the exact stable add-in; this file is deployment evidence, not proof of Revit trust.'}
+}
+function Test-TaraStablePlanViewsManifest {
+    param([Parameter(Mandatory)][string]$ManifestPath,[Parameter(Mandatory)][string]$ExpectedSha256,[Parameter(Mandatory)][string]$ExpectedAssemblyPath)
+    if((Get-TaraSha256 $ManifestPath) -ine $ExpectedSha256){throw 'Stable QA manifest hash mismatch.'}
+    $xml=[xml](Get-Content -LiteralPath $ManifestPath -Raw);$addin=@($xml.RevitAddIns.AddIn)
+    if($addin.Count -ne 1 -or $addin[0].Type -cne 'Application' -or $addin[0].Name -cne 'Repato Create Plan Views QA' -or $addin[0].AddInId -cne '00000000-0000-0000-0000-000000000006' -or $addin[0].FullClassName -cne 'Repato.Revit.TestRunner.CreatePlanViewsQaApplication' -or $addin[0].VendorId -cne 'RPTQ'){throw 'Stable QA add-in identity changed.'}
+    $resolved=[IO.Path]::GetFullPath((Join-Path (Split-Path $ManifestPath -Parent) ([string]$addin[0].Assembly)))
+    if($resolved -ine [IO.Path]::GetFullPath($ExpectedAssemblyPath)){throw 'Stable QA assembly location changed.'}
+    [pscustomobject]@{AddInId=[string]$addin[0].AddInId;Name=[string]$addin[0].Name;AssemblyPath=$resolved;ManifestSha256=$ExpectedSha256;PersistentTrustVerified=$false;SecurityDecision='HumanOnly'}
 }
 function Test-TaraLegacyDeploymentManifestCompatibility {
     param([Parameter(Mandatory)]$Deployment,[Parameter(Mandatory)][string]$ExpectedCandidateSha256,[Parameter(Mandatory)][string]$ExpectedQaAddinRoot,[Parameter(Mandatory)][string]$ExpectedRunnerManifestPath,[Parameter(Mandatory)][string]$ExpectedRunnerManifestSha256)
@@ -166,7 +175,7 @@ function Stop-TaraTrustPromptHandler($Handler){
     }
 }
 function Start-TaraProcess($Plan){
-    if($Plan.TrustConfiguration -and $Plan.TrustConfiguration.PromptFree){$Plan.TrustConfiguration|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $Plan.TrustConfiguration.Path -Encoding UTF8}
+    # Do not manufacture Autodesk trust or persist a prompt-free claim before observation.
     $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$Plan.Executable;$info.Arguments=if($Plan.OpenModelPath){'"'+$Plan.OpenModelPath+'"'}else{''};$info.UseShellExecute=$false;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
     # Environment changes are confined to this child. Clear every other QA dispatch.
     foreach($key in @($info.EnvironmentVariables.Keys)){if($key -like 'REPATO_QA_*_REQUEST' -or $key -like 'REPATO_QA_CREATE_PLAN_VIEWS_*'){$info.EnvironmentVariables.Remove($key)}}
@@ -175,141 +184,35 @@ function Start-TaraProcess($Plan){
     $info.EnvironmentVariables['REPATO_QA_REPOSITORY_ROOT']=(Split-Path (Split-Path $Plan.VerifierPath -Parent) -Parent)
     $child=[Diagnostics.Process]::Start($info);$null=$child.Handle;return $child
 }
-function Wait-TaraManualLoadOnce($Plan,$Process){
-    if(!( 'TaraPromptNative' -as [type])){Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class TaraPromptNative { [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c,string t); [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr p,IntPtr c,string n,string t); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n); }'}
-    $detected=$false;$confirmedUtc=$null;$deadline=[DateTime]::UtcNow.AddSeconds($Plan.TimeoutSeconds)
-    while([DateTime]::UtcNow -lt $deadline){$Process.Refresh();if($Process.HasExited -or (Test-Path -LiteralPath $Plan.ResultPath -PathType Leaf)){break};$dialog=[TaraPromptNative]::FindWindow($null,'Security - Unsigned Add-In');if($dialog -ne [IntPtr]::Zero){$detected=$true;$text=Get-TaraWindowText $dialog;$child=[TaraPromptNative]::FindWindowEx($dialog,[IntPtr]::Zero,$null,$null);while($child -ne [IntPtr]::Zero){$text+=' '+(Get-TaraWindowText $child);$child=[TaraPromptNative]::FindWindowEx($dialog,$child,$null,$null)};$manifest=$Plan.InstalledManifest;$dll=$Plan.InstalledDll;if($text -notmatch [regex]::Escape($manifest) -and $text -notmatch [regex]::Escape($dll)){throw 'Unexpected unsigned add-in prompt path; manual approval not recorded.'};if((Get-TaraSha256 $manifest) -ine $Plan.QaRunnerManifestSha256 -or (Get-TaraSha256 $dll) -ine $Plan.Context.ArtifactSha256){throw 'Load Once prompt manifest or candidate hash validation failed.'};Write-Host "LOAD_ONCE_REQUIRED attempt=$($Plan.RequestId) run=$($Plan.RunId) manifest=$manifest sha256=$($Plan.QaRunnerManifestSha256). Click Load Once; do not select Always Load.";while([DateTime]::UtcNow -lt $Plan.RequestExpiresUtc){$Process.Refresh();if($Process.HasExited){break};if([TaraPromptNative]::FindWindow($null,'Security - Unsigned Add-In') -eq [IntPtr]::Zero){break};Start-Sleep -Milliseconds 250};break};Start-Sleep -Milliseconds 250}
-    $remaining=[TaraPromptNative]::FindWindow($null,'Security - Unsigned Add-In');if($remaining -ne [IntPtr]::Zero){throw 'Manual Load Once prompt did not close before timeout.'};if($detected){$confirmedUtc=[DateTimeOffset]::UtcNow.ToString('O')};[pscustomobject]@{PromptDetected=$detected;PromptAction=$(if($detected){'Load Once'}else{'None'});ApprovedManifest=$(if($detected){$Plan.InstalledManifest}else{$null});PromptRecords=@();ManualApprovalEvidence=$(if($detected){[pscustomobject]@{Action='Load Once';ConfirmedBy='user';ConfirmedUtc=$confirmedUtc;TaskId=$Plan.TaskId;WorkflowId=$Plan.WorkflowId;AttemptId=$Plan.RequestId;RunId=$Plan.RunId;ManifestPath=$Plan.InstalledManifest;ManifestSha256=$Plan.QaRunnerManifestSha256}}else{$null});PromptFree=$true}
+function Get-TaraSecurityPrompt {
+    if(!( 'TaraPromptNative' -as [type])){
+        Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class TaraPromptNative { [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c,string t); [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr p,IntPtr c,string n,string t); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n); }'
+    }
+    foreach($title in @('Security - Unsigned Add-In','Security - Signed Add-In','Security - Unsigned Executable File','Security - Signed Executable File')){
+        $dialog=[TaraPromptNative]::FindWindow($null,$title)
+        if($dialog -eq [IntPtr]::Zero){continue}
+        $text=Get-TaraWindowText $dialog;$child=[TaraPromptNative]::FindWindowEx($dialog,[IntPtr]::Zero,$null,$null)
+        while($child -ne [IntPtr]::Zero){$text+=' '+(Get-TaraWindowText $child);$child=[TaraPromptNative]::FindWindowEx($dialog,$child,$null,$null)}
+        return [pscustomobject]@{Title=$title;Text=$text}
+    }
+    $null
 }
 function Get-TaraWindowText([IntPtr]$Window){$b=New-Object Text.StringBuilder 2048;[void][TaraPromptNative]::GetWindowText($Window,$b,$b.Capacity);$b.ToString()}
-function Handle-TaraTrustPrompt($Plan,$Process,$Handler){
-    if(!( 'TaraPromptNative' -as [type])){
-        Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class TaraPromptNative { [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c,string t); [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr p,IntPtr c,string n,string t); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint m,IntPtr w,IntPtr l); }'
-    }
-
-    $records = @($Plan.TrustConfiguration.PromptRecords)
-    $handled = @()
-    $handledPaths = @{}
-    $detected = $false
-
-    # Revit commonly takes longer than three seconds to display its trust prompt.
-    # Watch startup for up to two minutes or until the native QA result appears.
-    $deadline = [DateTime]::UtcNow.AddSeconds(
-        [Math]::Min([Math]::Max($Plan.TimeoutSeconds, 30), 120)
-    )
-
-    while([DateTime]::UtcNow -lt $deadline){
-        $Process.Refresh()
-
-        if($Process.HasExited){
-            break
-        }
-
-        $dialog = [TaraPromptNative]::FindWindow(
-            $null,
-            'Security - Unsigned Add-In'
-        )
-
-        if($dialog -ne [IntPtr]::Zero){
-            $detected = $true
-            $text = Get-TaraWindowText $dialog
-
-            $child = [TaraPromptNative]::FindWindowEx(
-                $dialog,
-                [IntPtr]::Zero,
-                $null,
-                $null
-            )
-
-            while($child -ne [IntPtr]::Zero){
-                $text += ' ' + (Get-TaraWindowText $child)
-
-                $child = [TaraPromptNative]::FindWindowEx(
-                    $dialog,
-                    $child,
-                    $null,
-                    $null
-                )
-            }
-
-            $match = $records |
-                Where-Object {
-                    $text -match [regex]::Escape($_.ManifestPath) -or
-                    $text -match [regex]::Escape($_.DllPath)
-                } |
-                Select-Object -First 1
-
-            if($null -eq $match){
-                throw 'Unexpected unsigned add-in prompt path; approval denied.'
-            }
-
-            if(
-                (Get-TaraSha256 $match.ManifestPath) -ine $match.ManifestSha256 -or
-                (Get-TaraSha256 $match.DllPath) -ine $match.DllSha256
-            ){
-                throw 'Unsigned add-in prompt hash validation failed.'
-            }
-
-            $button = [TaraPromptNative]::FindWindowEx(
-                $dialog,
-                [IntPtr]::Zero,
-                $null,
-                'Always Load'
-            )
-
-            if($button -eq [IntPtr]::Zero){
-                throw 'Approved unsigned add-in prompt was detected but Always Load was unavailable.'
-            }
-
-            [void][TaraPromptNative]::SendMessage(
-                $button,
-                0x00F5,
-                [IntPtr]::Zero,
-                [IntPtr]::Zero
-            )
-
-            if(!$handledPaths.ContainsKey($match.ManifestPath)){
-                $handledPaths[$match.ManifestPath] = $true
-
-                $record = [pscustomobject]@{
-                    Manifest = $match.ManifestPath
-                    Action = 'Always Load'
-                    Sha256 = $match.ManifestSha256
-                }
-
-                $handled += $record
-                $Handler.Handled += $record
-            }
-
-            Start-Sleep -Milliseconds 500
-            continue
-        }
-
-        # Once the runner publishes its result, startup prompts can no longer block it.
-        if(Test-Path -LiteralPath $Plan.ResultPath -PathType Leaf){
-            break
-        }
-
-        Start-Sleep -Milliseconds 250
-    }
-
-    $remainingDialog = [TaraPromptNative]::FindWindow(
-        $null,
-        'Security - Unsigned Add-In'
-    )
-
-    if($remainingDialog -ne [IntPtr]::Zero){
-        throw 'Unsigned add-in prompt remained open after automatic handling.'
-    }
-
-    [pscustomobject]@{
-        PromptDetected = $detected
-        PromptAction = $(if($handled.Count){'Always Load'}else{'None'})
-        ApprovedManifest = $(if($handled.Count){$handled[-1].Manifest}else{$null})
-        PromptRecords = $handled
-        ManualApprovalEvidence = $null
-        PromptFree = $true
-    }
+function Assert-TaraSecurityPromptAbsent($Plan,[scriptblock]$PromptProvider){
+    $prompt=if($PromptProvider){& $PromptProvider}else{Get-TaraSecurityPrompt}
+    if(!$prompt){return}
+    $matches=@($Plan.TrustConfiguration.PromptRecords|Where-Object {$prompt.Text -match [regex]::Escape($_.DllPath) -or $prompt.Text -match [regex]::Escape($_.ManifestPath)})
+    if(!$matches.Count){throw ('Human trust decision required for unidentified add-in; no security interaction performed. '+$prompt.Title+': '+$prompt.Text)}
+    foreach($match in $matches){if((Get-TaraSha256 $match.ManifestPath) -ine $match.ManifestSha256 -or (Get-TaraSha256 $match.DllPath) -ine $match.DllSha256){throw 'Security prompt identity hash mismatch; no security interaction performed.'}}
+    throw ('Human trust decision required for verified add-in; select Always Load manually only after checking the exact stable identity. No security interaction performed. '+$prompt.Title+': '+$prompt.Text)
+}
+function Wait-TaraManualLoadOnce($Plan,$Process){
+    # Kept for call compatibility; disappearance of a dialog is never evidence of user approval.
+    Handle-TaraTrustPrompt $Plan $Process $null
+}
+function Handle-TaraTrustPrompt($Plan,$Process,$Handler,[scriptblock]$PromptProvider){
+    Assert-TaraSecurityPromptAbsent $Plan $PromptProvider
+    [pscustomobject]@{PromptDetected=$false;PromptAction='None';ApprovedManifest=$null;PromptRecords=@();ManualApprovalEvidence=$null;PromptFree=$true}
 }
 function Stop-TaraOwnedProcess($Process){
     # Never discover/reacquire by PID or name. The original Process handle owns this termination.
@@ -329,6 +232,7 @@ function Assert-TaraModelUnlocked([string]$Path){
 function Wait-TaraResult($Plan,$Process){
     $timer=[Diagnostics.Stopwatch]::StartNew()
     while(!(Test-Path -LiteralPath $Plan.ResultPath -PathType Leaf)){
+        Assert-TaraSecurityPromptAbsent $Plan
         $Process.Refresh();if($Process.HasExited){throw 'QA Revit exited before publishing a result.'}
         if($timer.Elapsed.TotalSeconds -ge $Plan.TimeoutSeconds){Stop-TaraOwnedProcess $Process;throw [TimeoutException]::new('QA hard timeout; only the bridge-owned Revit process was terminated.')}
         Start-Sleep -Seconds 20
@@ -395,4 +299,4 @@ function Invoke-TaraRevitQa {
     }
     [pscustomobject]$result
 }
-Export-ModuleMember -Function New-TaraRevitQaPlan,Invoke-TaraRevitQa,New-TaraLevelInventoryRequest,New-TaraFixturePreparationRequest
+Export-ModuleMember -Function New-TaraRevitQaPlan,Invoke-TaraRevitQa,New-TaraLevelInventoryRequest,New-TaraFixturePreparationRequest,Get-TaraSecurityPrompt,Assert-TaraSecurityPromptAbsent
