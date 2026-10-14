@@ -38,6 +38,7 @@
     <Compile Remove="ReflectedCeilingPlans.ContractTests\**\*.cs" />
     <Compile Remove="RcpQaRunner\**\*.cs" />
     <Compile Remove="RcpQaRunner.ContractTests\**\*.cs" />
+    <Compile Remove="RcpNativeProtocol.ContractTests\**\*.cs" />
     <Compile Remove="ToolQaFramework.ContractTests\**\*.cs" />
     <Compile Remove="CandidateRunnerBindingCheck\**\*.cs" />
   </ItemGroup>
