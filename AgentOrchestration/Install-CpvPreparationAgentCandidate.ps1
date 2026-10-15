@@ -49,11 +49,17 @@ $revit=@(Get-Process -Name Revit -ErrorAction Stop)
 if($revit.Count){throw 'Revit must be stopped.'}
 $agents=@(Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
 if($agents.Count -ne 1 -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
-Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName
-$token=$null;$installAttempted=$false
+$token=$null;$installAttempted=$false;$journalLease=$null
 try {
+    if($upgrade){
+        $journalLease=New-RepatoQaLaunchAgentBootstrapInstallJournal -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RequestId $ReconcileRequestId -TaskId $TaskId
+        $bootstrap=Get-Module Repato.QaLaunchAgent.Bootstrap
+        & $bootstrap {param($lease) $j=Get-InstallJournal $lease;if($j.state -cne 'CandidateStaged'){throw 'Candidate stage was not durably verified.'};Set-InstallJournalState $j 'ServiceStopPending'|Out-Null} $journalLease
+    }
+    Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName
+    if($journalLease){& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($lease) $j=Get-InstallJournal $lease;if($j.state -cne 'ServiceStopPending'){throw 'Service-stop boundary was not durably recorded.'};Set-InstallJournalState $j 'ServiceStopped'|Out-Null} $journalLease}
     $installAttempted=$true
-    $installed=Install-RepatoQaLaunchAgentBootstrap -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RetainRollback
+    $installed=Install-RepatoQaLaunchAgentBootstrap -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RetainRollback -DurableJournal $journalLease
     $token=$installed.RollbackToken
     if($upgrade){
         if(!$token -or !$token.Updated -or !$token.BackupRoot -or !(Test-Path -LiteralPath $token.BackupRoot -PathType Container) -or !$token.OldTaskXml){throw 'Verified prior-runtime rollback evidence was not retained.'}
@@ -63,6 +69,7 @@ try {
     }
     $checked=Test-RepatoQaLaunchAgentBootstrap -ManifestPath $manifest -ManifestSha256 $ManifestSha256
     if(!$checked.InstalledRuntimeIntegrity -or !$checked.TaskContractValid){throw 'Installed runtime/task integrity failed.'}
+    if($journalLease){Set-RepatoQaLaunchAgentBootstrapInstallHealthVerification -JournalLease $journalLease}
     Start-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName
     Start-Sleep -Seconds 2
     $capabilities=Get-CpvPreparationCapabilities
@@ -72,21 +79,30 @@ try {
         foreach($name in 'requestId','taskId','workflowId','attemptId','runId','status','failureCode') {if($status.$name -cne $receipt.$name){throw "Protected preparation status changed during upgrade: $name"}}
         if(!(Test-CpvPreparationUpgradeEvidenceSnapshot -Before $evidenceSnapshot -EvidenceRoot $activeRoot -RunDirectory $upgrade.RunDirectory)){throw 'Protected preparation evidence changed during upgrade.'}
     }
-    $null=Complete-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token;$token=$null
+    $null=Complete-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token;$token=$null;$journalLease=$null
     $capabilities|ConvertTo-Json
 } catch {
     $failure=$_
-    Stop-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction SilentlyContinue
-    $process=Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue
-    if($process -and $process.Path -ieq $contract.Executable){Stop-Process -InputObject $process -Force}
-    if($token){Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token|Out-Null}
-    elseif($upgrade -and $installAttempted){
-        $targetIntegrity=Get-RepatoQaLaunchAgentRuntimeIntegrity $contract.InstallRoot ([pscustomobject]@{files=$upgrade.PriorFiles})
-        $restoredTask=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction SilentlyContinue
-        $restoredTaskValid=$false;if($restoredTask){$restoredTaskValid=& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($task) Test-TaskSpec $task} $restoredTask}
-        if(@($targetIntegrity|Where-Object {!$_.Match}).Count -or !$restoredTaskValid){throw 'Rollback token is unavailable and prior runtime/task could not be verified; scheduled task remains stopped.'}
+    $durableRecoveryHandled=$false
+    if($token -and $token.DurableJournal){Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token|Out-Null;$durableRecoveryHandled=$true}
+    elseif($journalLease){
+        try{& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($lease,$context) Invoke-InstallJournalRecoveryCore $lease $context} $journalLease (& (Get-Module Repato.QaLaunchAgent.Bootstrap) { New-RealBootstrapContext })|Out-Null}
+        finally{& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($lease) Close-InstallJournalLease $lease} $journalLease}
+        $durableRecoveryHandled=$true
     }
-    Start-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName
+    if(!$durableRecoveryHandled){
+        Stop-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction SilentlyContinue
+        $process=Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue
+        if($process -and $process.Path -ieq $contract.Executable){Stop-Process -InputObject $process -Force}
+        if($token){Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token|Out-Null}
+        elseif($upgrade -and $installAttempted){
+            $targetIntegrity=Get-RepatoQaLaunchAgentRuntimeIntegrity $contract.InstallRoot ([pscustomobject]@{files=$upgrade.PriorFiles})
+            $restoredTask=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction SilentlyContinue
+            $restoredTaskValid=$false;if($restoredTask){$restoredTaskValid=& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($task) Test-TaskSpec $task} $restoredTask}
+            if(@($targetIntegrity|Where-Object {!$_.Match}).Count -or !$restoredTaskValid){throw 'Rollback token is unavailable and prior runtime/task could not be verified; scheduled task remains stopped.'}
+        }
+        Start-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName
+    }
     if($upgrade -and !(Test-CpvPreparationUpgradeEvidenceSnapshot -Before $evidenceSnapshot -EvidenceRoot $activeRoot -RunDirectory $upgrade.RunDirectory)){throw 'Protected preparation evidence changed during rollback.'}
     throw $failure
 }

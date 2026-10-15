@@ -224,6 +224,28 @@ function New-RealBootstrapContext {
             if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
             [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;Principal=$t.Principal.UserId;PrincipalResolvedSid=(Resolve-RepatoAccountSid $t.Principal.UserId);Sid=$script:Contract.Sid;LogonType=[string]$t.Principal.LogonType;RunLevel=[string]$t.Principal.RunLevel;TriggerType=if($g.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'){'Logon'}else{$g.CimClass.CimClassName};TriggerUser=$g.UserId;TriggerResolvedSid=(Resolve-RepatoAccountSid $g.UserId);Execute=$a.Execute;Arguments=[string]$a.Arguments;WorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval}
         }
+        GetTaskState = { $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue; if($t){$t.State.ToString()}else{'Absent'} }
+        StopTask = { Stop-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue }
+        StartTask = { Start-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction Stop }
+        GetProcesses = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name='Repato.QaLaunchAgent.exe'" -ErrorAction Stop) }
+        GetProductVersion = { param($path) (Get-Item -LiteralPath $path -ErrorAction Stop).VersionInfo.ProductVersion }
+        StopProcesses = { param($processes)
+            foreach($item in @($processes)){
+                if($item.ExecutablePath -ine $script:Contract.Executable -or !$item.ProcessId){throw 'A same-name process has an unexpected executable identity; refusing to stop it.'}
+                $owner=Invoke-CimMethod -InputObject $item -MethodName GetOwner -ErrorAction Stop
+                if($owner.ReturnValue -ne 0){throw 'Launch Agent process owner could not be verified.'}
+                $ownerSid=([Security.Principal.NTAccount]($owner.Domain+'\'+$owner.User)).Translate([Security.Principal.SecurityIdentifier]).Value
+                if($ownerSid -cne $script:Contract.Sid){throw 'Launch Agent process owner is not the fixed RepatoQA identity.'}
+                $current=Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($item.ProcessId)" -ErrorAction Stop
+                if(!$current -or $current.ExecutablePath -ine $script:Contract.Executable -or $current.CreationDate -ne $item.CreationDate){throw 'Launch Agent process identity changed before stop.'}
+                $process=Get-Process -Id ([int]$item.ProcessId) -ErrorAction Stop
+                if($process.Path -ine $script:Contract.Executable){throw 'Launch Agent process path changed before stop.'}
+                Stop-Process -InputObject $process -Force -Confirm:$false -ErrorAction Stop
+                $deadline=(Get-Date).AddSeconds(20)
+                while((Get-Process -Id ([int]$item.ProcessId) -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 100}
+                if(Get-Process -Id ([int]$item.ProcessId) -ErrorAction SilentlyContinue){throw 'Verified Launch Agent process did not exit after stop.'}
+            }
+        }
         GetTaskSnapshot = {
             $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue
             if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
@@ -241,6 +263,173 @@ function New-RealBootstrapContext {
         RestoreTask = { param($xml) if($xml){Register-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -Xml $xml -Force|Out-Null}else{Unregister-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -Confirm:$false -ErrorAction SilentlyContinue} }
         RemoveTask = { Unregister-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -Confirm:$false -ErrorAction SilentlyContinue }
     }
+}
+
+function Get-InstallJournalPayload($Journal) {
+    [ordered]@{schemaVersion=[int]$Journal.schemaVersion;transactionId=[string]$Journal.transactionId;generation=[long]$Journal.generation;state=[string]$Journal.state;targetRoot=[string]$Journal.targetRoot;journalPath=[string]$Journal.journalPath;stageRoot=[string]$Journal.stageRoot;backupRoot=[string]$Journal.backupRoot;failedRoot=[string]$Journal.failedRoot;hadTarget=[bool]$Journal.hadTarget;priorVersion=[string]$Journal.priorVersion;priorFiles=@($Journal.priorFiles|ForEach-Object{[ordered]@{name=[string]$_.name;sha256=[string]$_.sha256}});priorTaskXml=[string]$Journal.priorTaskXml;priorTaskSha256=[string]$Journal.priorTaskSha256;priorTaskState=[string]$Journal.priorTaskState;taskPresent=[bool]$Journal.taskPresent;requestId=[string]$Journal.requestId;taskId=[string]$Journal.taskId;candidateVersion=[string]$Journal.candidateVersion;candidateManifestSha256=[string]$Journal.candidateManifestSha256;candidateFiles=@($Journal.candidateFiles|ForEach-Object{[ordered]@{name=[string]$_.name;sha256=[string]$_.sha256}})}
+}
+
+function Get-InstallJournalHash($Journal) {
+    $json=ConvertTo-Json -InputObject (Get-InstallJournalPayload $Journal) -Depth 12 -Compress
+    $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','')}finally{$sha.Dispose()}
+}
+
+function Write-InstallJournal($Journal) {
+    $tmp=$Journal.journalPath+'.'+$Journal.transactionId+'.'+$Journal.generation+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    $Journal.journalSha256=Get-InstallJournalHash $Journal
+    $json=ConvertTo-Json -InputObject ([ordered]@{schemaVersion=$Journal.schemaVersion;transactionId=$Journal.transactionId;generation=$Journal.generation;state=$Journal.state;targetRoot=$Journal.targetRoot;journalPath=$Journal.journalPath;stageRoot=$Journal.stageRoot;backupRoot=$Journal.backupRoot;failedRoot=$Journal.failedRoot;hadTarget=$Journal.hadTarget;priorVersion=$Journal.priorVersion;priorFiles=$Journal.priorFiles;priorTaskXml=$Journal.priorTaskXml;priorTaskSha256=$Journal.priorTaskSha256;priorTaskState=$Journal.priorTaskState;taskPresent=$Journal.taskPresent;requestId=$Journal.requestId;taskId=$Journal.taskId;candidateVersion=$Journal.candidateVersion;candidateManifestSha256=$Journal.candidateManifestSha256;candidateFiles=$Journal.candidateFiles;journalSha256=$Journal.journalSha256}) -Depth 12
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes($json)
+    $stream=[IO.FileStream]::new($tmp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+    if(Test-Path -LiteralPath $Journal.journalPath){$previous=$Journal.journalPath+'.'+$Journal.transactionId+'.'+([long]$Journal.generation-1)+'.previous';if(Test-Path -LiteralPath $previous){throw 'Install-journal history destination already exists.'};[IO.File]::Replace($tmp,$Journal.journalPath,$previous,$true)}else{[IO.File]::Move($tmp,$Journal.journalPath)}
+    $Journal
+}
+
+function Assert-InstallJournalUniqueProperties([string]$Json) {
+    $depth=0;$inString=$false;$escaped=$false;$start=-1;$seenByDepth=@{}
+    for($i=0;$i -lt $Json.Length;$i++){
+        $ch=$Json[$i]
+        if($inString){if($escaped){$escaped=$false}elseif($ch -eq '\'){$escaped=$true}elseif($ch -eq '"'){$inString=$false;$j=$i+1;while($j -lt $Json.Length -and [char]::IsWhiteSpace($Json[$j])){$j++};if($j -lt $Json.Length -and $Json[$j] -eq ':'){$key=$Json.Substring($start+1,$i-$start-1);if($depth -lt 1 -or $key.Contains('\') -or $seenByDepth[$depth].ContainsKey($key)){throw 'Install journal has duplicate or escaped property names.'};$seenByDepth[$depth][$key]=$true}};continue}
+        if($ch -eq '"'){$inString=$true;$start=$i;continue};if($ch -eq '{'){$depth++;$seenByDepth[$depth]=@{}}elseif($ch -eq '}'){$seenByDepth.Remove($depth);$depth--}
+    }
+    if($inString -or $depth -ne 0){throw 'Install journal JSON is incomplete.'}
+}
+
+function Read-InstallJournal([string]$JournalPath,[string]$TargetRoot,[switch]$AllowTestRoot) {
+    $target=[IO.Path]::GetFullPath($TargetRoot).TrimEnd('\\');$expectedTarget=[IO.Path]::GetFullPath($script:Contract.InstallRoot).TrimEnd('\\')
+    if(!$AllowTestRoot -and $target -cne $expectedTarget){throw 'Install-journal target is not the fixed protected root.'}
+    $expectedPath=Join-Path (Split-Path $target -Parent) '.QaLaunchAgent.install-journal.json'
+    if([IO.Path]::GetFullPath($JournalPath) -ine [IO.Path]::GetFullPath($expectedPath)){throw 'Install-journal path is not the fixed sibling of the target.'}
+    if(!(Test-Path -LiteralPath $JournalPath -PathType Leaf)){throw 'Install journal is missing; preserve all evidence for manual review.'}
+    $raw=Get-Content -LiteralPath $JournalPath -Raw;Assert-InstallJournalUniqueProperties $raw
+    $j=$raw|ConvertFrom-Json
+    $expectedNames=@('schemaVersion','transactionId','generation','state','targetRoot','journalPath','stageRoot','backupRoot','failedRoot','hadTarget','priorVersion','priorFiles','priorTaskXml','priorTaskSha256','priorTaskState','taskPresent','requestId','taskId','candidateVersion','candidateManifestSha256','candidateFiles','journalSha256')
+    if(@($j.PSObject.Properties.Name|Sort-Object) -join '|' -cne (@($expectedNames|Sort-Object) -join '|')){throw 'Install journal schema is incomplete or contains unknown fields.'}
+    $tx=[guid]::Empty;if($j.schemaVersion -ne 1 -or ![guid]::TryParseExact([string]$j.transactionId,'N',[ref]$tx) -or $tx -eq [guid]::Empty -or $j.generation -lt 1 -or $j.state -notin @('Prepared','CandidateStaged','ServiceStopPending','ServiceStopped','BackupMovePending','BackupVerified','ReplacementPending','FilesReplaced','TaskUpdatePending','TaskUpdated','HealthVerificationPending','CommitPending','Committed','RollbackPending','RolledBack')){throw 'Install journal version, generation, or state is invalid.'}
+    if([IO.Path]::GetFullPath($j.targetRoot).TrimEnd('\\') -ine $target -or [IO.Path]::GetFullPath($j.journalPath) -ine [IO.Path]::GetFullPath($JournalPath)){throw 'Install journal target identity mismatch.'}
+    $parent=Split-Path $target -Parent;$expectedStage=Join-Path $parent ('.QaLaunchAgent.stage.'+$j.transactionId);$expectedBackup=Join-Path $parent ('.QaLaunchAgent.backup.'+$j.transactionId);$expectedFailed=Join-Path $parent ('.QaLaunchAgent.failed.'+$j.transactionId)
+    foreach($pair in @(@($j.stageRoot,$expectedStage),@($j.backupRoot,$expectedBackup),@($j.failedRoot,$expectedFailed))){if([IO.Path]::GetFullPath($pair[0]) -ine [IO.Path]::GetFullPath($pair[1])){throw 'Install journal contains an unsafe sibling path.'}}
+    foreach($set in @(@($j.priorFiles),@($j.candidateFiles))){$names=@($set|ForEach-Object name);if($names.Count -ne $script:Contract.RuntimeFiles.Count -or $names.Count -ne @($names|Select-Object -Unique).Count -or @($script:Contract.RuntimeFiles|Where-Object{$_ -cnotin $names}).Count -or @($set|Where-Object{$_.sha256 -notmatch '^[A-Fa-f0-9]{64}'}).Count){throw 'Install journal file inventory is incomplete or invalid.'}}
+    if(!$j.hadTarget -and @($j.priorFiles).Count -or $j.hadTarget -and @($j.priorFiles).Count -ne $script:Contract.RuntimeFiles.Count){throw 'Install journal prior runtime presence does not match its hash inventory.'}
+    if([string]::IsNullOrWhiteSpace([string]$j.priorVersion) -or (!$AllowTestRoot -and [string]$j.priorVersion -cne '1.0.17+4b0066247088')){throw 'Install journal prior release identity is invalid.'}
+    if($j.taskPresent -and (!$j.priorTaskXml -or $j.priorTaskSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or (Get-InstallJournalTextHash ([string]$j.priorTaskXml)) -ine $j.priorTaskSha256 -or $j.priorTaskState -notin @('Ready','Running','Disabled'))){throw 'Install journal prior scheduled-task evidence is invalid.'}
+    if(!$j.taskPresent -and ($j.priorTaskXml -or $j.priorTaskSha256)){throw 'Install journal has unexpected prior task evidence.'}
+    if($j.requestId -cne '9953e14c15524fe09440d1c7d7353950' -or $j.taskId -cne 'task-bf61fe7f22d74df7a92599681da5919e' -or !$j.taskPresent){throw 'Install journal request/task identity or prior task presence mismatch.'}
+    if($j.candidateManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $j.candidateVersion -notmatch '^1\.0\.18\+[A-Fa-f0-9]{12,40}$'){throw 'Install journal candidate identity is invalid.'}
+    if((Get-InstallJournalHash $j) -ine $j.journalSha256){throw 'Install journal integrity hash mismatch; preserve all evidence for manual review.'}
+    $j
+}
+
+function Get-InstallJournalTextHash([string]$Value) { $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value)))).Replace('-','')}finally{$sha.Dispose()} }
+
+function Set-InstallJournalState($Journal,[string]$State) {
+    $allowed=@{Prepared=@('CandidateStaged','RollbackPending');CandidateStaged=@('ServiceStopPending','RollbackPending');ServiceStopPending=@('ServiceStopped','RollbackPending');ServiceStopped=@('BackupMovePending','RollbackPending');BackupMovePending=@('BackupVerified','RollbackPending');BackupVerified=@('ReplacementPending','RollbackPending');ReplacementPending=@('FilesReplaced','RollbackPending');FilesReplaced=@('TaskUpdatePending','RollbackPending');TaskUpdatePending=@('TaskUpdated','RollbackPending');TaskUpdated=@('HealthVerificationPending','RollbackPending');HealthVerificationPending=@('CommitPending','RollbackPending');CommitPending=@('Committed','RollbackPending');RollbackPending=@('RolledBack');Committed=@();RolledBack=@()}
+    if($State -notin @($allowed[[string]$Journal.state])){throw "Invalid install-journal transition: $($Journal.state) -> $State"}
+    $Journal.generation=[long]$Journal.generation+1;$Journal.state=$State;Write-InstallJournal $Journal
+}
+
+function Test-InstallJournalFileSet([string]$Root,$ExpectedFiles) {
+    if(!(Test-Path -LiteralPath $Root -PathType Container)){return $false}
+    $directory=Get-Item -LiteralPath $Root -Force;if(($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return $false}
+    $items=@(Get-ChildItem -LiteralPath $Root -Force);if($items.Count -ne $script:Contract.RuntimeFiles.Count -or @($items|Where-Object{$_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $_.Name -cnotin $script:Contract.RuntimeFiles}).Count){return $false}
+    $integrity=Get-RepatoQaLaunchAgentRuntimeIntegrity $Root ([pscustomobject]@{files=$ExpectedFiles});@($integrity|Where-Object{!$_.Match}).Count -eq 0
+}
+
+function New-InstallJournalCore($Validated,$Context,[string]$TargetRoot,$JournalIdentity,[switch]$AllowTestRoot) {
+    & $Context.IsAdministrator;& $Context.ResolveIdentity $script:Contract.Account $script:Contract.Sid
+    $target=[IO.Path]::GetFullPath($TargetRoot).TrimEnd('\\');if(!$AllowTestRoot -and $target -cne [IO.Path]::GetFullPath($script:Contract.InstallRoot).TrimEnd('\\')){throw 'Install-journal target must be the fixed protected install root.'}
+    if(!$JournalIdentity -or $JournalIdentity.RequestId -cne '9953e14c15524fe09440d1c7d7353950' -or $JournalIdentity.TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e'){throw 'Durable CPV journal identity is not the fixed approved request.'}
+    $parent=Split-Path $target -Parent;New-Item -ItemType Directory -Path $parent -Force|Out-Null;$path=Join-Path $parent '.QaLaunchAgent.install-journal.json';$lockPath=$path+'.lock'
+    $lock=[IO.FileStream]::new($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
+        if(Test-Path -LiteralPath $path){$old=Read-InstallJournal $path $target -AllowTestRoot:$AllowTestRoot;if($old.state -notin @('Committed','RolledBack')){throw 'An interrupted Launch Agent install must be recovered before another install.'};if($old.state -eq 'Committed' -and (!(Test-InstallJournalFileSet $target $old.candidateFiles) -or !(Test-TaskSpec (& $Context.GetTask)) -or !(Test-InstallJournalFileSet $old.backupRoot $old.priorFiles))){throw 'Committed journal does not match installed runtime/task/rollback copy; manual intervention required.'};if($old.state -eq 'RolledBack' -and ($old.hadTarget -and !(Test-InstallJournalFileSet $target $old.priorFiles) -or !(Test-TaskSpec (& $Context.GetTask)))){throw 'Rolled-back journal does not match restored runtime/task; manual intervention required.'};$archive=Join-Path $parent ('.QaLaunchAgent.install-journal.'+$old.transactionId+'.json');if(Test-Path -LiteralPath $archive){throw 'Install-journal archive destination already exists.'};[IO.File]::Move($path,$archive)}
+        $task=& $Context.GetTask;$taskPresent=$null -ne $task;$taskXml=if($taskPresent){[string](& $Context.ExportTask $task)}else{''};if($taskPresent -and !$taskXml){throw 'Prior scheduled-task XML could not be preserved.'}
+        $state=if($Context.PSObject.Properties.Name -contains 'GetTaskState'){[string](& $Context.GetTaskState)}elseif($taskPresent){'Ready'}else{'Absent'}
+        if(!$taskPresent -or $state -notin @('Ready','Running','Disabled')){throw 'Prior scheduled-task presence or state is not recoverable.'}
+        if(!(Test-TaskSpec $task)){throw 'Prior scheduled task does not match the fixed Launch Agent contract.'}
+        $had=Test-Path -LiteralPath $target -PathType Container;if(!$had){throw 'Durable CPV upgrade requires a complete prior runtime.'}
+        $priorVersion=if($Context.PSObject.Properties.Name -contains 'GetProductVersion'){[string](& $Context.GetProductVersion (Join-Path $target 'Repato.QaLaunchAgent.exe'))}else{[string](Get-Item -LiteralPath (Join-Path $target 'Repato.QaLaunchAgent.exe')).VersionInfo.ProductVersion}
+        $priorDllVersion=if($Context.PSObject.Properties.Name -contains 'GetProductVersion'){[string](& $Context.GetProductVersion (Join-Path $target 'Repato.QaLaunchAgent.dll'))}else{[string](Get-Item -LiteralPath (Join-Path $target 'Repato.QaLaunchAgent.dll')).VersionInfo.ProductVersion}
+        if(!$priorVersion -or $priorVersion -cne $priorDllVersion -or (!$AllowTestRoot -and $priorVersion -cne '1.0.17+4b0066247088')){throw 'Prior executable and DLL do not prove the expected installed release identity.'}
+        $prior=@(foreach($name in $script:Contract.RuntimeFiles){$file=Join-Path $target $name;if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw "Prior runtime is incomplete: $name"};[pscustomobject]@{name=$name;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}})
+        if(!(Test-InstallJournalFileSet $target $prior)){throw 'Prior runtime has unexpected files or failed integrity validation.'}
+        $id=[guid]::NewGuid().ToString('N');$journal=[pscustomobject][ordered]@{schemaVersion=1;transactionId=$id;generation=[long]1;state='Prepared';targetRoot=$target;journalPath=$path;stageRoot=(Join-Path $parent ('.QaLaunchAgent.stage.'+$id));backupRoot=(Join-Path $parent ('.QaLaunchAgent.backup.'+$id));failedRoot=(Join-Path $parent ('.QaLaunchAgent.failed.'+$id));hadTarget=$had;priorVersion=$priorVersion;priorFiles=$prior;priorTaskXml=$taskXml;priorTaskSha256=if($taskPresent){Get-InstallJournalTextHash $taskXml}else{''};priorTaskState=$state;taskPresent=$taskPresent;requestId=if($JournalIdentity){[string]$JournalIdentity.RequestId}else{''};taskId=if($JournalIdentity){[string]$JournalIdentity.TaskId}else{''};candidateVersion=[string]$Validated.Manifest.productVersion;candidateManifestSha256=[string]$Validated.ManifestSha256;candidateFiles=@($Validated.Manifest.files|ForEach-Object{[pscustomobject]@{name=$_.name;sha256=$_.sha256}});journalSha256=''}
+        Write-InstallJournal $journal|Out-Null
+        New-Item -ItemType Directory -Path $journal.stageRoot|Out-Null
+        foreach($entry in $Validated.Manifest.files){Copy-Item -LiteralPath (Join-Path $Validated.SourceRoot $entry.name) -Destination (Join-Path $journal.stageRoot $entry.name)}
+        & $Context.PrepareAcl $journal.stageRoot
+        if(!(Test-InstallJournalFileSet $journal.stageRoot $journal.candidateFiles)){throw 'Staged candidate does not match its immutable manifest.'}
+        Set-InstallJournalState $journal 'CandidateStaged'|Out-Null
+        [pscustomobject]@{Data=$journal;Path=$path;Lock=$lock;TargetRoot=$target;AllowTestRoot=[bool]$AllowTestRoot;Context=$Context;Closed=$false}
+    } catch {$lock.Dispose();throw}
+}
+
+function Close-InstallJournalLease($Lease) { if($Lease -and !$Lease.Closed){$Lease.Lock.Dispose();$Lease.Closed=$true} }
+
+function Get-InstallJournal($Lease) {
+    if(!$Lease -or !$Lease.Lock -or !$Lease.Lock.CanWrite){throw 'Install journal lease is not held.'}
+    $disk=Read-InstallJournal $Lease.Path $Lease.TargetRoot -AllowTestRoot:$Lease.AllowTestRoot
+    if($disk.transactionId -cne $Lease.Data.transactionId -or $disk.generation -ne $Lease.Data.generation -or $disk.journalSha256 -cne $Lease.Data.journalSha256){throw 'Install journal changed during transaction.'}
+    $Lease.Data
+}
+
+function Invoke-InstallJournalRecoveryCore($Lease,$Context,[scriptblock]$ProcessDetector) {
+    $j=Get-InstallJournal $Lease
+    if($j.state -eq 'Committed'){if(!(Test-InstallJournalFileSet $j.targetRoot $j.candidateFiles) -or !(Test-TaskSpec (& $Context.GetTask)) -or !(Test-InstallJournalFileSet $j.backupRoot $j.priorFiles)){throw 'Committed install or retained rollback copy does not match journal evidence; manual intervention required.'};return [pscustomobject]@{Status='Committed';Recovered=$false;JournalPath=$Lease.Path;RetainedBackup=$j.backupRoot}}
+    if($j.state -eq 'RolledBack'){if($j.hadTarget -and !(Test-InstallJournalFileSet $j.targetRoot $j.priorFiles)){throw 'Rolled-back install does not match prior runtime evidence.'};return [pscustomobject]@{Status='RolledBack';Recovered=$false;JournalPath=$Lease.Path}}
+    if(!$ProcessDetector){$ProcessDetector={if($Context.PSObject.Properties.Name -contains 'GetProcesses'){@(& $Context.GetProcesses)}else{@(Get-Process -Name Repato.QaLaunchAgent -ErrorAction Stop)}}}
+    $activeProcesses=& $ProcessDetector
+    $currentTask=& $Context.GetTask;if($currentTask -and !(Test-TaskSpec $currentTask)){throw 'Current scheduled-task contract is ambiguous; preserve journal for manual intervention.'}
+    if($j.state -ne 'RollbackPending'){Set-InstallJournalState $j 'RollbackPending'|Out-Null}
+    if($Context.PSObject.Properties.Name -contains 'StopTask'){& $Context.StopTask}
+    $activeProcesses=& $ProcessDetector
+    if($activeProcesses){if($Context.PSObject.Properties.Name -notcontains 'StopProcesses'){throw 'Launch Agent process remains active and no verified stop boundary is available.'};& $Context.StopProcesses $activeProcesses}
+    if(& $ProcessDetector){throw 'Launch Agent process remains active after exact-process stop; manual intervention required.'}
+    $priorAtTarget=if($j.hadTarget){Test-InstallJournalFileSet $j.targetRoot $j.priorFiles}else{!(Test-Path -LiteralPath $j.targetRoot)}
+    $backupValid=if($j.hadTarget){Test-InstallJournalFileSet $j.backupRoot $j.priorFiles}else{$false}
+    if(!$priorAtTarget -and !$backupValid){throw 'Neither installed target nor retained backup proves the prior runtime; manual recovery required.'}
+    if(!$priorAtTarget){
+        if(Test-Path -LiteralPath $j.targetRoot){
+            $targetItem=Get-Item -LiteralPath $j.targetRoot -Force;if(($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Install target is a reparse point; manual recovery required.'}
+            if(Test-Path -LiteralPath $j.failedRoot){throw 'Failed-runtime evidence path already exists; manual recovery required.'}
+            Move-Item -LiteralPath $j.targetRoot -Destination $j.failedRoot
+        }
+        if($j.hadTarget){Move-Item -LiteralPath $j.backupRoot -Destination $j.targetRoot}
+    }
+    if($j.taskPresent){& $Context.RestoreTask $j.priorTaskXml;if(!(Test-TaskSpec (& $Context.GetTask))){throw 'Prior scheduled task could not be verified after restore.'};$restoredState=if($Context.PSObject.Properties.Name -contains 'GetTaskState'){[string](& $Context.GetTaskState)}else{'Unknown'};if($j.priorTaskState -ceq 'Running' -and $restoredState -cne 'Running' -and $Context.PSObject.Properties.Name -contains 'StartTask'){& $Context.StartTask}}
+    else {& $Context.RestoreTask ''}
+    if($j.hadTarget -and !(Test-InstallJournalFileSet $j.targetRoot $j.priorFiles)){throw 'Restored prior runtime failed hashes; journal retained for manual recovery.'}
+    Set-InstallJournalState $j 'RolledBack'|Out-Null
+    [pscustomobject]@{Status='RolledBack';Recovered=$true;JournalPath=$Lease.Path;RestoredVersion=$j.priorTaskState;RetainedFailedRuntime=$j.failedRoot}
+}
+
+function Open-InstallJournalLease([string]$TargetRoot,[switch]$AllowTestRoot) {
+    $target=[IO.Path]::GetFullPath($TargetRoot).TrimEnd('\');$path=Join-Path (Split-Path $target -Parent) '.QaLaunchAgent.install-journal.json';$lockPath=$path+'.lock'
+    $lock=[IO.FileStream]::new($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try{$data=Read-InstallJournal $path $target -AllowTestRoot:$AllowTestRoot;[pscustomobject]@{Data=$data;Path=$path;Lock=$lock;TargetRoot=$target;AllowTestRoot=[bool]$AllowTestRoot;Closed=$false}}catch{$lock.Dispose();throw}
+}
+
+function New-RepatoQaLaunchAgentBootstrapInstallJournal {
+    [CmdletBinding()]param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ManifestPath,[Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ManifestSha256,[Parameter(Mandatory)][string]$RequestId,[Parameter(Mandatory)][string]$TaskId)
+    Assert-Administrator;Assert-Identity $script:Contract.Account $script:Contract.Sid
+    if($RequestId -cne '9953e14c15524fe09440d1c7d7353950' -or $TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e'){throw 'Durable installation journal is restricted to the approved CPV request identity.'}
+    $v=Read-ValidatedManifest $SourceRoot $ManifestPath $ManifestSha256.ToUpperInvariant()
+    New-InstallJournalCore $v (New-RealBootstrapContext) $script:Contract.InstallRoot ([pscustomobject]@{RequestId=$RequestId;TaskId=$TaskId})
+}
+
+function Set-RepatoQaLaunchAgentBootstrapInstallHealthVerification {
+    [CmdletBinding()]param([Parameter(Mandatory)]$JournalLease)
+    $j=Get-InstallJournal $JournalLease
+    if($j.state -cne 'TaskUpdated'){throw 'Health verification can begin only after the task update is verified.'}
+    Set-InstallJournalState $j 'HealthVerificationPending'|Out-Null
+}
+
+function Recover-RepatoQaLaunchAgentBootstrapInstall {
+    [CmdletBinding()]param([Parameter(Mandatory)][string]$RequestId,[Parameter(Mandatory)][string]$TaskId)
+    Assert-Administrator;Assert-Identity $script:Contract.Account $script:Contract.Sid
+    if($RequestId -cne '9953e14c15524fe09440d1c7d7353950' -or $TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e'){throw 'Recovery request identity does not match the approved CPV attempt.'}
+    $lease=Open-InstallJournalLease $script:Contract.InstallRoot
+    try{if($lease.Data.requestId -cne $RequestId -or $lease.Data.taskId -cne $TaskId){throw 'Install journal is bound to a different request.'};Invoke-InstallJournalRecoveryCore $lease (New-RealBootstrapContext)}finally{Close-InstallJournalLease $lease}
 }
 
 function New-RealSnapshotRecoveryContext {
@@ -266,25 +455,26 @@ function Restore-RepatoQaLaunchAgentSnapshot {
     }
 }
 
-function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$AllowTestRoot,[scriptblock]$ProcessDetector,[switch]$RetainRollback) {
+function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$AllowTestRoot,[scriptblock]$ProcessDetector,[switch]$RetainRollback,$DurableJournal) {
     & $Context.IsAdministrator
     & $Context.ResolveIdentity $script:Contract.Account $script:Contract.Sid
     if (-not $AllowTestRoot -and [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\') -cne $script:Contract.InstallRoot) { throw 'Install root must be the fixed protected Program Files path.' }
     if (-not $ProcessDetector) { $ProcessDetector = { Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue } }
     if (& $ProcessDetector) { throw 'Refusing update while the launch agent is running.' }
     $parent=Split-Path $TargetRoot -Parent; New-Item -ItemType Directory -Path $parent -Force|Out-Null
-    $stage=Join-Path $parent ('.QaLaunchAgent.stage.'+[guid]::NewGuid().ToString('N')); $backup=Join-Path $parent ('.QaLaunchAgent.backup.'+[guid]::NewGuid().ToString('N'))
+    if($DurableJournal){$j=Get-InstallJournal $DurableJournal;if($j.state -cne 'ServiceStopped' -or [IO.Path]::GetFullPath($j.targetRoot).TrimEnd('\') -ine [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\')){throw 'Durable journal is not at the verified stopped-service boundary.'};$stage=$j.stageRoot;$backup=$j.backupRoot}
+    else{$stage=Join-Path $parent ('.QaLaunchAgent.stage.'+[guid]::NewGuid().ToString('N')); $backup=Join-Path $parent ('.QaLaunchAgent.backup.'+[guid]::NewGuid().ToString('N'))}
     $oldTask=& $Context.GetTask; $oldXml=& $Context.ExportTask $oldTask
     $hadTarget=Test-Path -LiteralPath $TargetRoot
     $oldFiles=@()
     if($hadTarget){foreach($name in $script:Contract.RuntimeFiles){$path=Join-Path $TargetRoot $name;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Existing runtime is incomplete: $name"};$oldFiles+= [pscustomobject]@{name=$name;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}}}
     try {
-        New-Item -ItemType Directory -Path $stage|Out-Null
-        foreach($e in $Validated.Manifest.files){Copy-Item -LiteralPath (Join-Path $Validated.SourceRoot $e.name) -Destination (Join-Path $stage $e.name)}
-        & $Context.PrepareAcl $stage
-        foreach($e in $Validated.Manifest.files){if((Get-FileHash -LiteralPath (Join-Path $stage $e.name) -Algorithm SHA256).Hash -cne $e.sha256){throw "Staged hash mismatch: $($e.name)"}}
+        if(!$DurableJournal){New-Item -ItemType Directory -Path $stage|Out-Null;foreach($e in $Validated.Manifest.files){Copy-Item -LiteralPath (Join-Path $Validated.SourceRoot $e.name) -Destination (Join-Path $stage $e.name)};& $Context.PrepareAcl $stage;foreach($e in $Validated.Manifest.files){if((Get-FileHash -LiteralPath (Join-Path $stage $e.name) -Algorithm SHA256).Hash -cne $e.sha256){throw "Staged hash mismatch: $($e.name)"}}}
+        else {if(!(Test-InstallJournalFileSet $stage $j.candidateFiles)){throw 'Durably staged candidate failed its manifest hashes.'};Set-InstallJournalState $j 'BackupMovePending'|Out-Null}
         if($hadTarget){Move-Item -LiteralPath $TargetRoot -Destination $backup}
+        if($DurableJournal){if(!(Test-InstallJournalFileSet $backup $j.priorFiles)){throw 'Moved prior runtime failed journal hashes.'};Set-InstallJournalState $j 'BackupVerified'|Out-Null;Set-InstallJournalState $j 'ReplacementPending'|Out-Null}
         Move-Item -LiteralPath $stage -Destination $TargetRoot
+        if($DurableJournal){if(!(Test-InstallJournalFileSet $TargetRoot $j.candidateFiles)){throw 'Replaced runtime failed candidate hashes.'};Set-InstallJournalState $j 'FilesReplaced'|Out-Null;Set-InstallJournalState $j 'TaskUpdatePending'|Out-Null}
         & $Context.SetTask (New-TaskSpec)
         $actual=& $Context.GetTask
         $snapshot=if($Context.PSObject.Properties.Name -contains 'GetTaskSnapshot'){& $Context.GetTaskSnapshot}else{$actual}
@@ -293,12 +483,14 @@ function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$All
             $report=Write-RepatoQaLaunchAgentDiagnostics $snapshot $comparison (Get-RepatoQaLaunchAgentRuntimeIntegrity $TargetRoot $Validated.Manifest) 'Registered scheduled task does not match the security contract.'
             throw "Registered scheduled task does not match the security contract. Diagnostic report: $report"
         }
+        if($DurableJournal){Set-InstallJournalState $j 'TaskUpdated'|Out-Null}
         foreach($e in $Validated.Manifest.files){if((Get-FileHash -LiteralPath (Join-Path $TargetRoot $e.name) -Algorithm SHA256).Hash -cne $e.sha256){throw "Installed hash mismatch: $($e.name)"}}
         $token=$null
-        if($RetainRollback){$token=[pscustomobject]@{Id=[guid]::NewGuid().ToString('N');TargetRoot=[IO.Path]::GetFullPath($TargetRoot);BackupRoot=if(Test-Path -LiteralPath $backup){$backup}else{$null};PriorFiles=$oldFiles;InstalledFiles=@($Validated.Manifest.files);OldTaskXml=$oldXml;Updated=$hadTarget;CleanupRoot=$null;Restored=$false};$script:PendingInstallRollbacks[$token.Id]=$token}
+        if($RetainRollback){$token=[pscustomobject]@{Id=[guid]::NewGuid().ToString('N');TargetRoot=[IO.Path]::GetFullPath($TargetRoot);BackupRoot=if(Test-Path -LiteralPath $backup){$backup}else{$null};PriorFiles=$oldFiles;InstalledFiles=@($Validated.Manifest.files);OldTaskXml=$oldXml;Updated=$hadTarget;CleanupRoot=$null;Restored=$false;DurableJournal=$DurableJournal};$script:PendingInstallRollbacks[$token.Id]=$token}
         elseif(Test-Path -LiteralPath $backup){Remove-Item -LiteralPath $backup -Recurse -Force}
         [pscustomobject]@{Installed=$true;Updated=$hadTarget;Task=(New-TaskSpec);ProductVersion=$Validated.Manifest.productVersion;ManifestSha256=$Validated.ManifestSha256;RollbackToken=$token}
     } catch {
+        if($DurableJournal){throw}
         & $Context.RestoreTask $oldXml
         if(Test-Path -LiteralPath $TargetRoot){Remove-Item -LiteralPath $TargetRoot -Recurse -Force}
         if(Test-Path -LiteralPath $backup){Move-Item -LiteralPath $backup -Destination $TargetRoot}
@@ -319,6 +511,7 @@ function Assert-InstallRollbackToken($Token,[string]$TargetRoot,[switch]$AllowTe
 
 function Restore-InstallCore($Token,$Context,[string]$TargetRoot,[switch]$AllowTestRoot,[scriptblock]$ProcessDetector) {
     Assert-InstallRollbackToken $Token $TargetRoot -AllowTestRoot:$AllowTestRoot
+    if($Token.DurableJournal){try{$result=Invoke-InstallJournalRecoveryCore $Token.DurableJournal $Context $ProcessDetector;if($result.Status -eq 'RolledBack'){$Token.Restored=$true};return $result}finally{Close-InstallJournalLease $Token.DurableJournal}}
     if(!$ProcessDetector){$ProcessDetector={Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue}}
     if(& $ProcessDetector){throw 'Stop the Launch Agent before restoring its runtime.'}
     if($Token.Updated){
@@ -347,6 +540,7 @@ function Restore-InstallCore($Token,$Context,[string]$TargetRoot,[switch]$AllowT
 
 function Complete-InstallCore($Token,[string]$TargetRoot,[switch]$AllowTestRoot) {
     Assert-InstallRollbackToken $Token $TargetRoot -AllowTestRoot:$AllowTestRoot
+    if($Token.DurableJournal){$lease=$Token.DurableJournal;$j=Get-InstallJournal $lease;if($j.state -cne 'HealthVerificationPending' -or !(Test-InstallJournalFileSet $TargetRoot $j.candidateFiles) -or !(Test-TaskSpec (& $lease.Context.GetTask)) -or !(Test-InstallJournalFileSet $j.backupRoot $j.priorFiles)){throw 'Durable installation health or rollback evidence is incomplete.'};Set-InstallJournalState $j 'CommitPending'|Out-Null;Set-InstallJournalState $j 'Committed'|Out-Null;Close-InstallJournalLease $lease;[void]$script:PendingInstallRollbacks.Remove([string]$Token.Id);return [pscustomobject]@{Completed=$true;Committed=$true;BackupRetained=$j.backupRoot;JournalPath=$lease.Path}}
     $expected=if($Token.Restored){$Token.PriorFiles}else{$Token.InstalledFiles}
     $integrity=if(@($expected).Count){Get-RepatoQaLaunchAgentRuntimeIntegrity $TargetRoot ([pscustomobject]@{files=$expected})}else{@()}
     if(@($integrity|Where-Object{!$_.Match}).Count){throw 'Runtime changed before rollback retention could be finalized.'}
@@ -358,10 +552,10 @@ function Complete-InstallCore($Token,[string]$TargetRoot,[switch]$AllowTestRoot)
 }
 
 function Install-RepatoQaLaunchAgentBootstrap {
-    [CmdletBinding(SupportsShouldProcess)]param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ManifestPath,[Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ManifestSha256,[string]$Account=$script:Contract.Account,[string]$ExpectedSid=$script:Contract.Sid,[switch]$RetainRollback)
+    [CmdletBinding(SupportsShouldProcess)]param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ManifestPath,[Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ManifestSha256,[string]$Account=$script:Contract.Account,[string]$ExpectedSid=$script:Contract.Sid,[switch]$RetainRollback,$DurableJournal)
     Assert-Administrator; Assert-Identity $Account $ExpectedSid
     $v=Read-ValidatedManifest $SourceRoot $ManifestPath $ManifestSha256.ToUpperInvariant()
-    if($PSCmdlet.ShouldProcess($script:Contract.InstallRoot,'Atomically install launch-agent runtime and reconcile its logon task')){Invoke-InstallCore $v (New-RealBootstrapContext) $script:Contract.InstallRoot -RetainRollback:$RetainRollback}
+    if($PSCmdlet.ShouldProcess($script:Contract.InstallRoot,'Atomically install launch-agent runtime and reconcile its logon task')){Invoke-InstallCore $v (New-RealBootstrapContext) $script:Contract.InstallRoot -RetainRollback:$RetainRollback -DurableJournal $DurableJournal}
 }
 
 function Restore-RepatoQaLaunchAgentBootstrapInstall {
@@ -388,4 +582,4 @@ function Uninstall-RepatoQaLaunchAgentBootstrap {
     if($PSCmdlet.ShouldProcess($script:Contract.InstallRoot,'Remove launch-agent task and runtime')){$ctx=New-RealBootstrapContext;& $ctx.RemoveTask;if(Test-Path -LiteralPath $script:Contract.InstallRoot){Remove-Item -LiteralPath $script:Contract.InstallRoot -Recurse -Force}}
 }
 
-Export-ModuleMember -Function Get-RepatoQaLaunchAgentBootstrapContract,Install-RepatoQaLaunchAgentBootstrap,Restore-RepatoQaLaunchAgentBootstrapInstall,Restore-RepatoQaLaunchAgentSnapshot,Complete-RepatoQaLaunchAgentBootstrapInstall,Test-RepatoQaLaunchAgentBootstrap,Uninstall-RepatoQaLaunchAgentBootstrap,Get-TaskSpecComparison,Get-RepatoQaLaunchAgentRuntimeIntegrity
+Export-ModuleMember -Function Get-RepatoQaLaunchAgentBootstrapContract,Install-RepatoQaLaunchAgentBootstrap,Restore-RepatoQaLaunchAgentBootstrapInstall,Restore-RepatoQaLaunchAgentSnapshot,Complete-RepatoQaLaunchAgentBootstrapInstall,New-RepatoQaLaunchAgentBootstrapInstallJournal,Set-RepatoQaLaunchAgentBootstrapInstallHealthVerification,Recover-RepatoQaLaunchAgentBootstrapInstall,Test-RepatoQaLaunchAgentBootstrap,Uninstall-RepatoQaLaunchAgentBootstrap,Get-TaskSpecComparison,Get-RepatoQaLaunchAgentRuntimeIntegrity
