@@ -53,7 +53,9 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         }
         catch
         {
-            response = observedOperation == RcpQaLaunchPolicy.Operation
+            response = observedOperation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation
+                ? new { schemaVersion = 1, operation = observedOperation, status = "RejectedOrUnknown", failureCode = "preparation-rejected-or-reconcile-required" }
+                : observedOperation == RcpQaLaunchPolicy.Operation
                 ? new RcpQaLaunchResponse(1, RcpQaLaunchPolicy.Operation, "", "", "", RcpQaLaunchPolicy.ToolId, RcpQaLaunchPolicy.ToolId, "", "", "", false, "rejected", null, WindowsIdentity.GetCurrent().Name, WindowsIdentity.GetCurrent().User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, null, "malformed-request")
                 : new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request");
         }
@@ -74,6 +76,9 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
     {
         using var document = JsonDocument.Parse(line);
         string? operation = document.RootElement.TryGetProperty("operation", out var op) ? op.GetString() : null;
+        if (operation == CpvPreparationService.CapabilitiesOperation) return coordinator.PreparationCapabilities();
+        if (operation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation)
+            return coordinator.HandlePreparation(line, now);
         if (operation == RcpQaLaunchPolicy.Operation)
         {
             var request = JsonSerializer.Deserialize<RcpQaLaunchRequest>(line, QaLaunchPolicy.JsonOptions) ?? throw new InvalidDataException();

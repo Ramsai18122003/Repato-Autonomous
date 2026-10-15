@@ -5,6 +5,9 @@ namespace Repato.QaLaunchAgent;
 
 public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionProvider identity, IReplayLedger ledger, IChildProcessLauncher launcher, IChildProcessVerifier verifier, IRcpChildProcessLauncher? rcpLauncher = null, IRcpChildProcessVerifier? rcpVerifier = null)
 {
+    private readonly CpvPreparationService preparation = new(options, identity, ledger, new RevitCpvPreparationBoundary(options));
+    public object PreparationCapabilities() => preparation.Capabilities();
+    public object HandlePreparation(string json, DateTimeOffset now) => preparation.Handle(json, now);
     public RcpQaLaunchResponse HandleRcp(RcpQaLaunchRequest? request, DateTimeOffset now, string rawJson)
     {
         RcpQaLaunchResponse Reject(string code, bool? accepted = false, string disposition = "rejected") => new(1,
@@ -12,6 +15,7 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
             request?.QaWorkflowId ?? "", request?.TestId ?? "", request?.AttemptId ?? "", request?.RunId ?? "",
             request?.ClaimId ?? "", accepted, disposition, null, identity.User, identity.Sid, identity.SessionId, null, code);
 
+        if (preparation.HasUnresolvedExecution) return Reject("cpv-preparation-unresolved");
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive)
             return Reject("wrong-agent-identity");
         if (request is null) return Reject("request-invalid");
@@ -42,6 +46,7 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
 
     public QaStageResponse HandleStage(QaStageRequest? request, DateTimeOffset now)
     {
+        if (preparation.HasUnresolvedExecution) return StageReject(request, "cpv-preparation-unresolved");
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid || !identity.Interactive) return StageReject(request, "wrong-agent-identity");
         if (request is null || request.SchemaVersion != 1 || request.Operation != QaLaunchPolicy.StageOperation || !Guid.TryParse(request.RequestId, out _) || request.QaWorkflowId != "create-plan-views-v1" || request.TestId != request.QaWorkflowId || (request.CandidateEvidence is null && (request.CandidateCommit != QaLaunchPolicy.FrozenCandidateCommit || request.ExpectedCandidateSha256 != QaLaunchPolicy.FrozenCandidateSha256)) || (request.CandidateEvidence is not null && !QaLaunchPolicy.IsValidCandidateEvidence(request.CandidateEvidence, request.TaskId ?? "", request.WorkflowId ?? "", request.QaWorkflowId, request.TestId))) return StageReject(request, "staging-request-invalid");
         if (!ledger.TryReserve(request.RequestId, now)) return StageReject(request, "staging-request-replayed");
@@ -113,6 +118,7 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
 
     public QaLaunchResponseV2 Handle(QaLaunchRequest request, DateTimeOffset now, string? rawJson = null)
     {
+        if (preparation.HasUnresolvedExecution) return Reject(request, "cpv-preparation-unresolved");
         if (!identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) || identity.Sid != options.ExpectedUserSid) return Reject(request, "wrong-agent-identity");
         if (!identity.Interactive) return Reject(request, "non-interactive-session");
         if (!QaLaunchPolicy.IsValidRequest(request, now)) return Reject(request, "request-invalid");

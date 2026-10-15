@@ -48,7 +48,10 @@ function New-ApprovalFixture([string]$mode){
 }
 function Prepare-And-Request($f,[switch]$Stale){
     $prepRoot=Join-Path (Split-Path $fixture -Parent) ('..\TestRuns\independent-prep-'+[guid]::NewGuid().ToString('N'));$prepRoot=[IO.Path]::GetFullPath($prepRoot);New-Item $prepRoot -ItemType Directory|Out-Null;$script:prepRoots.Add($prepRoot);$pa=[guid]::NewGuid().ToString('N');$pr=[guid]::NewGuid().ToString('N');$pm=Join-Path $prepRoot 'model.rvt';Copy-Item $fixture $pm;$ph=(Get-FileHash $fixture).Hash;$rq=Join-Path $prepRoot ($pa+'.request.json');$rs=$rq+'.preparation.json';[ordered]@{operation='prepare-disposable-create-plan-views-fixture';taskId=$taskId;workflowId=$workflowId;attemptId=$pa;runId=$pr;requestPath=$rq;modelPath=$pm;modelSha256=$ph;outputPath=$rs}|ConvertTo-Json|Set-Content $rq;[ordered]@{Status='Passed';Operation='prepare-disposable-create-plan-views-fixture';TaskId=$taskId;WorkflowId=$workflowId;AttemptId=$pa;RunId=$pr;ModelPath=$pm;SourceModelSha256=$ph;PreparedModelSha256=$ph}|ConvertTo-Json|Set-Content $rs
-    $run=New-MayaQaRun -StoreRoot $f.Store -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -RunId ([guid]::NewGuid().ToString('N')) -RuntimeRoot (Join-Path $f.Store 'runtime') -FixturePreparationResultPath $rs
+    $syntheticRequest=Get-Content $rq -Raw|ConvertFrom-Json
+    $syntheticRequest|Add-Member NoteProperty expiresUtc ([DateTimeOffset]::UtcNow.AddHours(1).ToString('O'))
+    $syntheticRequest|ConvertTo-Json|Set-Content $rq
+    $run=New-MayaQaRun -StoreRoot $f.Store -TaskId $taskId -WorkflowId $workflowId -QaWorkflowId $qaId -RunId $pr -RuntimeRoot (Join-Path $f.Store 'runtime') -FixturePreparationResultPath $rs
     $t=if($f.Mode -eq 'wrong-stage'){Find-RepatoTask (Read-RepatoTaskStore $f.Store) $taskId}else{Update-RepatoTask $f.Store $taskId 'in-progress' 'qa' 'Maya' $null $null -ExpectedTaskRevision ([long]$run.TaskRevision) -ExpectedWorkflowId $workflowId -ExpectedWorkflowRevision ([long]$run.WorkflowRevision) -ExpectedQaWorkflowId $qaId}
     $revision=[long]$t.revision;if($Stale){$revision--}
     Request-MayaQaCanonicalExecutionApproval -StoreRoot $f.Store -TaskId $taskId -WorkflowId $workflowId -BuildRequestId $buildId -ExpectedTaskRevision $revision -CandidateSourceCommit $commit -CandidateSha256 $candidateHash
