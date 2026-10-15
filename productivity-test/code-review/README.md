@@ -2,6 +2,8 @@
 
 PowerShell 7 workflow for reviewing only an explicitly selected set of changed files or one clearly named Git diff range. It runs `git diff --check`, flags suspicious credentials, security, deployment, authorization, and protected-path changes for a person, and sends eligible selected files to the Stage 4 PSScriptAnalyzer/Semgrep runner. Scanner errors and findings cannot produce PASS. Reports and synthetic fixtures stay under the ignored `output/` directory.
 
+If PowerShell 7 can discover PSScriptAnalyzer in the caller but a nested `-NoProfile` process cannot, the review runner passes the discovered module directory to Stage 4. For a nonstandard installation, supply `-PSScriptAnalyzerModulePath` explicitly; the path must identify trusted PSScriptAnalyzer 1.25.0 files. Scanner availability remains fail-closed.
+
 From the repository root, after a Ralph iteration, select the changed files reported by that iteration:
 
 ```powershell

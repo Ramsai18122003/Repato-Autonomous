@@ -7,6 +7,7 @@ param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot 'output'),
     [string] $SemgrepExecutable = '/home/rsgud/semgrep-env/bin/semgrep',
     [string] $WslDistribution = 'Ubuntu',
+    [string] $PSScriptAnalyzerModulePath,
     [switch] $SkipSemgrep
 )
 
@@ -67,6 +68,31 @@ function ConvertTo-WslPath {
     return "/mnt/$($Matches[1].ToLowerInvariant())/" + ($Matches[2] -replace '\\', '/')
 }
 
+function Resolve-PSScriptAnalyzerManifest([string] $TrustedModulePath) {
+    $available = Get-Module -ListAvailable -Name PSScriptAnalyzer |
+        Where-Object Version -eq ([version]'1.25.0') |
+        Select-Object -First 1
+    if ($available) { return $available.Path }
+    if (-not $TrustedModulePath) { throw 'PSScriptAnalyzer 1.25.0 is not discoverable. Provide -PSScriptAnalyzerModulePath with a trusted module directory or manifest.' }
+
+    $candidate = [IO.Path]::GetFullPath($TrustedModulePath)
+    if (Test-Path -LiteralPath $candidate -PathType Container) {
+        $moduleRoot = $candidate
+        $candidates = @(
+            (Join-Path $moduleRoot 'PSScriptAnalyzer.psd1'),
+            (Join-Path $moduleRoot '1.25.0\PSScriptAnalyzer.psd1'),
+            (Join-Path $moduleRoot 'PSScriptAnalyzer\1.25.0\PSScriptAnalyzer.psd1')
+        )
+        $candidate = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "PSScriptAnalyzer manifest not found at the trusted path: $candidate" }
+    $manifest = Test-ModuleManifest -Path $candidate -ErrorAction Stop
+    if ($manifest.Name -ne 'PSScriptAnalyzer' -or $manifest.Version -ne [version]'1.25.0') {
+        throw "Trusted module path must identify PSScriptAnalyzer 1.25.0: $candidate"
+    }
+    return $candidate
+}
+
 function Write-QualityReport {
     param([object] $Report, [string] $Directory)
     $jsonPath = Join-Path $Directory 'quality-report.json'
@@ -90,7 +116,8 @@ function Write-QualityReport {
 function Invoke-LocalQualityCheck {
     param([string[]] $SelectedPath, [string] $RepoRoot, [string] $ReportDirectory, [switch] $NoSemgrep,
         [string] $SemgrepExecutable = '/home/rsgud/semgrep-env/bin/semgrep',
-        [string] $WslDistribution = 'Ubuntu', [scriptblock] $SemgrepInvoker)
+        [string] $WslDistribution = 'Ubuntu', [scriptblock] $SemgrepInvoker,
+        [string] $PSScriptAnalyzerModulePath)
     $reportRoot = [IO.Path]::GetFullPath((Join-Path $script:QualityToolRoot 'output'))
     $reportFull = [IO.Path]::GetFullPath($ReportDirectory)
     if ($reportFull -ne $reportRoot -and -not $reportFull.StartsWith($reportRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -121,10 +148,8 @@ function Invoke-LocalQualityCheck {
     if ($powershellFiles.Count) {
         $scan = [ordered]@{ Name = 'PSScriptAnalyzer'; Status = 'PASS'; Findings = @(); Error = $null }
         try {
-            if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer | Where-Object Version -eq ([version]'1.25.0'))) {
-                throw 'PSScriptAnalyzer 1.25.0 is not installed.'
-            }
-            Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -ErrorAction Stop
+            $analyzerManifest = Resolve-PSScriptAnalyzerManifest -TrustedModulePath $PSScriptAnalyzerModulePath
+            Import-Module -Name $analyzerManifest -RequiredVersion 1.25.0 -ErrorAction Stop
             $raw = @($powershellFiles | ForEach-Object {
                 Invoke-ScriptAnalyzer -Path $_.FullName -Severity Error, Warning, Information -ErrorAction Stop
             })
@@ -188,6 +213,7 @@ function Invoke-LocalQualityCheck {
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $result = Invoke-LocalQualityCheck -SelectedPath $Path -RepoRoot $repoRoot -ReportDirectory $OutputDirectory `
-    -NoSemgrep:$SkipSemgrep -SemgrepExecutable $SemgrepExecutable -WslDistribution $WslDistribution
+    -NoSemgrep:$SkipSemgrep -SemgrepExecutable $SemgrepExecutable -WslDistribution $WslDistribution `
+    -PSScriptAnalyzerModulePath $PSScriptAnalyzerModulePath
 Write-Output $result
 if ($result.Status -ne 'PASS') { exit 1 }

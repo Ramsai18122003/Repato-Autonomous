@@ -5,10 +5,17 @@ param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot 'output'),
     [string] $SemgrepExecutable = '/home/rsgud/semgrep-env/bin/semgrep',
     [string] $WslDistribution = 'Ubuntu',
+    [string] $PSScriptAnalyzerModulePath,
     [switch] $SkipSemgrep
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if (-not $PSScriptAnalyzerModulePath) {
+    $installedAnalyzer = Get-Module -ListAvailable -Name PSScriptAnalyzer |
+        Where-Object Version -eq ([version]'1.25.0') |
+        Select-Object -First 1
+    if ($installedAnalyzer) { $PSScriptAnalyzerModulePath = $installedAnalyzer.ModuleBase }
+}
 function Invoke-GitText([string]$Root, [string[]]$Arguments, [int[]]$AllowedExitCodes = @(0)) {
     $text = (& git -C $Root @Arguments 2>&1 | Out-String); $code = $LASTEXITCODE
     if ($code -notin $AllowedExitCodes) { throw "git $($Arguments -join ' ') failed (exit $code): $($text.Trim())" }; return $text
@@ -81,6 +88,7 @@ if ($scannerFiles.Count) {
     $qualityOutput = Join-Path (Split-Path $qualityScript) 'output'
     $pathLiterals = @($scannerFiles | ForEach-Object { ConvertTo-PowerShellLiteral $_ }) -join ', '
     $commandText = '& ' + (ConvertTo-PowerShellLiteral $qualityScript) + ' -OutputDirectory ' + (ConvertTo-PowerShellLiteral $qualityOutput) + ' -Path @(' + $pathLiterals + ') -SemgrepExecutable ' + (ConvertTo-PowerShellLiteral $SemgrepExecutable) + ' -WslDistribution ' + (ConvertTo-PowerShellLiteral $WslDistribution)
+    if ($PSScriptAnalyzerModulePath) { $commandText += ' -PSScriptAnalyzerModulePath ' + (ConvertTo-PowerShellLiteral $PSScriptAnalyzerModulePath) }
     if ($SkipSemgrep) { $commandText += ' -SkipSemgrep' }
     $previousRuns = @(Get-ChildItem -LiteralPath $qualityOutput -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
     $null = & (Get-Command pwsh -ErrorAction Stop).Source -NoProfile -Command $commandText 2>&1

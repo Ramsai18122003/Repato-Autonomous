@@ -4,10 +4,14 @@ PowerShell 7 runner for explicitly selected files only. Reports are written unde
 
 Prerequisites already present on the machine: PowerShell 7, PSScriptAnalyzer 1.25.0, WSL Ubuntu, and Semgrep at `/home/rsgud/semgrep-env/bin/semgrep`. The runner calls that explicit Linux executable through `wsl.exe --distribution Ubuntu --exec`; it does not depend on WSL's `PATH`. Override with `-SemgrepExecutable /path/in/wsl` and `-WslDistribution <name>` when needed. The runner does not install or download tools or rules. Semgrep rules are local in `semgrep-rules.yml`.
 
+PSScriptAnalyzer is discovered through PowerShell's normal module paths. If a nested `pwsh -NoProfile` process cannot see a trusted installation discovered by the caller, pass its module directory (the directory containing `PSScriptAnalyzer.psd1`) with `-PSScriptAnalyzerModulePath`. The path is used only by that quality-check process; the runner does not alter persistent `PSModulePath` or install modules. Missing or invalid modules remain scanner errors and fail the check.
+
 From the repository root, select exact paths:
 
 ```powershell
 pwsh -NoProfile -File .\productivity-test\quality-check\Invoke-LocalQualityCheck.ps1 -Path .\ConnectorServer.cs
+$analyzer = Get-Module -ListAvailable PSScriptAnalyzer | Where-Object Version -eq ([version]'1.25.0') | Select-Object -First 1
+pwsh -NoProfile -File .\productivity-test\quality-check\Invoke-LocalQualityCheck.ps1 -Path .\Test.ps1 -PSScriptAnalyzerModulePath $analyzer.ModuleBase
 pwsh -NoProfile -File .\productivity-test\quality-check\Invoke-LocalQualityCheck.ps1 -Path .\some-directory
 pwsh -NoProfile -Command '& .\productivity-test\quality-check\Invoke-LocalQualityCheck.ps1 -Path @(".\ConnectorServer.cs", ".\FormaApplication.cs")'
 ```
