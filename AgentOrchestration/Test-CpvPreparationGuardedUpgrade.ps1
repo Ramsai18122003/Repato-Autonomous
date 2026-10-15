@@ -53,5 +53,7 @@ try {
     Check ((Get-FileHash (Join-Path $valid.Evidence 'active.json')).Hash -ceq $markerBefore -and (Test-CpvPreparationUpgradeEvidenceSnapshot -Before $before -EvidenceRoot $valid.Evidence -RunDirectory $valid.Run)) 'rollback preserves active marker and diagnostic evidence'
     $installer=Get-Content (Join-Path $PSScriptRoot 'Install-CpvPreparationAgentCandidate.ps1') -Raw
     Check ($installer.Contains('if(!$ReconcileRequestId){throw ''An active/interrupted preparation must be reconciled before agent installation.''}') -and $installer.Contains('if($upgrade){')) 'ordinary unresolved-marker guard remains explicit'
+    Check ($installer.Contains('Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000') -and $installer.Contains('$agentHealth.SessionId -ne $capabilities.sessionId')) 'installer stop is bound to authenticated Launch Agent health for both guarded and ordinary paths'
+    Check (!$installer.Contains('Stop-Process') -and $installer.Contains('Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $process.Id') -and $installer.Contains('Verified rollback evidence is unavailable; scheduled task remains stopped')) 'exception recovery uses authenticated stop and fails closed without verified rollback evidence'
     'PASS: '+$script:count+' guarded upgrade assertions; synthetic installer/rollback only; Revit launched=false.'
 } finally {Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue}
