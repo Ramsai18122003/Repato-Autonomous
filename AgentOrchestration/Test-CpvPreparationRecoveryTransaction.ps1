@@ -57,6 +57,8 @@ try {
     Check ($again.requestId -ceq $approval.requestId -and (Find-RepatoTask (Read-RepatoTaskStore $c.Store) $id).revision -eq $after.revision) 'completion retry creates no duplicate or revision'
     Check (!$approval.decidedBy -and !$approval.consumedUtc) 'approval remains undecided and unconsumed'
     Check ($approval.executionBinding.FixturePreparationEvidence.AttemptId -ceq $q.attemptId -and $approval.executionBinding.ModelSha256 -ceq $modelHash -and $approval.bindingHash.Length -eq 64) 'approval binds fresh attempt and verified model hash'
+    $workflow=@($after.deploymentWorkflows|Where-Object workflowId -ceq $q.workflowId)[0]
+    Check (!$workflow.qaHandoff -and !$workflow.qaReportPath -and $after.cpvPreparationRecovery.PriorWorkflow.qaRunId -ceq $r.OldBinding.RunId) 'stale handoff/report cleared with original workflow archived'
     Check ((Get-FileHash $live).Hash -ceq $liveHash) 'live canonical store unchanged'
     "PASS: $script:count canonical CPV recovery assertions; isolated copied store, synthetic preparation; Revit launched=false."
 } finally {

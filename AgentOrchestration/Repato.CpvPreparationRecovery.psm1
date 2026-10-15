@@ -47,6 +47,7 @@ function New-CpvPreparationRecovery {
     $old=$pending[0];$binding=$old.executionBinding
     if($old.requiredLevel -cne 'user' -or $binding.SchemaVersion -cne 'maya-qa-canonical-execution-approval-v1' -or $binding.TaskId -cne $TaskId -or $binding.QaWorkflowId -cne 'create-plan-views-v1' -or (Get-CpvRecoveryHash $binding) -cne $old.bindingHash){throw 'Historical approval binding integrity failed.'}
     foreach($name in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket'){if($task.PSObject.Properties.Name -contains $name -and $task.$name){throw 'Active Tara state requires execution reconciliation.'}}
+    if($task.PSObject.Properties.Name -contains 'taraRuns' -and @($task.taraRuns|Where-Object {$_.status -in @('running','unknown')}).Count){throw 'Native execution state requires reconciliation.'}
     if(@(Get-Process Revit -ErrorAction SilentlyContinue).Count){throw 'Revit is already running.'}
     $candidate=& (Get-Module Repato.MayaQaWorkflow) {param($store,$id,$b) New-MayaQaPersistedCandidateEvidence -StoreRoot $store -TaskId $id -WorkflowId $b.WorkflowId -QaWorkflowId $b.QaWorkflowId -TestId $b.QaWorkflowId} $StoreRoot $TaskId $binding
     if($candidate.CandidateDllSha256 -ine $binding.CandidateSha256 -or $candidate.CandidateSourceCommit -cne $binding.CandidateSourceCommit -or $candidate.RunnerManifestSha256 -ine $binding.RunnerManifestSha256){throw 'Frozen candidate differs from expired approval.'}
@@ -119,6 +120,7 @@ function Complete-CpvPreparationRecovery {
             $r|Add-Member NoteProperty PriorWorkflow $archive
             $prep=[pscustomobject]@{RequestPath=$receipt.requestPath;RequestSha256=$receipt.requestSha256;ResultPath=$receipt.resultPath;ResultSha256=$receipt.resultSha256;AttemptId=$request.attemptId;RunId=$request.runId;ExpiresUtc=$request.expiresUtc;SourceSha256=$r.OldBinding.FixtureSha256;PreparedModelPath=$receipt.modelPath;PreparedModelSha256=$receipt.modelSha256}
             foreach($entry in @(@('qaRunId',$request.runId),@('qaModelPath',$receipt.modelPath),@('qaSidecarPath',($receipt.modelPath+'.fixture.json')),@('qaDisposableModelSha256',$receipt.modelSha256),@('qaFixturePreparationEvidence',$prep))){$w|Add-Member NoteProperty $entry[0] $entry[1] -Force}
+            foreach($name in 'qaHandoff','qaHandoffId','qaApprovalId','qaApprovalStatus','qaReportPath','qaReportSha256','qaEvidence','qaVerificationStatus','qaCompletionStatus','qaCompletedUtc'){$w|Add-Member NoteProperty $name $null -Force}
             $w.workflowRevision=[long]$w.workflowRevision+1
             $r.Receipt=$receipt;$r.Status='Verified';$t.status='in-progress';$t.workflowStage='qa';Add-RepatoHistory $t 'cpv-preparation-verified' 'Tara' $request.requestId
         }
