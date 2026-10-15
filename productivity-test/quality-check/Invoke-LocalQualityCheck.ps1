@@ -26,20 +26,20 @@ function Resolve-QualityFiles {
 
     $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $files = [System.Collections.Generic.List[IO.FileInfo]]::new()
-    foreach ($input in $InputPath) {
-        $candidate = if ([IO.Path]::IsPathRooted($input)) { $input } else { Join-Path $rootFull $input }
-        if (-not (Test-Path -LiteralPath $candidate)) { throw "Selected path does not exist: $input" }
+    foreach ($selectedPath in $InputPath) {
+        $candidate = if ([IO.Path]::IsPathRooted($selectedPath)) { $selectedPath } else { Join-Path $rootFull $selectedPath }
+        if (-not (Test-Path -LiteralPath $candidate)) { throw "Selected path does not exist: $selectedPath" }
         $resolved = (Resolve-Path -LiteralPath $candidate).Path
         $relative = [IO.Path]::GetRelativePath($rootFull, $resolved)
         if ($relative -eq '..' -or $relative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)") -or [IO.Path]::IsPathRooted($relative)) {
-            throw "Selected path must be inside the repository: $input"
+            throw "Selected path must be inside the repository: $selectedPath"
         }
         $segments = $relative -split '[\\/]'
         if ($segments | Where-Object { $script:ProtectedSegments -contains $_ }) {
-            throw "Protected path cannot be analyzed by this local workflow: $input"
+            throw "Protected path cannot be analyzed by this local workflow: $selectedPath"
         }
         $item = Get-Item -LiteralPath $resolved
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Selected path cannot be a reparse point: $input" }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Selected path cannot be a reparse point: $selectedPath" }
         if ($item.PSIsContainer) {
             $pending = [System.Collections.Generic.Stack[IO.DirectoryInfo]]::new()
             $pending.Push([IO.DirectoryInfo]$item)
