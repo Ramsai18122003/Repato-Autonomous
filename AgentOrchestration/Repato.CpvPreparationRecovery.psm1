@@ -82,9 +82,44 @@ function Send-CpvPreparationRecovery {
 function Get-CpvPreparationRecoveryStatus {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[scriptblock]$Transport)
-    $t=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId;$r=$t.cpvPreparationRecovery
+    $t=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    $marker=$t.PSObject.Properties['cpvPreparationRecovery']
+    $r=if($marker){$marker.Value}else{$null}
+    if($null -eq $r){return [pscustomobject][ordered]@{status='NotStarted';operation='cpv-preparation-status';taskId=$TaskId;recoveryStatus='NotStarted';sideEffectPerformed=$false}}
+    $requestProperty=$r.PSObject.Properties['Request']
+    $request=if($requestProperty){$requestProperty.Value}else{$null}
+    $requestIdProperty=if($request){$request.PSObject.Properties['requestId']}else{$null}
+    $requestId=[guid]::Empty
+    if(!$requestIdProperty -or ![guid]::TryParseExact([string]$requestIdProperty.Value,'N',[ref]$requestId) -or $requestId -eq [guid]::Empty){throw 'Persisted CPV preparation recovery record is malformed: requestId must be a nonzero N-format GUID.'}
     $q=[pscustomobject]@{schemaVersion=1;operation='cpv-preparation-status';requestId=$r.Request.requestId}
     if($Transport){& $Transport $q}else{Invoke-CpvPreparationTransport $q}
+}
+function Set-CpvPreparationRecoveryFailedReconciled {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][long]$ExpectedTaskRevision,[scriptblock]$Transport)
+    $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    $r=$task.cpvPreparationRecovery
+    if($task.revision -ne $ExpectedTaskRevision -and $r.Status -ne 'FailedReconciled'){throw 'Failed reconciliation revision is stale.'}
+    if(!$r -or $r.Status -notin @('Dispatching','FailedReconciled') -or (Get-CpvRecoveryHash $r.Request) -cne $r.RequestHash){throw 'Failed reconciliation requires the exact dispatched request.'}
+    if($r.Status -eq 'Dispatching' -and @($task.approvalRequests|Where-Object {$_.status -ceq 'pending'}).Count){throw 'Pending approval state must be reconciled before failed preparation.'}
+    $q=[pscustomobject]@{schemaVersion=1;operation='cpv-preparation-reconcile-failed';requestId=$r.Request.requestId;taskId=$TaskId;workflowId=$r.Request.workflowId;attemptId=$r.Request.attemptId;runId=$r.Request.runId}
+    $receipt=if($Transport){& $Transport $q}else{Invoke-CpvPreparationTransport $q}
+    foreach($name in 'requestId','taskId','workflowId','attemptId','runId'){if($receipt.$name -cne $q.$name){throw "Reconciliation receipt identity mismatch: $name"}}
+    if($receipt.status -cne 'FailedReconciled' -or $receipt.failureCode -cne 'preparation-exited-without-result' -or
+        $receipt.cleanupVerified -ne $false -or $receipt.rollbackStatus -cne 'NotRequired-NoPreparationResult') {throw 'Agent did not return a valid terminal failure reconciliation.'}
+    if($r.Status -eq 'FailedReconciled'){
+        if($r.Receipt.requestId -cne $receipt.requestId -or $r.Receipt.failureCode -cne $receipt.failureCode){throw 'Canonical reconciliation receipt differs.'}
+        return $r
+    }
+    Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)
+        $t=Find-RepatoTask $data $TaskId;$current=$t.cpvPreparationRecovery
+        if($t.revision -ne $ExpectedTaskRevision -or $current.Status -cne 'Dispatching' -or (Get-CpvRecoveryHash $current.Request) -cne $current.RequestHash){throw 'Failed reconciliation compare-and-swap failed.'}
+        if(@($t.approvalRequests|Where-Object {$_.status -ceq 'pending'}).Count){throw 'Pending approval state changed during reconciliation.'}
+        $current.Status='FailedReconciled';$current.Receipt=$receipt
+        Add-RepatoHistory $t 'cpv-preparation-failed-reconciled' 'Maya' $receipt.requestId
+        $current
+    }
 }
 function Complete-CpvPreparationRecovery {
     [CmdletBinding()]
@@ -137,4 +172,4 @@ function Complete-CpvPreparationRecovery {
     $id=$existing[0].requestId;$revision=$current.revision
     Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$t=Find-RepatoTask $data $TaskId;if($t.revision -ne $revision){throw 'Approval linkage revision changed.'};$t.cpvPreparationRecovery.ApprovalId=$id;$t.cpvPreparationRecovery.Status='ApprovalPending';$existing[0]}
 }
-Export-ModuleMember -Function Invoke-CpvPreparationTransport,Get-CpvPreparationCapabilities,New-CpvPreparationRecovery,Send-CpvPreparationRecovery,Get-CpvPreparationRecoveryStatus,Complete-CpvPreparationRecovery
+Export-ModuleMember -Function Invoke-CpvPreparationTransport,Get-CpvPreparationCapabilities,New-CpvPreparationRecovery,Send-CpvPreparationRecovery,Get-CpvPreparationRecoveryStatus,Set-CpvPreparationRecoveryFailedReconciled,Complete-CpvPreparationRecovery

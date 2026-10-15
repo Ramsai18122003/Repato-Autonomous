@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('capabilities','begin','dispatch','status','complete')][string]$Operation,
+    [Parameter(Mandatory)][ValidateSet('capabilities','begin','dispatch','status','reconcile-failed','complete')][string]$Operation,
     [string]$StoreRoot=(Join-Path $PSScriptRoot '../QA/MayaRuns'),
     [string]$TaskId='task-bf61fe7f22d74df7a92599681da5919e',
     [long]$ExpectedTaskRevision=0,
@@ -13,6 +13,7 @@ $result=switch($Operation){
     'begin'{New-CpvPreparationRecovery -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -ExpiredApprovalId $ExpiredApprovalId}
     'dispatch'{Send-CpvPreparationRecovery -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision}
     'status'{Get-CpvPreparationRecoveryStatus -StoreRoot $StoreRoot -TaskId $TaskId}
+    'reconcile-failed'{Set-CpvPreparationRecoveryFailedReconciled -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision}
     'complete'{Complete-CpvPreparationRecovery -StoreRoot $StoreRoot -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision}
 }
 $result|ConvertTo-Json -Depth 20

@@ -11,13 +11,42 @@ $transport={param($q) if($q.operation -eq 'cpv-preparation-capabilities'){return
 function MakeStore {
     $store=Join-Path $root ([guid]::NewGuid().ToString('N'));New-Item $store -ItemType Directory|Out-Null
     Copy-Item $live (Join-Path $store 'tasks.json')
-    Invoke-RepatoStoreMutation $store {param($d,$p)$t=Find-RepatoTask $d $id;$q=@($t.approvalRequests|Where-Object status -ceq pending)[0];$q.expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('O');$t}|Out-Null
-    $t=Find-RepatoTask (Read-RepatoTaskStore $store) $id
-    [pscustomobject]@{Store=$store;Revision=$t.revision;Approval=@($t.approvalRequests|Where-Object status -ceq pending)[0].requestId}
+    Invoke-RepatoStoreMutation $store {param($d,$p)
+        $t=Find-RepatoTask $d $id
+        $q=@($t.approvalRequests|Where-Object {$_.requestId -ceq 'be82b860606d46598716e6fe191e6522' -and $_.PSObject.Properties['executionBinding'] -and $_.executionBinding -and $_.executionBinding.SchemaVersion -ceq 'maya-qa-canonical-execution-approval-v1'})
+        if($q.Count -ne 1){throw 'Synthetic recovery fixture requires the bound historical approval.'}
+        foreach($pending in @($t.approvalRequests|Where-Object status -ceq pending)){$pending.status='superseded'}
+        $q[0].status='pending';if($q[0].PSObject.Properties.Name -notcontains 'expiresUtc'){$q[0]|Add-Member NoteProperty expiresUtc ([DateTimeOffset]::UtcNow.AddMinutes(-5).ToString('O'))}else{$q[0].expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('O')}
+        $t.PSObject.Properties.Remove('cpvPreparationRecovery');$t.status='awaiting-approval';$t.workflowStage='approval';$t
+    }|Out-Null
+    $t=Find-RepatoTask (Read-RepatoTaskStore $store) $id;$pending=@($t.approvalRequests|Where-Object status -ceq pending)
+    if($pending.Count -ne 1){throw 'Synthetic recovery fixture requires one pending approval in its copied store.'}
+    [pscustomobject]@{Store=$store;Revision=$t.revision;Approval=$pending[0].requestId}
 }
 try {
     $c=MakeStore
     $active=MakeStore
+    $script:statusCalls=0
+    $statusTransport={param($q)$script:statusCalls++;[pscustomobject]@{status='Executing';operation='prepare-cpv-fixture';requestId=$q.requestId}}
+    $notStarted=Get-CpvPreparationRecoveryStatus $c.Store $id -Transport $statusTransport
+    Check ($notStarted.status -ceq 'NotStarted' -and $notStarted.taskId -ceq $id -and $notStarted.sideEffectPerformed -eq $false -and $script:statusCalls -eq 0) 'absent recovery marker returns not-started without transport'
+    $nullRecord=MakeStore
+    Invoke-RepatoStoreMutation $nullRecord.Store {param($d,$p)$t=Find-RepatoTask $d $id;$t|Add-Member NoteProperty cpvPreparationRecovery $null;$t}|Out-Null
+    $nullStatus=Get-CpvPreparationRecoveryStatus $nullRecord.Store $id -Transport $statusTransport
+    Check ($nullStatus.status -ceq 'NotStarted' -and $nullStatus.sideEffectPerformed -eq $false -and $script:statusCalls -eq 0) 'null recovery marker returns not-started without transport'
+    $validRecord=MakeStore
+    $validRequestId=[guid]::NewGuid().ToString('N')
+    Invoke-RepatoStoreMutation $validRecord.Store {param($d,$p)$t=Find-RepatoTask $d $id;$t|Add-Member NoteProperty cpvPreparationRecovery ([pscustomobject]@{Request=[pscustomobject]@{requestId=$validRequestId}});$t}|Out-Null
+    $validStatus=Get-CpvPreparationRecoveryStatus $validRecord.Store $id -Transport $statusTransport
+    Check ($validStatus.status -ceq 'Executing' -and $validStatus.requestId -ceq $validRequestId -and $script:statusCalls -eq 1) 'valid recovery marker queries its request status'
+    $malformedRecord=MakeStore
+    Invoke-RepatoStoreMutation $malformedRecord.Store {param($d,$p)$t=Find-RepatoTask $d $id;$t|Add-Member NoteProperty cpvPreparationRecovery ([pscustomobject]@{Request=[pscustomobject]@{}});$t}|Out-Null
+    Reject {Get-CpvPreparationRecoveryStatus $malformedRecord.Store $id -Transport $statusTransport} 'malformed.*requestId'
+    Check ($script:statusCalls -eq 1) 'malformed recovery marker is not sent to agent'
+    $invalidIdRecord=MakeStore
+    Invoke-RepatoStoreMutation $invalidIdRecord.Store {param($d,$p)$t=Find-RepatoTask $d $id;$t|Add-Member NoteProperty cpvPreparationRecovery ([pscustomobject]@{Request=[pscustomobject]@{requestId='not-a-guid'}});$t}|Out-Null
+    Reject {Get-CpvPreparationRecoveryStatus $invalidIdRecord.Store $id -Transport $statusTransport} 'malformed.*requestId'
+    Check ($script:statusCalls -eq 1) 'invalid request id is not sent to agent'
     Invoke-RepatoStoreMutation $active.Store {param($d,$p)$t=Find-RepatoTask $d $id;@($t.approvalRequests|Where-Object status -ceq pending)[0].expiresUtc=[DateTimeOffset]::UtcNow.AddHours(1).ToString('O');$t}|Out-Null
     Reject {New-CpvPreparationRecovery $active.Store $id $active.Revision $active.Approval -Transport $transport} 'expired pending'
     Reject {New-CpvPreparationRecovery $c.Store $id ($c.Revision-1) $c.Approval -Transport $transport} 'stale'
@@ -59,6 +88,22 @@ try {
     Check ($approval.executionBinding.FixturePreparationEvidence.AttemptId -ceq $q.attemptId -and $approval.executionBinding.ModelSha256 -ceq $modelHash -and $approval.bindingHash.Length -eq 64) 'approval binds fresh attempt and verified model hash'
     $workflow=@($after.deploymentWorkflows|Where-Object workflowId -ceq $q.workflowId)[0]
     Check (!$workflow.qaHandoff -and !$workflow.qaReportPath -and $after.cpvPreparationRecovery.PriorWorkflow.qaRunId -ceq $r.OldBinding.RunId) 'stale handoff/report cleared with original workflow archived'
+    $failed=MakeStore;$failedRequest=[pscustomobject]@{schemaVersion=1;operation='prepare-cpv-fixture';requestId=[guid]::NewGuid().ToString('N');taskId=$id;workflowId=[guid]::NewGuid().ToString('N');attemptId=[guid]::NewGuid().ToString('N');runId=[guid]::NewGuid().ToString('N')}
+    $requestHash=& (Get-Module Repato.CpvPreparationRecovery) {param($x)Get-CpvRecoveryHash $x} $failedRequest
+    Invoke-RepatoStoreMutation $failed.Store {param($d,$p)$t=Find-RepatoTask $d $id;foreach($pending in @($t.approvalRequests|Where-Object status -ceq pending)){$pending.status='superseded'};$t|Add-Member NoteProperty cpvPreparationRecovery ([pscustomobject]@{Status='Dispatching';Request=$failedRequest;RequestHash=$requestHash;Receipt=$null});$t}|Out-Null
+    $script:reconcileCalls=0;$script:agentReceipt=[pscustomobject]@{schemaVersion=1;operation='prepare-cpv-fixture';requestId=$failedRequest.requestId;taskId=$id;workflowId=$failedRequest.workflowId;attemptId=$failedRequest.attemptId;runId=$failedRequest.runId;status='FailedReconciled';failureCode='preparation-exited-without-result';cleanupVerified=$false;rollbackStatus='NotRequired-NoPreparationResult'}
+    $reconcileTransport={param($q)$script:reconcileCalls++;if($q.operation -cne 'cpv-preparation-reconcile-failed'){throw 'Wrong reconciliation operation.'};$script:agentReceipt}
+    Reject {Set-CpvPreparationRecoveryFailedReconciled $failed.Store $id ($failed.Revision-1) -Transport $reconcileTransport} 'revision is stale'
+    Check ($script:reconcileCalls -eq 0) 'stale revision does not contact agent'
+    $failedTask=Find-RepatoTask (Read-RepatoTaskStore $failed.Store) $id
+    Reject {Set-CpvPreparationRecoveryFailedReconciled $failed.Store $id $failedTask.revision -Transport {param($q)throw 'response lost after agent persisted terminal receipt'}} 'response lost'
+    $recovered=Set-CpvPreparationRecoveryFailedReconciled $failed.Store $id $failedTask.revision -Transport $reconcileTransport
+    $terminal=Find-RepatoTask (Read-RepatoTaskStore $failed.Store) $id
+    Check ($recovered.Status -ceq 'FailedReconciled' -and $terminal.cpvPreparationRecovery.Receipt.status -ceq 'FailedReconciled' -and @($terminal.approvalRequests|Where-Object status -ceq pending).Count -eq 0) 'lost response reconciles same terminal failure without approval'
+    $canonicalRevision=$terminal.revision
+    $same=Set-CpvPreparationRecoveryFailedReconciled $failed.Store $id ($canonicalRevision-1) -Transport $reconcileTransport
+    Check ($same.Status -ceq 'FailedReconciled' -and (Find-RepatoTask (Read-RepatoTaskStore $failed.Store) $id).revision -eq $canonicalRevision) 'duplicate reconciliation is idempotent'
+    Reject {Set-CpvPreparationRecoveryFailedReconciled $failed.Store $id $canonicalRevision -Transport {param($q)$x=$script:agentReceipt|Select-Object *;$x.runId=[guid]::NewGuid().ToString('N');$x}} 'identity mismatch'
     Check ((Get-FileHash $live).Hash -ceq $liveHash) 'live canonical store unchanged'
     "PASS: $script:count canonical CPV recovery assertions; isolated copied store, synthetic preparation; Revit launched=false."
 } finally {

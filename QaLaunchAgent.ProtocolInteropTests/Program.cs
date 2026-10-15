@@ -62,6 +62,39 @@ var rq=JsonSerializer.Deserialize<QaLaunchRequest>(camelJson, QaLaunchPolicy.Jso
 if(rq.SchemaVersion!=2||rq.Operation!=QaLaunchPolicy.Operation||rq.RequestId!=request.RequestId||rq.AttemptId!=request.AttemptId)throw new Exception("Request interoperability failed.");
 var integrityRequest = request with { RequestSha256 = QaLaunchPolicy.CanonicalRequestSha256(camelJson) };
 StartupContractTests.Run(integrityRequest);
+if (!Guid.TryParse(integrityRequest.RequestId, out _)) throw new Exception("Synthetic launch request ID must be a GUID.");
+var runLabelRequest = integrityRequest with { RequestId = "qa-run-ec774245da5341549b5d8c8a90d062b8", RunId = "qa-run-ec774245da5341549b5d8c8a90d062b8" };
+if (QaLaunchPolicy.IsValidRequest(runLabelRequest, DateTimeOffset.UtcNow)) throw new Exception("Run label was incorrectly accepted as the transport request ID.");
+var separatelyBoundRequest = integrityRequest with { RunId = "qa-run-ec774245da5341549b5d8c8a90d062b8" };
+if (!QaLaunchPolicy.IsValidRequest(separatelyBoundRequest, DateTimeOffset.UtcNow)) throw new Exception("GUID transport request ID with an independent run label was rejected.");
+var launchBoundaryRoot = Path.Combine(Path.GetTempPath(), "repato-launch-boundary-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(launchBoundaryRoot);
+try
+{
+    var modelPath = Path.Combine(launchBoundaryRoot, "model with spaces.rvt");
+    File.WriteAllBytes(modelPath, new byte[] { 1, 2, 3 });
+    var boundRequest = integrityRequest with { ModelPath = modelPath };
+    var options = new QaAgentOptions(@"E:\revit\Revit 2025\Revit.exe", launchBoundaryRoot, launchBoundaryRoot, "ledger.json", "logs");
+    var inheritedDispatchName = "REPATO_QA_CREATE_PLAN_VIEWS_FIXTURE_PREPARATION";
+    var inheritedDispatch = Environment.GetEnvironmentVariable(inheritedDispatchName);
+    System.Diagnostics.ProcessStartInfo startInfo;
+    try
+    {
+        Environment.SetEnvironmentVariable(inheritedDispatchName, "stale-preparation.json");
+        startInfo = RevitChildProcessLauncher.CreateStartInfo(boundRequest, options);
+        if (startInfo.Environment.ContainsKey(inheritedDispatchName)) throw new Exception("Inherited preparation dispatch reached the child process.");
+        if (Environment.GetEnvironmentVariable(inheritedDispatchName) != "stale-preparation.json") throw new Exception("Child dispatch isolation changed the parent environment.");
+    }
+    finally { Environment.SetEnvironmentVariable(inheritedDispatchName, inheritedDispatch); }
+    if (startInfo.ArgumentList.Count != 0 || !string.IsNullOrEmpty(startInfo.Arguments)) throw new Exception("Revit must start with no document; the authenticated runner alone opens the disposable model.");
+    if (startInfo.Environment[QaLaunchPolicy.RequestEnvironmentVariable] != boundRequest.RequestPath) throw new Exception("Runner request path was not bound to the same Revit launch.");
+    foreach (var invalidPath in new[] { "", Path.Combine(launchBoundaryRoot, "different.rvt"), Path.Combine(launchBoundaryRoot, "model.txt") })
+    {
+        try { RevitChildProcessLauncher.CreateStartInfo(boundRequest with { ModelPath = invalidPath }, options); throw new Exception("Empty or mismatched model path reached process execution."); }
+        catch (InvalidDataException) { }
+    }
+}
+finally { Directory.Delete(launchBoundaryRoot, true); }
 var integrityJson = JsonSerializer.Serialize(integrityRequest, QaLaunchPolicy.JsonOptions);
 if(!QaLaunchPolicy.CanonicalRequestSha256(integrityJson).Equals(integrityRequest.RequestSha256, StringComparison.OrdinalIgnoreCase))throw new Exception("Request integrity positive case failed.");
 var tamperedJson = integrityJson.Replace("task-1", "task-tampered", StringComparison.Ordinal);

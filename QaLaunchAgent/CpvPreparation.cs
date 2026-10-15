@@ -9,16 +9,22 @@ public sealed record CpvPreparationRequest(int SchemaVersion, string Operation, 
     string WorkflowId, string AttemptId, string RunId, DateTimeOffset ExpiresUtc, int TimeoutSeconds,
     QaCandidateEvidence CandidateEvidence);
 public sealed record CpvPreparationQuery(int SchemaVersion, string Operation, string RequestId);
+public sealed record CpvPreparationReconciliation(int SchemaVersion, string Operation, string RequestId, string TaskId,
+    string WorkflowId, string AttemptId, string RunId);
 public sealed record CpvPreparationReceipt(int SchemaVersion, string Operation, string RequestId, string TaskId,
     string WorkflowId, string AttemptId, string RunId, string Status, string User, string Sid, int SessionId,
     string CandidateSha256, string ManifestSha256, string ModelPath, string ModelSha256, string RequestPath,
     string RequestSha256, string ResultPath, string ResultSha256, bool CleanupVerified, string RollbackStatus,
     string? FailureCode, DateTimeOffset ExpiresUtc);
 public sealed record CpvPreparationOutcome(string ModelSha256, string ResultSha256, bool CleanupVerified, string RollbackStatus);
-public interface ICpvPreparationBoundary
+public interface ICpvPreparationBoundary : ICpvPreparationReconciliationBoundary
 {
     void Validate(CpvPreparationRequest request);
     Task<CpvPreparationOutcome> Execute(CpvPreparationRequest request, string directory);
+}
+public interface ICpvPreparationReconciliationBoundary
+{
+    IDisposable ValidateReconciliation(CpvPreparationRequest request, CpvPreparationReceipt receipt);
 }
 
 /// <summary>One fixed operation; no caller-selected executable, model, environment, or command.</summary>
@@ -27,6 +33,7 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
 {
     public const string Operation = "prepare-cpv-fixture";
     public const string StatusOperation = "cpv-preparation-status";
+    public const string ReconcileOperation = "cpv-preparation-reconcile-failed";
     public const string CapabilitiesOperation = "cpv-preparation-capabilities";
     public const string RunnerOperation = "prepare-disposable-create-plan-views-fixture";
     public const string FixtureSha256 = "92CC9E434E2C4DD6720A2AA564E19F4E1A30EB3DA63CEA73CF737F875B9EDD45";
@@ -40,7 +47,7 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
         identity.Sid == options.ExpectedUserSid && identity.Interactive && identity.SessionId > 0;
     public static bool Id(string? id) => Guid.TryParseExact(id, "N", out var value) && value != Guid.Empty;
     public object Capabilities() => new { schemaVersion = 1, operation = CapabilitiesOperation, supported = IdentityValid,
-        preparationOperation = Operation, user = identity.User, sid = identity.Sid, sessionId = identity.SessionId };
+        preparationOperation = Operation, reconciliationOperation = ReconcileOperation, user = identity.User, sid = identity.Sid, sessionId = identity.SessionId };
     public object Handle(string json, DateTimeOffset now)
     {
         if (!IdentityValid) throw new InvalidDataException("wrong-agent-identity");
@@ -52,6 +59,14 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
             var query = JsonSerializer.Deserialize<CpvPreparationQuery>(json, StrictJson)!;
             if (query.SchemaVersion != 1 || !Id(query.RequestId)) throw new InvalidDataException("query-invalid");
             lock (gate) return Read(query.RequestId);
+        }
+        if (operation == ReconcileOperation)
+        {
+            var q = JsonSerializer.Deserialize<CpvPreparationReconciliation>(json, StrictJson)!;
+            if (q.SchemaVersion != 1 || q.Operation != ReconcileOperation || !Id(q.RequestId) || !Id(q.AttemptId) ||
+                !Id(q.RunId) || !Id(q.WorkflowId) || !q.TaskId.StartsWith("task-", StringComparison.Ordinal) || !Id(q.TaskId[5..]))
+                throw new InvalidDataException("reconciliation-request-invalid");
+            lock (gate) return Reconcile(q);
         }
         var r = JsonSerializer.Deserialize<CpvPreparationRequest>(json, StrictJson)!;
         if (r.SchemaVersion != 1 || r.Operation != Operation || !Id(r.RequestId) || !Id(r.AttemptId) || !Id(r.RunId) ||
@@ -105,6 +120,94 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
             return pending;
         }
     }
+    private object Reconcile(CpvPreparationReconciliation q)
+    {
+        Directory.CreateDirectory(Store);
+        string activePath = Path.Combine(Store, "active.json"), receiptPath = Path.Combine(Store, q.RequestId + ".json");
+        if (!File.Exists(receiptPath)) throw new InvalidDataException("reconciliation-receipt-missing");
+        var receipt = JsonSerializer.Deserialize<CpvPreparationReceipt>(File.ReadAllText(receiptPath), StrictJson)
+            ?? throw new InvalidDataException("reconciliation-receipt-invalid");
+        Match(q, receipt);
+        if (receipt.Status == "FailedReconciled")
+        {
+            if (receipt.FailureCode != "preparation-exited-without-result") throw new InvalidDataException("reconciliation-terminal-evidence-mismatch");
+            if (File.Exists(activePath))
+            {
+                var active = ReadActive(activePath); Match(q, active);
+                string terminalRequestPath = Path.Combine(Store, q.RequestId + ".request.json");
+                if (!File.Exists(terminalRequestPath) || JsonSerializer.Serialize(active, StrictJson) !=
+                    JsonSerializer.Serialize(JsonSerializer.Deserialize<CpvPreparationRequest>(File.ReadAllText(terminalRequestPath), StrictJson), StrictJson))
+                    throw new InvalidDataException("reconciliation-active-request-mismatch");
+            }
+            File.Delete(activePath);
+            return receipt;
+        }
+        if (receipt.Status != "OutcomeUnknown" || receipt.FailureCode != "preparation-failed-reconcile-required" ||
+            receipt.CleanupVerified || receipt.ModelSha256 != "" || receipt.ResultPath != "" || receipt.ResultSha256 != "" ||
+            receipt.RollbackStatus != "Unknown" || !File.Exists(activePath))
+            throw new InvalidDataException("reconciliation-state-invalid");
+        var request = ReadActive(activePath);
+        Match(q, request);
+        string requestPath = Path.Combine(Store, q.RequestId + ".request.json");
+        string failurePath = Path.Combine(Store, q.RequestId + ".failure.txt");
+        if (!File.Exists(requestPath) || !File.Exists(failurePath) ||
+            !File.ReadAllText(failurePath).Contains("InvalidDataException: preparation-exited-without-result", StringComparison.Ordinal))
+            throw new InvalidDataException("reconciliation-failure-evidence-invalid");
+        var persisted = JsonSerializer.Deserialize<CpvPreparationRequest>(File.ReadAllText(requestPath), StrictJson)
+            ?? throw new InvalidDataException("reconciliation-request-evidence-invalid");
+        Match(q, persisted);
+        if (JsonSerializer.Serialize(request, StrictJson) != JsonSerializer.Serialize(persisted, StrictJson))
+            throw new InvalidDataException("reconciliation-active-request-mismatch");
+        if (persisted.CandidateEvidence is null || receipt.CandidateSha256 != persisted.CandidateEvidence.CandidateDllSha256 ||
+            receipt.ManifestSha256 != persisted.CandidateEvidence.RunnerManifestSha256 || receipt.ExpiresUtc != persisted.ExpiresUtc ||
+            !Path.GetFullPath(receipt.ModelPath).Equals(Path.GetFullPath(Path.Combine(options.RuntimeRoot, "cpv-preparation-" + q.RunId, "model.rvt")), StringComparison.OrdinalIgnoreCase) ||
+            !Path.GetFullPath(receipt.RequestPath).Equals(Path.GetFullPath(Path.Combine(options.RuntimeRoot, "cpv-preparation-" + q.RunId, "tara-" + q.AttemptId + ".request.json")), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("reconciliation-path-binding-invalid");
+        string runnerPath = receipt.RequestPath, resultPath = runnerPath + ".preparation.json", modelPath = receipt.ModelPath;
+        if (!File.Exists(runnerPath) || File.Exists(resultPath) || File.Exists(modelPath + ".slog") || File.Exists(modelPath + ".lck"))
+            throw new InvalidDataException("reconciliation-result-or-lock-evidence-present");
+        var runner = JsonDocument.Parse(File.ReadAllText(runnerPath));
+        using (runner)
+        {
+            var root = runner.RootElement;
+            RejectDuplicateProperties(root);
+            string[] expectedProperties = ["schemaVersion", "operation", "requestId", "taskId", "workflowId", "attemptId", "runId", "requestPath", "modelPath", "modelSha256", "selectedManifestPath", "selectedManifestSha256", "outputPath", "expiresUtc"];
+            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != expectedProperties.Length ||
+                expectedProperties.Any(name => !root.TryGetProperty(name, out _)))
+                throw new InvalidDataException("reconciliation-runner-request-schema-mismatch");
+            if (root.GetProperty("operation").GetString() != RunnerOperation || root.GetProperty("requestId").GetString() != q.AttemptId ||
+                root.GetProperty("taskId").GetString() != q.TaskId || root.GetProperty("workflowId").GetString() != q.WorkflowId ||
+                root.GetProperty("attemptId").GetString() != q.AttemptId || root.GetProperty("runId").GetString() != q.RunId ||
+                root.GetProperty("schemaVersion").GetInt32() != 1 ||
+                !Path.GetFullPath(root.GetProperty("requestPath").GetString()!).Equals(Path.GetFullPath(runnerPath), StringComparison.OrdinalIgnoreCase) ||
+                !Path.GetFullPath(root.GetProperty("modelPath").GetString()!).Equals(Path.GetFullPath(modelPath), StringComparison.OrdinalIgnoreCase) ||
+                root.GetProperty("modelSha256").GetString() != FixtureSha256 ||
+                root.GetProperty("selectedManifestPath").GetString() != QaLaunchPolicy.ExpectedRunnerManifestPath ||
+                root.GetProperty("selectedManifestSha256").GetString() != persisted.CandidateEvidence.RunnerManifestSha256 ||
+                !Path.GetFullPath(root.GetProperty("outputPath").GetString()!).Equals(Path.GetFullPath(resultPath), StringComparison.OrdinalIgnoreCase) ||
+                DateTimeOffset.Parse(root.GetProperty("expiresUtc").GetString()!) != persisted.ExpiresUtc)
+                throw new InvalidDataException("reconciliation-runner-request-mismatch");
+        }
+        if (!Hash(modelPath).Equals(FixtureSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("reconciliation-model-hash-mismatch");
+        using var evidenceLease = boundary.ValidateReconciliation(persisted, receipt);
+        var terminal = receipt with { Status = "FailedReconciled", RequestSha256 = Hash(runnerPath), FailureCode = "preparation-exited-without-result", CleanupVerified = false, RollbackStatus = "NotRequired-NoPreparationResult" };
+        WriteReconciled(terminal); // Receipt is durable before the sole matching marker is removed.
+        File.Delete(activePath);
+        return terminal;
+    }
+    private static CpvPreparationRequest ReadActive(string path) => JsonSerializer.Deserialize<CpvPreparationRequest>(File.ReadAllText(path), StrictJson)
+        ?? throw new InvalidDataException("reconciliation-active-marker-invalid");
+    private static void Match(CpvPreparationReconciliation q, CpvPreparationRequest r)
+    {
+        if (q.RequestId != r.RequestId || q.TaskId != r.TaskId || q.WorkflowId != r.WorkflowId || q.AttemptId != r.AttemptId || q.RunId != r.RunId)
+            throw new InvalidDataException("reconciliation-identity-mismatch");
+    }
+    private static void Match(CpvPreparationReconciliation q, CpvPreparationReceipt r)
+    {
+        if (q.RequestId != r.RequestId || q.TaskId != r.TaskId || q.WorkflowId != r.WorkflowId || q.AttemptId != r.AttemptId || q.RunId != r.RunId)
+            throw new InvalidDataException("reconciliation-identity-mismatch");
+    }
     private object Read(string id) {
         if (!File.Exists(Path.Combine(Store, id + ".json"))) return new { schemaVersion = 1, operation = StatusOperation, requestId = id, status = "NotFound" };
         var receipt = JsonSerializer.Deserialize<CpvPreparationReceipt>(File.ReadAllText(Path.Combine(Store, id + ".json")), StrictJson)!;
@@ -113,6 +216,13 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
     private void Write(CpvPreparationReceipt receipt) {
         string path = Path.Combine(Store, receipt.RequestId + ".json"), temporary = path + ".partial";
         WriteDurable(temporary, JsonSerializer.Serialize(receipt, StrictJson)); File.Move(temporary, path, true);
+    }
+    private void WriteReconciled(CpvPreparationReceipt receipt)
+    {
+        string path = Path.Combine(Store, receipt.RequestId + ".json"), temporary = path + "." + Guid.NewGuid().ToString("N") + ".reconcile.partial";
+        string json = JsonSerializer.Serialize(receipt, StrictJson);
+        WriteDurable(temporary, json);
+        File.Move(temporary, path, true);
     }
     private static void WriteDurable(string path, string text) { using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None); using var writer = new StreamWriter(stream, leaveOpen: true); writer.Write(text); writer.Flush(); stream.Flush(true); }
     public static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
@@ -199,6 +309,27 @@ public sealed class RevitCpvPreparationBoundary(QaAgentOptions options) : ICpvPr
             fixturePreparationResultSha256 = CpvPreparationService.Hash(result), fixturePreparationAttemptId = r.AttemptId,
             fixturePreparationRunId = r.RunId }));
         return new(CpvPreparationService.Hash(model), CpvPreparationService.Hash(result), true, "CommittedDisposableFixtureOnly");
+    }
+    public IDisposable ValidateReconciliation(CpvPreparationRequest request, CpvPreparationReceipt receipt)
+    {
+        static void RequireNoRevitProcess()
+        {
+            // Any unreadable process snapshot makes absence unprovable; never treat errors as no process.
+            foreach (var process in Process.GetProcessesByName("Revit"))
+            {
+                using (process) throw new InvalidDataException("reconciliation-revit-process-present");
+            }
+        }
+        RequireNoRevitProcess();
+        var model = File.Open(receipt.ModelPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        try
+        {
+            if (!Convert.ToHexString(SHA256.HashData(model)).Equals(CpvPreparationService.FixtureSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("reconciliation-model-hash-mismatch");
+            RequireNoRevitProcess();
+            return model;
+        }
+        catch { model.Dispose(); throw; }
     }
     public static void VerifyResult(string json, CpvPreparationRequest r, string model) {
         using var d = JsonDocument.Parse(json); var e = d.RootElement;

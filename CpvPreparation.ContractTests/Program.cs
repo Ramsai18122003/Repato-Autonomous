@@ -17,6 +17,7 @@ try {
     QaAgentOptions Options(string suffix) => new("never-revit.exe", root, root, Path.Combine(root,suffix+"ledger.json"), Path.Combine(root,suffix));
     var boundary = new Boundary(); var ledger = new Ledger(); var options = Options("valid");
     var service = new CpvPreparationService(options, identity, ledger, boundary);
+    Check(JsonSerializer.SerializeToElement(service.Capabilities()).GetProperty("reconciliationOperation").GetString()==CpvPreparationService.ReconcileOperation,"authenticated capabilities advertise fixed reconciliation operation");
     var r = Request();
     var executing = (CpvPreparationReceipt)service.Handle(Json(r),now);
     Check(executing.Status == "Executing", "valid request reserves before execution");
@@ -64,6 +65,42 @@ try {
     Reject(()=>RevitCpvPreparationBoundary.VerifyResult(result.Replace("7.8","8.8"),r,model),"wrong elevation");
     Reject(()=>RevitCpvPreparationBoundary.VerifyResult(result.Replace(r.AttemptId,Guid.NewGuid().ToString("N")),r,model),"wrong result attempt");
     File.AppendAllText(model,"changed");Reject(()=>RevitCpvPreparationBoundary.VerifyResult(result,r,model),"prepared bytes mismatch");
+    (CpvPreparationReceipt Receipt,CpvPreparationService Service,CpvPreparationReconciliation Query,string Store,string RequestJson) ReconciliationCase(string name, Boundary boundary, bool corruptModel = false, bool resultPresent = false, bool lockPresent = false, bool corruptRunner = false, bool wrongIdentity = false)
+    {
+        string testRoot=Path.Combine(root,"reconcile-"+name),logRoot=Path.Combine(testRoot,"logs"),store=Path.Combine(logRoot,"CpvPreparation"),runtime=Path.Combine(testRoot,"runtime");Directory.CreateDirectory(store);Directory.CreateDirectory(runtime);
+        var rr=Request();string run=Path.Combine(runtime,"cpv-preparation-"+rr.RunId);Directory.CreateDirectory(run);
+        string modelPath=Path.Combine(run,"model.rvt"),runnerPath=Path.Combine(run,"tara-"+rr.AttemptId+".request.json");
+        File.Copy(@"C:\Repato-Autonomous\Source\QA\Fixtures\CreatePlanViewsEmpty.rvt",modelPath);
+        if(corruptModel)File.AppendAllText(modelPath,"corrupt");
+        var runner=new {schemaVersion=1,operation=CpvPreparationService.RunnerOperation,requestId=rr.AttemptId,taskId=rr.TaskId,workflowId=rr.WorkflowId,attemptId=rr.AttemptId,runId=rr.RunId,requestPath=runnerPath,modelPath,modelSha256=CpvPreparationService.FixtureSha256,selectedManifestPath=QaLaunchPolicy.ExpectedRunnerManifestPath,selectedManifestSha256=rr.CandidateEvidence.RunnerManifestSha256,outputPath=runnerPath+".preparation.json",expiresUtc=rr.ExpiresUtc};
+        File.WriteAllText(runnerPath,JsonSerializer.Serialize(runner));if(corruptRunner)File.WriteAllText(runnerPath,"{}");if(resultPresent)File.WriteAllText(runnerPath+".preparation.json","{}");if(lockPresent)File.WriteAllText(modelPath+".slog","");
+        var rec=new CpvPreparationReceipt(1,CpvPreparationService.Operation,rr.RequestId,rr.TaskId,rr.WorkflowId,rr.AttemptId,rr.RunId,"OutcomeUnknown",identity.User,identity.Sid,identity.SessionId,rr.CandidateEvidence.CandidateDllSha256,rr.CandidateEvidence.RunnerManifestSha256,modelPath,"",runnerPath,"","","",false,"Unknown","preparation-failed-reconcile-required",rr.ExpiresUtc);
+        string requestJson=Json(rr);File.WriteAllText(Path.Combine(store,"active.json"),requestJson);File.WriteAllText(Path.Combine(store,rr.RequestId+".request.json"),requestJson);File.WriteAllText(Path.Combine(store,rr.RequestId+".failure.txt"),"System.IO.InvalidDataException: preparation-exited-without-result");File.WriteAllText(Path.Combine(store,rr.RequestId+".json"),JsonSerializer.Serialize(rec,CpvPreparationService.StrictJson));
+        var svc=new CpvPreparationService(Options("reconcile-"+name) with {LogRoot=logRoot,RuntimeRoot=runtime},identity,new Ledger(),boundary);
+        var query=new CpvPreparationReconciliation(1,CpvPreparationService.ReconcileOperation,rr.RequestId,rr.TaskId,wrongIdentity?Guid.NewGuid().ToString("N"):rr.WorkflowId,rr.AttemptId,rr.RunId);
+        var terminal=(CpvPreparationReceipt)svc.Handle(JsonSerializer.Serialize(query,CpvPreparationService.StrictJson),now);
+        return (terminal,svc,query,store,requestJson);
+    }
+    var reconcileBoundary=new Boundary();
+    var failedReconciled=ReconciliationCase("valid",reconcileBoundary);
+    Check(failedReconciled.Receipt.Status=="FailedReconciled" && !failedReconciled.Receipt.CleanupVerified && failedReconciled.Receipt.FailureCode=="preparation-exited-without-result","valid evidence reconciles only to terminal failure");
+    Check(!File.Exists(Path.Combine(failedReconciled.Store,"active.json")),"validated agent reconciliation removes only its active marker");
+    Reject(()=>ReconciliationCase("identity-mismatch",new Boundary(),wrongIdentity:true),"identity-mismatch");
+    Reject(()=>ReconciliationCase("bad-model",new Boundary(),corruptModel:true),"model-hash-mismatch");
+    Reject(()=>ReconciliationCase("bad-runner",new Boundary(),corruptRunner:true),"runner-request-mismatch");
+    Reject(()=>ReconciliationCase("result",new Boundary(),resultPresent:true),"result-or-lock");
+    Reject(()=>ReconciliationCase("lock",new Boundary(),lockPresent:true),"result-or-lock");
+    var uncertainProcess=new Boundary{ReconciliationError="reconciliation-process-state-unknown"};Reject(()=>ReconciliationCase("process-unknown",uncertainProcess),"process-state-unknown");
+    Check(true,"unreadable process evidence fails closed through injected boundary");
+    var replayed=(CpvPreparationReceipt)failedReconciled.Service.Handle(JsonSerializer.Serialize(failedReconciled.Query,CpvPreparationService.StrictJson),now);
+    Check(replayed.Status=="FailedReconciled","duplicate agent reconciliation is idempotent after marker removal");
+    File.WriteAllText(Path.Combine(failedReconciled.Store,"active.json"),failedReconciled.RequestJson);
+    string receiptPath=Path.Combine(failedReconciled.Store,replayed.RequestId+".json");
+    var interruptedReceipt=replayed with {Status="OutcomeUnknown",RequestSha256="",FailureCode="preparation-failed-reconcile-required",RollbackStatus="Unknown"};
+    File.WriteAllText(receiptPath,JsonSerializer.Serialize(interruptedReceipt,CpvPreparationService.StrictJson));
+    string orphanedPartial=receiptPath+".crash.reconcile.partial";File.WriteAllText(orphanedPartial,"interrupted partial evidence");
+    var resumed=(CpvPreparationReceipt)failedReconciled.Service.Handle(JsonSerializer.Serialize(failedReconciled.Query,CpvPreparationService.StrictJson),now);
+    Check(resumed.Status=="FailedReconciled" && File.Exists(orphanedPartial) && !File.Exists(Path.Combine(failedReconciled.Store,"active.json")),"interrupted partial is preserved while terminal receipt resumes safely");
     Console.WriteLine($"PASS: {assertions} CPV preparation protocol assertions; injected processes only; Revit launched=false.");
 } finally {Directory.Delete(root,true);}
 
@@ -71,7 +108,9 @@ sealed class Identity:IIdentitySessionProvider {public string User{get;set;}=QaL
 sealed class Ledger:IReplayLedger {readonly HashSet<string> keys=[];public int Count=>keys.Count;public bool TryReserve(string id,DateTimeOffset now)=>keys.Add(id);public bool TryReserve(QaLaunchRequest r,DateTimeOffset now)=>TryReserve(r.RequestId,now);}
 sealed class Boundary:ICpvPreparationBoundary {
     public string? ValidationError{get;set;}
+    public string? ReconciliationError{get;set;}
     public TaskCompletionSource<CpvPreparationOutcome> Completion{get;}=new(TaskCreationOptions.RunContinuationsAsynchronously);
     public void Validate(CpvPreparationRequest r){if(ValidationError!=null)throw new InvalidDataException(ValidationError);}
+    public IDisposable ValidateReconciliation(CpvPreparationRequest r,CpvPreparationReceipt receipt){if(ReconciliationError!=null)throw new InvalidDataException(ReconciliationError);return Stream.Null;}
     public async Task<CpvPreparationOutcome> Execute(CpvPreparationRequest r,string dir){Directory.CreateDirectory(dir);File.WriteAllText(Path.Combine(dir,"tara-"+r.AttemptId+".request.json"),"synthetic");return await Completion.Task;}
 }
