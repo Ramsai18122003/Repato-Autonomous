@@ -41,9 +41,9 @@ try {
     & git -C $sandbox add -- base.txt .codex/settings.json
     & git -C $sandbox commit -qm baseline
 
-    $clean = Join-Path $sandbox 'clean file.ps1'
+    $clean = Join-Path $sandbox "clean file's.ps1"
     Set-Content -LiteralPath $clean -Value 'function Get-ReviewValue { return 42 }' -NoNewline
-    $run = Invoke-Review @('-Path','clean file.ps1','-SkipSemgrep')
+    $run = Invoke-Review @('-Path',"clean file's.ps1",'-SkipSemgrep')
     Assert-True ($run.ExitCode -eq 0 -and $run.Report.Status -eq 'PASS') 'Clean spaced-path change must PASS.'
     $md = Get-ChildItem -LiteralPath (Join-Path $sandbox 'productivity-test\code-review\output') -Recurse -Filter review-report.md | Select-Object -First 1; Assert-True ([bool]$md) 'Markdown report must exist.'
 
