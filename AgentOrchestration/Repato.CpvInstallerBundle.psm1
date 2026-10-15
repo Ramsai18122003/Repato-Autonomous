@@ -26,6 +26,15 @@ $script:ToolFiles=@(
     'AgentOrchestration/New-CpvInstallerBundle.ps1',
     'AgentOrchestration/Test-CpvInstallerBundle.ps1'
 )
+$script:PlatformDependencies=@(
+    'Windows PowerShell 5.1',
+    'Microsoft.PowerShell.Management',
+    'Microsoft.PowerShell.Security',
+    'CimCmdlets',
+    'ScheduledTasks',
+    'Windows Task Scheduler',
+    'Named Pipe client APIs'
+)
 
 function Get-CpvBundleSha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
@@ -208,7 +217,7 @@ function New-RepatoCpvInstallerBundle {
             schemaVersion=1;kind=$script:BundleKind;bundleId=('cpv-installer-'+$short);sourceCommit=$SourceCommit.ToLowerInvariant();createdUtc=[DateTimeOffset]::UtcNow.ToString('O')
             runtimeRelease=$releaseRecords.runtime;rollbackRelease=$releaseRecords.rollback
             fixedFixture=[ordered]@{path=$fixtureRelative;sha256=$script:FixtureSha256;boundBySourceCommit=$SourceCommit.ToLowerInvariant();boundBySourcePath='AgentOrchestration/Repato.CpvPreparationUpgrade.psm1'}
-            platformDependencies=@('Windows PowerShell 5.1','Microsoft.PowerShell.Management','Microsoft.PowerShell.Security','CimCmdlets','ScheduledTasks','Windows Task Scheduler','Named Pipe client APIs')
+            platformDependencies=$script:PlatformDependencies
             bundleTool=[ordered]@{sourceCommit=$ToolCommit.ToLowerInvariant();path='Tooling/AgentOrchestration/Repato.CpvInstallerBundle.psm1';sha256=(Get-CpvBundleSha256 $modulePath)}
             files=$entries
         }

@@ -18,7 +18,9 @@ $files=@();foreach($name in $contract.RuntimeFiles){$source=Join-Path $contract.
 [pscustomobject]@{ProductVersion='1.0.13+6cf1fa19150f';InstallRoot=$contract.InstallRoot;Files=$files}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $backup 'installed-runtime-evidence.json')
 $agents=@(Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
 if($agents.Count -ne 1 -or $agents[0].Path -ine $oldExe){throw 'Exact installed launch agent process required.'}
-Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -AgentExe $oldExe -TaskPath $contract.TaskPath -TaskName $contract.TaskName
+$agentHealth=Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000
+if(!$agentHealth.Ready -or $agentHealth.User -ine $contract.Account -or $agentHealth.Sid -cne $contract.Sid -or $agentHealth.SessionId -ne $agents[0].SessionId){throw 'Installed Launch Agent authenticated session identity is invalid.'}
+Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -ExpectedSessionId $agentHealth.SessionId -AgentExe $oldExe -TaskPath $contract.TaskPath -TaskName $contract.TaskName
 $token=$null
 try {
     $installed=Install-RepatoQaLaunchAgentBootstrap -SourceRoot $release -ManifestPath $manifest -ManifestSha256 $hash -RetainRollback
@@ -38,7 +40,17 @@ try {
     $result|Select-Object Installed,Version,ReleaseManifestPath,ReleaseManifestSha256,RuntimeDllSha256,BackupRoot,RevitLaunched|ConvertTo-Json
 } catch {
     $failure=$_
-    if($token){Stop-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName;Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue|Where-Object Path -ieq $oldExe|Stop-Process -Force;$null=Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token}
+    if($token){
+        $running=@(Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
+        if($running.Count -gt 1){throw 'Multiple Launch Agent processes prevent a safe rollback.'}
+        if($running.Count){
+            if($running[0].Path -ine $contract.Executable){throw 'Unexpected Launch Agent process prevents a safe rollback.'}
+            $rollbackHealth=Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000
+            if(!$rollbackHealth.Ready -or $rollbackHealth.User -ine $contract.Account -or $rollbackHealth.Sid -cne $contract.Sid -or $rollbackHealth.SessionId -ne $running[0].SessionId){throw 'Rollback Launch Agent session identity is unverified.'}
+            Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $running[0].Id -ExpectedAgentStartTime $running[0].StartTime.ToString('o') -ExpectedSessionId $rollbackHealth.SessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName
+        }
+        $null=Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token
+    }
     Start-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName
     throw $failure
 }

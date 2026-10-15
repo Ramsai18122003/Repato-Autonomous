@@ -8,6 +8,7 @@ if(!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 Import-Module (Join-Path $PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationRecovery.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationUpgrade.psm1') -Force -WarningAction SilentlyContinue
+Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 . (Join-Path $PSScriptRoot 'Repato.QaLaunchAgentInstall.ps1')
 $contract=Get-RepatoQaLaunchAgentBootstrapContract
 $manifest=Join-Path $ReleaseRoot 'Repato.QaLaunchAgent.release.json'
