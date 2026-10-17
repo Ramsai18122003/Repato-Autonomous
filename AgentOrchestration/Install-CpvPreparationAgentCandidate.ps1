@@ -12,11 +12,11 @@ function Get-CpvRevitProcesses {
 if(!$Execute){throw 'Installation is not automatic. Explicit deployment authorization and -Execute are required.'}
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Installation requires an elevated administrator PowerShell.'}
-Import-Module (Join-Path $PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationRecovery.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationUpgrade.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 . (Join-Path $PSScriptRoot 'Repato.QaLaunchAgentInstall.ps1')
+$bootstrap=Resolve-RepatoQaLaunchAgentBootstrapModule -ModulePath (Join-Path $PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')
 $contract=Get-RepatoQaLaunchAgentBootstrapContract
 $manifest=Join-Path $ReleaseRoot 'Repato.QaLaunchAgent.release.json'
 if((Get-FileHash $manifest).Hash -cne $ManifestSha256){throw 'Release manifest hash mismatch.'}
@@ -40,7 +40,6 @@ if(Test-Path -LiteralPath $activePath){
     $receipt=Invoke-CpvPreparationTransport $request
     $priorFiles=@(foreach($name in $contract.RuntimeFiles){$path=Join-Path $contract.InstallRoot $name;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Prior runtime rollback file is missing: $name"};[pscustomobject]@{name=$name;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}})
     $priorTask=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction Stop
-    $bootstrap=Get-Module Repato.QaLaunchAgent.Bootstrap
     $priorTaskValid=& $bootstrap {param($task) Test-TaskSpec $task} $priorTask
     $validated=& $bootstrap {param($root,$path,$hash) Read-ValidatedManifest $root $path $hash} $ReleaseRoot $manifest $ManifestSha256.ToUpperInvariant()
     $productVersion=(Get-Item -LiteralPath $agents[0].Path).VersionInfo.ProductVersion
@@ -63,11 +62,10 @@ $token=$null;$installAttempted=$false;$journalLease=$null
 try {
     if($upgrade){
         $journalLease=New-RepatoQaLaunchAgentBootstrapInstallJournal -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RequestId $ReconcileRequestId -TaskId $TaskId
-        $bootstrap=Get-Module Repato.QaLaunchAgent.Bootstrap
         & $bootstrap {param($lease) $j=Get-InstallJournal $lease;if($j.state -cne 'CandidateStaged'){throw 'Candidate stage was not durably verified.'};Set-InstallJournalState $j 'ServiceStopPending'|Out-Null} $journalLease
     }
-    Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -ExpectedSessionId $capabilities.sessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName
-    if($journalLease){& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($lease) $j=Get-InstallJournal $lease;if($j.state -cne 'ServiceStopPending'){throw 'Service-stop boundary was not durably recorded.'};Set-InstallJournalState $j 'ServiceStopped'|Out-Null} $journalLease}
+    Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -ExpectedSessionId $capabilities.sessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName -BootstrapModule $bootstrap
+    if($journalLease){& $bootstrap {param($lease) $j=Get-InstallJournal $lease;if($j.state -cne 'ServiceStopPending'){throw 'Service-stop boundary was not durably recorded.'};Set-InstallJournalState $j 'ServiceStopped'|Out-Null} $journalLease}
     $installAttempted=$true
     $installed=Install-RepatoQaLaunchAgentBootstrap -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RetainRollback -DurableJournal $journalLease
     $token=$installed.RollbackToken
@@ -96,8 +94,8 @@ try {
     $durableRecoveryHandled=$false
     if($token -and $token.DurableJournal){Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token|Out-Null;$durableRecoveryHandled=$true}
     elseif($journalLease){
-        try{& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($lease,$context) Invoke-InstallJournalRecoveryCore $lease $context} $journalLease (& (Get-Module Repato.QaLaunchAgent.Bootstrap) { New-RealBootstrapContext })|Out-Null}
-        finally{& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($lease) Close-InstallJournalLease $lease} $journalLease}
+        try{& $bootstrap {param($lease,$context) Invoke-InstallJournalRecoveryCore $lease $context} $journalLease (& $bootstrap { New-RealBootstrapContext })|Out-Null}
+        finally{& $bootstrap {param($lease) Close-InstallJournalLease $lease} $journalLease}
         $durableRecoveryHandled=$true
     }
     if(!$durableRecoveryHandled){
@@ -109,7 +107,7 @@ try {
             if($process.Path -ine $contract.Executable){throw 'Unexpected Launch Agent process prevents safe installer recovery; task remains stopped.'}
             $health=Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000
             if(!$health.Ready -or $health.User -ine 'RAMSAI\RepatoQA' -or $health.Sid -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or $health.SessionId -ne $process.SessionId){throw 'Launch Agent session identity is unverified; task remains stopped.'}
-            Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $process.Id -ExpectedAgentStartTime $process.StartTime.ToString('o') -ExpectedSessionId $health.SessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName
+            Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $process.Id -ExpectedAgentStartTime $process.StartTime.ToString('o') -ExpectedSessionId $health.SessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName -BootstrapModule $bootstrap
         } else {
             $task=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction Stop
             if($task.State.ToString() -ceq 'Running'){throw 'Scheduled task is running without an identifiable agent; installer recovery is ambiguous.'}
@@ -118,13 +116,13 @@ try {
             $token=Restore-RepatoQaLaunchAgentBootstrapInstall -RollbackToken $token
             if(@($token.RuntimeIntegrity|Where-Object {!$_.Match}).Count){throw 'Restored Launch Agent runtime integrity failed; task remains stopped.'}
             $task=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction Stop
-            if(!(& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($task) Test-TaskSpec $task} $task)){throw 'Restored Launch Agent task contract failed; task remains stopped.'}
+            if(!(& $bootstrap {param($task) Test-TaskSpec $task} $task)){throw 'Restored Launch Agent task contract failed; task remains stopped.'}
             $rollbackVerified=$true
         }
         elseif($upgrade -and $installAttempted){
             $targetIntegrity=Get-RepatoQaLaunchAgentRuntimeIntegrity $contract.InstallRoot ([pscustomobject]@{files=$upgrade.PriorFiles})
             $restoredTask=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction SilentlyContinue
-            $restoredTaskValid=$false;if($restoredTask){$restoredTaskValid=& (Get-Module Repato.QaLaunchAgent.Bootstrap) {param($task) Test-TaskSpec $task} $restoredTask}
+            $restoredTaskValid=$false;if($restoredTask){$restoredTaskValid=& $bootstrap {param($task) Test-TaskSpec $task} $restoredTask}
             if(@($targetIntegrity|Where-Object {!$_.Match}).Count -or !$restoredTaskValid){throw 'Rollback token is unavailable and prior runtime/task could not be verified; scheduled task remains stopped.'}
             $rollbackVerified=$true
         }

@@ -13,12 +13,12 @@ if($platformDependencies.Count -ne 7){throw "Expected 7 declared platform depend
 
 $installerPath=Join-Path $PSScriptRoot 'Install-CpvPreparationAgentCandidate.ps1'
 $installer=Get-Content -LiteralPath $installerPath -Raw
-$bootstrapImport=$installer.IndexOf("Import-Module (Join-Path `$PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')")
+$bootstrapImport=$installer.IndexOf("Resolve-RepatoQaLaunchAgentBootstrapModule -ModulePath (Join-Path `$PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')")
 $recoveryImport=$installer.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Repato.CpvPreparationRecovery.psm1')")
 $upgradeImport=$installer.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Repato.CpvPreparationUpgrade.psm1')")
  $mayaImport=$installer.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Repato.MayaQaWorkflow.psm1')")
-if($bootstrapImport -lt 0 -or $recoveryImport -lt 0 -or $upgradeImport -lt 0 -or $mayaImport -lt 0 -or !($bootstrapImport -lt $recoveryImport -and $recoveryImport -lt $upgradeImport -and $upgradeImport -lt $mayaImport)){
-    throw 'Installer must load Maya after recovery and upgrade modules so their forced nested import cannot hide the health API.'
+if($bootstrapImport -lt 0 -or $recoveryImport -lt 0 -or $upgradeImport -lt 0 -or $mayaImport -lt 0 -or !($recoveryImport -lt $upgradeImport -and $upgradeImport -lt $mayaImport) -or $bootstrapImport -lt $mayaImport){
+    throw 'Installer must resolve its exact bootstrap module after loading nested dependencies and the health API.'
 }
 
 Import-Module (Join-Path $repoRoot 'QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1') -Force -WarningAction SilentlyContinue
@@ -44,7 +44,7 @@ foreach($path in $entrypoints){
 }
 if($commands.Count -ne 50){throw "Installer entrypoints now contain $($commands.Count) unique command references; review the documented dependency count."}
 
-$bootstrap=Get-Module 'Repato.QaLaunchAgent.Bootstrap'
+$bootstrap=Resolve-RepatoQaLaunchAgentBootstrapModule -ModulePath (Join-Path $repoRoot 'QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')
 $privateBootstrapCommands=@('Test-TaskSpec','Read-ValidatedManifest','Get-InstallJournal','Set-InstallJournalState','Invoke-InstallJournalRecoveryCore','New-RealBootstrapContext','Close-InstallJournalLease')
 foreach($name in $privateBootstrapCommands){
     & $bootstrap {param($commandName)if(!(Get-Command $commandName -ErrorAction SilentlyContinue)){throw "Bootstrap private dependency is missing: $commandName"}} $name

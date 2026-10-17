@@ -43,9 +43,24 @@ function Get-RepatoQaLaunchAgentProcessIdentity {
     [pscustomobject]@{Process=$process;ProcessId=$ProcessId;ProcessName=$process.ProcessName;Path=$process.Path;StartTime=$process.StartTime.ToString('o');SessionId=[int]$process.SessionId;OwnerSid=$ownerSid}
 }
 
+function Resolve-RepatoQaLaunchAgentBootstrapModule {
+    [CmdletBinding()]
+    param(
+        [string]$ModulePath=(Join-Path $PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1'),
+        [scriptblock]$ImportProvider
+    )
+    $expectedPath=[IO.Path]::GetFullPath($ModulePath)
+    $imported=if($ImportProvider){@(& $ImportProvider $expectedPath)}else{@(Import-Module -Name $expectedPath -Force -PassThru -ErrorAction Stop)}
+    if($imported.Count -ne 1){throw 'The trusted Launch Agent bootstrap module import is missing or ambiguous.'}
+    $module=$imported[0]
+    if($module -isnot [Management.Automation.PSModuleInfo] -or $module.Name -cne 'Repato.QaLaunchAgent.Bootstrap' -or
+        [IO.Path]::GetFullPath([string]$module.Path) -ine $expectedPath){throw 'The trusted Launch Agent bootstrap module identity does not match its expected source.'}
+    $module
+}
+
 function Get-RepatoQaLaunchAgentTaskEvidence {
-    $bootstrap=Get-Module Repato.QaLaunchAgent.Bootstrap
-    if(!$bootstrap){throw 'The validated Launch Agent bootstrap module is not loaded.'}
+    param([Parameter(Mandatory)][Management.Automation.PSModuleInfo]$BootstrapModule)
+    $bootstrap=$BootstrapModule
     $context=& $bootstrap { New-RealBootstrapContext }
     $actual=& $context.GetTask
     $raw=Get-ScheduledTask -TaskPath '\Repato\' -TaskName 'Repato QA Launch Agent' -ErrorAction Stop
@@ -65,6 +80,7 @@ function Stop-RepatoQaLaunchAgentForUpdate {
         [int]$ExpectedSessionId,
         [scriptblock]$GetProcessIdentity,
         [scriptblock]$GetTaskEvidence,
+        [Management.Automation.PSModuleInfo]$BootstrapModule,
         [scriptblock]$StopTask = { param($path,$name) Stop-ScheduledTask -TaskPath $path -TaskName $name -ErrorAction Stop },
         [scriptblock]$StopProcess = { param($identity) $identity.Process.Kill() },
         [scriptblock]$StartTask = { param($path,$name) Start-ScheduledTask -TaskPath $path -TaskName $name -ErrorAction Stop },
@@ -74,7 +90,8 @@ function Stop-RepatoQaLaunchAgentForUpdate {
     if([IO.Path]::GetFullPath($AgentExe) -ine [IO.Path]::GetFullPath($contract.Executable) -or $TaskPath -cne $contract.TaskPath -or $TaskName -cne $contract.TaskName){throw 'Installer stop target differs from the fixed Launch Agent contract.'}
     if($ExpectedSessionId -lt 0){throw 'Expected session identity is invalid.'}
     if(!$GetProcessIdentity){$GetProcessIdentity={param($id)Get-RepatoQaLaunchAgentProcessIdentity -ProcessId $id}}
-    if(!$GetTaskEvidence){$GetTaskEvidence={Get-RepatoQaLaunchAgentTaskEvidence}}
+    if(!$BootstrapModule){$BootstrapModule=Resolve-RepatoQaLaunchAgentBootstrapModule}
+    if(!$GetTaskEvidence){$GetTaskEvidence={Get-RepatoQaLaunchAgentTaskEvidence -BootstrapModule $BootstrapModule}.GetNewClosure()}
     $assertTask={
         param($evidence)
         if(@($evidence).Count -ne 1 -or !$evidence.Valid -or $evidence.TaskPath -cne $contract.TaskPath -or $evidence.TaskName -cne $contract.TaskName -or
