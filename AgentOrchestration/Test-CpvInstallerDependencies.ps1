@@ -42,7 +42,7 @@ foreach($path in $entrypoints){
         if($command.CommandElements[0] -is [Management.Automation.Language.StringConstantExpressionAst]){[void]$commands.Add($command.GetCommandName())}
     }
 }
-if($commands.Count -ne 49){throw "Installer entrypoints now contain $($commands.Count) unique command references; review the documented dependency count."}
+if($commands.Count -ne 50){throw "Installer entrypoints now contain $($commands.Count) unique command references; review the documented dependency count."}
 
 $bootstrap=Get-Module 'Repato.QaLaunchAgent.Bootstrap'
 $privateBootstrapCommands=@('Test-TaskSpec','Read-ValidatedManifest','Get-InstallJournal','Set-InstallJournalState','Invoke-InstallJournalRecoveryCore','New-RealBootstrapContext','Close-InstallJournalLease')
@@ -51,6 +51,7 @@ foreach($name in $privateBootstrapCommands){
     [void]$commands.Remove($name)
 }
 [void]$commands.Remove('Get-CpvRevitProcesses')
+[void]$commands.Remove('ConvertFrom-RepatoCimProcessStartTime')
 foreach($name in $commands){if(!(Get-Command $name -ErrorAction SilentlyContinue)){throw "Installer command dependency is not visible after the production import sequence: $name"}}
 if(!(Get-Command Invoke-MayaQaLaunchAgentHealth -ErrorAction SilentlyContinue)){throw 'Maya authenticated health command is not exported to the installer scope.'}
 $signatures=@{
@@ -68,7 +69,7 @@ foreach($entry in $signatures.GetEnumerator()){
     Test='CpvInstallerDependencies'
     SourceDependencies=$sourceFiles.Count
     PlatformDependencies=$platformDependencies.Count
-    UniqueCommandReferences=49
+    UniqueCommandReferences=50
     ResolvedVisibleCommands=$commands.Count
     BootstrapPrivateCommands=$privateBootstrapCommands.Count
     CommandSignaturesValidated=$signatures.Count

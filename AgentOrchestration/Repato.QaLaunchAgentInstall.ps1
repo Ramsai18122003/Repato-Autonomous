@@ -18,6 +18,12 @@ function New-RepatoQaLaunchAgentInstallArguments {
     $arguments
 }
 
+function ConvertFrom-RepatoCimProcessStartTime($Value) {
+    if($Value -is [DateTime]){return $Value}
+    if($Value -isnot [string] -or $Value -notmatch '^\d{14}\.\d{6}[+-]\d{3}$'){throw 'Launch Agent CIM process creation timestamp is missing or invalid.'}
+    try{[Management.ManagementDateTimeConverter]::ToDateTime($Value)}catch{throw 'Launch Agent CIM process creation timestamp is invalid.'}
+}
+
 function Get-RepatoQaLaunchAgentProcessIdentity {
     param([Parameter(Mandatory)][int]$ProcessId)
     $process=Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
@@ -32,7 +38,7 @@ function Get-RepatoQaLaunchAgentProcessIdentity {
     $owner=Invoke-CimMethod -InputObject $item -MethodName GetOwner -ErrorAction Stop
     if($owner.ReturnValue -ne 0){throw 'Launch Agent process owner could not be verified.'}
     $ownerSid=([Security.Principal.NTAccount]($owner.Domain+'\'+$owner.User)).Translate([Security.Principal.SecurityIdentifier]).Value
-    $cimStart=[Management.ManagementDateTimeConverter]::ToDateTime([string]$item.CreationDate)
+    $cimStart=ConvertFrom-RepatoCimProcessStartTime $item.CreationDate
     if([Math]::Abs(($cimStart-$process.StartTime).TotalSeconds) -gt 0.05){throw 'Launch Agent process creation identity changed during lookup.'}
     [pscustomobject]@{Process=$process;ProcessId=$ProcessId;ProcessName=$process.ProcessName;Path=$process.Path;StartTime=$process.StartTime.ToString('o');SessionId=[int]$process.SessionId;OwnerSid=$ownerSid}
 }
