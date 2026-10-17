@@ -9,6 +9,14 @@ $script:Failure='preparation-exited-without-result'
 $script:FixtureSha256='92CC9E434E2C4DD6720A2AA564E19F4E1A30EB3DA63CEA73CF737F875B9EDD45'
 $script:RuntimeFiles=@('Repato.QaLaunchAgent.exe','Repato.QaLaunchAgent.dll','Repato.QaLaunchAgent.deps.json','Repato.QaLaunchAgent.runtimeconfig.json')
 
+function Get-CpvInstalledAgentSid {
+    param([Parameter(Mandatory)]$InstalledAgent,[Parameter(Mandatory)][AllowEmptyString()][string]$ProcessSid)
+    $sidProperty=$InstalledAgent.PSObject.Properties['Sid']
+    $sid=if($sidProperty -and ![string]::IsNullOrWhiteSpace([string]$sidProperty.Value)){[string]$sidProperty.Value}else{$ProcessSid}
+    if($ProcessSid -cne $script:Sid -or $sid -cne $script:Sid){throw 'Installed Launch Agent process SID evidence is missing or invalid.'}
+    $sid
+}
+
 function Get-CpvUpgradeInventory([string[]]$Roots) {
     $items=[Collections.Generic.List[object]]::new()
     foreach($root in $Roots){
@@ -28,7 +36,7 @@ function Assert-CpvPreparationUpgradeEvidence {
         [Parameter(Mandatory)][string]$EvidenceRoot,[Parameter(Mandatory)][string]$RuntimeRoot,
         [Parameter(Mandatory)][string]$RequestId,[Parameter(Mandatory)][string]$TaskId,
         [Parameter(Mandatory)]$Capabilities,[Parameter(Mandatory)]$Receipt,
-        [Parameter(Mandatory)]$InstalledAgent,[Parameter(Mandatory)][string]$ExpectedExecutable,
+        [Parameter(Mandatory)]$InstalledAgent,[Parameter(Mandatory)][AllowEmptyString()][string]$ProcessSid,[Parameter(Mandatory)][string]$ExpectedExecutable,
         [Parameter(Mandatory)][string]$ExpectedInstalledVersion,[Parameter(Mandatory)][string]$CandidateRoot,
         [Parameter(Mandatory)][string]$CandidateManifestPath,[Parameter(Mandatory)][string]$CandidateManifestSha256,
         [Parameter(Mandatory)][object[]]$PriorRuntimeFiles,[Parameter(Mandatory)][bool]$PriorTaskContractValid,
@@ -40,7 +48,8 @@ function Assert-CpvPreparationUpgradeEvidence {
     if(!$InstalledAgent -or $InstalledAgent.ProcessName -cne 'Repato.QaLaunchAgent' -or
         [IO.Path]::GetFullPath($InstalledAgent.Path) -ine [IO.Path]::GetFullPath($ExpectedExecutable) -or
         $InstalledAgent.ProductVersion -cne $ExpectedInstalledVersion -or $InstalledAgent.Id -le 0 -or !$InstalledAgent.StartTime){throw 'Installed Launch Agent identity differs from the expected prior runtime.'}
-    if($InstalledAgent.User -ine $script:User -or $InstalledAgent.Sid -cne $script:Sid -or
+    $installedSid=Get-CpvInstalledAgentSid -InstalledAgent $InstalledAgent -ProcessSid $ProcessSid
+    if($InstalledAgent.User -ine $script:User -or $installedSid -cne $script:Sid -or
         $InstalledAgent.SessionId -ne $Capabilities.sessionId){throw 'Installed Launch Agent process identity differs from authenticated pipe identity.'}
     if(!$NoRevitProcesses){throw 'Revit process presence or process-state uncertainty blocks the upgrade.'}
     if(!$PriorTaskContractValid -or @($PriorRuntimeFiles).Count -ne $script:RuntimeFiles.Count -or

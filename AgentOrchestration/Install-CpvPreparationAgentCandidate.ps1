@@ -30,12 +30,11 @@ if(Test-Path -LiteralPath $activePath){
     if((Get-CpvRevitProcesses).Count){throw 'Revit is running; the guarded upgrade is unavailable.'}
     $agents=@(Get-Process -Name Repato.QaLaunchAgent -ErrorAction Stop)
     if($agents.Count -ne 1 -or $agents[0].ProcessName -cne 'Repato.QaLaunchAgent' -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
-    $ownerProcess=Get-CimInstance Win32_Process -Filter "ProcessId=$($agents[0].Id)" -ErrorAction Stop
-    if(!$ownerProcess){throw 'Installed Launch Agent process identity is unavailable.'}
-    $owner=Invoke-CimMethod -InputObject $ownerProcess -MethodName GetOwner -ErrorAction Stop
-    if($owner.ReturnValue -ne 0){throw 'Installed Launch Agent owner is unavailable.'}
-    $ownerName=$owner.Domain+'\'+$owner.User
-    $ownerSid=([Security.Principal.NTAccount]$ownerName).Translate([Security.Principal.SecurityIdentifier]).Value
+    $processIdentity=Get-RepatoQaLaunchAgentProcessIdentity -ProcessId $agents[0].Id
+    if(!$processIdentity -or $processIdentity.ProcessName -cne 'Repato.QaLaunchAgent' -or $processIdentity.Path -ine $contract.Executable){throw 'Installed Launch Agent process identity is unavailable.'}
+    $ownerSid=[string]$processIdentity.OwnerSid
+    if(!$ownerSid){throw 'Installed Launch Agent process SID is unavailable.'}
+    $ownerName=([Security.Principal.SecurityIdentifier]$ownerSid).Translate([Security.Principal.NTAccount]).Value
     $capabilities=Get-CpvPreparationCapabilities
     $request=[pscustomobject]@{schemaVersion=1;operation='cpv-preparation-status';requestId=$ReconcileRequestId}
     $receipt=Invoke-CpvPreparationTransport $request
@@ -47,7 +46,7 @@ if(Test-Path -LiteralPath $activePath){
     $productVersion=(Get-Item -LiteralPath $agents[0].Path).VersionInfo.ProductVersion
     $installedIdentity=[pscustomobject]@{ProcessName=$agents[0].ProcessName;Path=$agents[0].Path;ProductVersion=$productVersion;Id=$agents[0].Id;StartTime=$agents[0].StartTime;User=$ownerName;Sid=$ownerSid;SessionId=$agents[0].SessionId}
     $upgrade=Assert-CpvPreparationUpgradeEvidence -EvidenceRoot $activeRoot -RuntimeRoot 'C:\Repato-Autonomous\Source\QA\TestRuns' `
-        -RequestId $ReconcileRequestId -TaskId $TaskId -Capabilities $capabilities -Receipt $receipt -InstalledAgent $installedIdentity `
+        -RequestId $ReconcileRequestId -TaskId $TaskId -Capabilities $capabilities -Receipt $receipt -InstalledAgent $installedIdentity -ProcessSid $ownerSid `
         -ExpectedExecutable $contract.Executable -ExpectedInstalledVersion '1.0.17+4b0066247088' -CandidateRoot $validated.SourceRoot `
         -CandidateManifestPath $manifest -CandidateManifestSha256 $ManifestSha256 -PriorRuntimeFiles $priorFiles `
         -PriorTaskContractValid ([bool]$priorTaskValid) -NoRevitProcesses $true
