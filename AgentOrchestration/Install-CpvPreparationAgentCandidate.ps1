@@ -2,6 +2,13 @@
 param([Parameter(Mandatory)][string]$ReleaseRoot,[Parameter(Mandatory)][string]$ManifestSha256,[switch]$Execute,
     [string]$ReconcileRequestId,[string]$TaskId='task-bf61fe7f22d74df7a92599681da5919e')
 $ErrorActionPreference='Stop'
+function Get-CpvRevitProcesses {
+    try { @(Get-Process -Name Revit -ErrorAction Stop) }
+    catch {
+        if($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenName,*'){ return @() }
+        throw
+    }
+}
 if(!$Execute){throw 'Installation is not automatic. Explicit deployment authorization and -Execute are required.'}
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Installation requires an elevated administrator PowerShell.'}
@@ -20,7 +27,7 @@ if(Test-Path -LiteralPath $activePath){
     if($TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e' -or $ReconcileRequestId -cne '9953e14c15524fe09440d1c7d7353950'){
         throw 'Only the explicitly approved CPV failed request can use this upgrade exception.'
     }
-    if(@(Get-Process -Name Revit -ErrorAction Stop).Count){throw 'Revit is running; the guarded upgrade is unavailable.'}
+    if((Get-CpvRevitProcesses).Count){throw 'Revit is running; the guarded upgrade is unavailable.'}
     $agents=@(Get-Process -Name Repato.QaLaunchAgent -ErrorAction Stop)
     if($agents.Count -ne 1 -or $agents[0].ProcessName -cne 'Repato.QaLaunchAgent' -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
     $ownerProcess=Get-CimInstance Win32_Process -Filter "ProcessId=$($agents[0].Id)" -ErrorAction Stop
@@ -46,7 +53,7 @@ if(Test-Path -LiteralPath $activePath){
         -PriorTaskContractValid ([bool]$priorTaskValid) -NoRevitProcesses $true
     $evidenceSnapshot=Get-CpvPreparationUpgradeEvidenceSnapshot -EvidenceRoot $activeRoot -RunDirectory $upgrade.RunDirectory
 } elseif($ReconcileRequestId){throw 'A reconciliation request was supplied but no matching active marker exists.'}
-$revit=@(Get-Process -Name Revit -ErrorAction Stop)
+$revit=Get-CpvRevitProcesses
 if($revit.Count){throw 'Revit must be stopped.'}
 $agents=@(Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
 if($agents.Count -ne 1 -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
