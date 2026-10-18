@@ -17,6 +17,13 @@ function Get-CpvInstalledAgentSid {
     $sid
 }
 
+function Get-CpvHealthSid {
+    param([Parameter(Mandatory)]$Health)
+    $sidProperty=$Health.PSObject.Properties['SID']
+    if(!$sidProperty -or [string]::IsNullOrWhiteSpace([string]$sidProperty.Value)){throw 'Authenticated Launch Agent health response has no SID evidence.'}
+    [string]$sidProperty.Value
+}
+
 function Get-CpvUpgradeInventory([string[]]$Roots) {
     $items=[Collections.Generic.List[object]]::new()
     foreach($root in $Roots){
@@ -125,4 +132,4 @@ function Test-CpvPreparationUpgradeEvidenceSnapshot($Before,[string]$EvidenceRoo
     (ConvertTo-Json -InputObject @($Before) -Depth 5 -Compress) -ceq (ConvertTo-Json -InputObject @($after) -Depth 5 -Compress)
 }
 
-Export-ModuleMember -Function Assert-CpvPreparationUpgradeEvidence,Get-CpvPreparationUpgradeEvidenceSnapshot,Test-CpvPreparationUpgradeEvidenceSnapshot
+Export-ModuleMember -Function Assert-CpvPreparationUpgradeEvidence,Get-CpvPreparationUpgradeEvidenceSnapshot,Test-CpvPreparationUpgradeEvidenceSnapshot,Get-CpvHealthSid

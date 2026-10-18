@@ -57,7 +57,8 @@ $agents=@(Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
 if($agents.Count -ne 1 -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
 if(!$capabilities){$capabilities=Get-CpvPreparationCapabilities}
 $agentHealth=Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000
-if(!$agentHealth.Ready -or $agentHealth.User -ine 'RAMSAI\RepatoQA' -or $agentHealth.Sid -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or $agentHealth.SessionId -ne $agents[0].SessionId -or $agentHealth.SessionId -ne $capabilities.sessionId){throw 'Installed Launch Agent authenticated session identity is invalid.'}
+$agentHealthSid=Get-CpvHealthSid -Health $agentHealth
+if(!$agentHealth.Ready -or $agentHealth.User -ine 'RAMSAI\RepatoQA' -or $agentHealthSid -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or $agentHealth.SessionId -ne $agents[0].SessionId -or $agentHealth.SessionId -ne $capabilities.sessionId){throw 'Installed Launch Agent authenticated session identity is invalid.'}
 $token=$null;$installAttempted=$false;$journalLease=$null
 try {
     if($upgrade){
@@ -105,8 +106,11 @@ try {
         if($processes.Count){
             $process=$processes[0]
             if($process.Path -ine $contract.Executable){throw 'Unexpected Launch Agent process prevents safe installer recovery; task remains stopped.'}
-            $health=Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000
-            if(!$health.Ready -or $health.User -ine 'RAMSAI\RepatoQA' -or $health.Sid -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or $health.SessionId -ne $process.SessionId){throw 'Launch Agent session identity is unverified; task remains stopped.'}
+            try {
+                $health=Invoke-MayaQaLaunchAgentHealth -TimeoutMilliseconds 3000
+                $healthSid=Get-CpvHealthSid -Health $health
+                if(!$health.Ready -or $health.User -ine 'RAMSAI\RepatoQA' -or $healthSid -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or $health.SessionId -ne $process.SessionId){throw 'Launch Agent session identity is unverified; task remains stopped.'}
+            } catch { throw "Installer failure: $($failure.Exception.Message); rollback identity verification failed: $($_.Exception.Message)" }
             Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $process.Id -ExpectedAgentStartTime $process.StartTime.ToString('o') -ExpectedSessionId $health.SessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName -BootstrapModule $bootstrap
         } else {
             $task=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction Stop

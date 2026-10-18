@@ -42,7 +42,7 @@ foreach($path in $entrypoints){
         if($command.CommandElements[0] -is [Management.Automation.Language.StringConstantExpressionAst]){[void]$commands.Add($command.GetCommandName())}
     }
 }
-if($commands.Count -ne 50){throw "Installer entrypoints now contain $($commands.Count) unique command references; review the documented dependency count."}
+if($commands.Count -ne 51){throw "Installer entrypoints now contain $($commands.Count) unique command references; review the documented dependency count."}
 
 $bootstrap=Resolve-RepatoQaLaunchAgentBootstrapModule -ModulePath (Join-Path $repoRoot 'QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')
 $privateBootstrapCommands=@('Test-TaskSpec','Read-ValidatedManifest','Get-InstallJournal','Set-InstallJournalState','Invoke-InstallJournalRecoveryCore','New-RealBootstrapContext','Close-InstallJournalLease')
