@@ -39,8 +39,8 @@ if(Test-Path -LiteralPath $activePath){
     $request=[pscustomobject]@{schemaVersion=1;operation='cpv-preparation-status';requestId=$ReconcileRequestId}
     $receipt=Invoke-CpvPreparationTransport $request
     $priorFiles=@(foreach($name in $contract.RuntimeFiles){$path=Join-Path $contract.InstallRoot $name;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Prior runtime rollback file is missing: $name"};[pscustomobject]@{name=$name;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}})
-    $priorTask=Get-ScheduledTask -TaskPath $contract.TaskPath -TaskName $contract.TaskName -ErrorAction Stop
-    $priorTaskValid=& $bootstrap {param($task) Test-TaskSpec $task} $priorTask
+    $priorTaskEvidence=Get-RepatoQaLaunchAgentTaskEvidence -BootstrapModule $bootstrap
+    $priorTaskValid=[bool]$priorTaskEvidence.Valid
     $validated=& $bootstrap {param($root,$path,$hash) Read-ValidatedManifest $root $path $hash} $ReleaseRoot $manifest $ManifestSha256.ToUpperInvariant()
     $productVersion=(Get-Item -LiteralPath $agents[0].Path).VersionInfo.ProductVersion
     $installedIdentity=[pscustomobject]@{ProcessName=$agents[0].ProcessName;Path=$agents[0].Path;ProductVersion=$productVersion;Id=$agents[0].Id;StartTime=$agents[0].StartTime;User=$ownerName;Sid=$ownerSid;SessionId=$agents[0].SessionId}

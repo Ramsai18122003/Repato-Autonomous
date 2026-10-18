@@ -5,6 +5,7 @@ $temp=Join-Path ([IO.Path]::GetTempPath()) ('cpv-guarded-upgrade-'+[guid]::NewGu
 $script:count=0;$names=@('Repato.QaLaunchAgent.exe','Repato.QaLaunchAgent.dll','Repato.QaLaunchAgent.deps.json','Repato.QaLaunchAgent.runtimeconfig.json')
 function Check($value,$name){$script:count++;if(!$value){throw "FAILED: $name"}}
 function Reject($action,$pattern){$script:count++;try{&$action;throw 'Unexpected acceptance'}catch{if($_.Exception.Message -notmatch $pattern){throw}}}
+function New-TestTaskEvidence($spec){$evidence=[ordered]@{};foreach($property in $spec.PSObject.Properties){if($property.Name -cne 'Sid'){$evidence[$property.Name]=$property.Value}};$evidence.PrincipalResolvedSid=$spec.Sid;$evidence.TriggerResolvedSid=$spec.Sid;[pscustomobject]$evidence}
 function New-Case([string]$name){
     $root=Join-Path $temp $name;$logs=Join-Path $root 'logs\CpvPreparation';$runtime=Join-Path $root 'runtime';$old=Join-Path $root 'old';$candidate=Join-Path $root 'candidate'
     New-Item -ItemType Directory -Path $logs,$runtime,$old,$candidate -Force|Out-Null
@@ -44,8 +45,8 @@ try {
     $missingBackup=@{}+$gateArgs;$missingBackup.PriorRuntimeFiles=@($valid.Prior|Select-Object -Skip 1);Reject {Assert-CpvPreparationUpgradeEvidence @missingBackup} 'rollback source'
     $processUnknown=@{}+$gateArgs;$processUnknown.NoRevitProcesses=$false;Reject {Assert-CpvPreparationUpgradeEvidence @processUnknown} 'process presence'
     $target=$valid.Old;$manifestObject=Get-Content $valid.Manifest -Raw|ConvertFrom-Json;$validated=[pscustomobject]@{SourceRoot=$valid.Candidate;Manifest=$manifestObject;ManifestSha256=$valid.ManifestHash}
-    $state=[pscustomobject]@{Task=$null;FailSet=$false};$context=[pscustomobject]@{IsAdministrator={};ResolveIdentity={param($a,$s)};PrepareAcl={param($p)};GetTask={$state.Task};ExportTask={param($t)if($t){'prior-task'}};SetTask={param($spec)$state.Task=$spec};RestoreTask={param($xml)if($xml){$state.Task=&$bootstrap {New-TaskSpec}}else{$state.Task=$null}};RemoveTask={$state.Task=$null}}
-    $state.Task=&$bootstrap {New-TaskSpec}
+    $state=[pscustomobject]@{Task=$null;FailSet=$false};$context=[pscustomobject]@{IsAdministrator={};ResolveIdentity={param($a,$s)};PrepareAcl={param($p)};GetTask={$state.Task};ExportTask={param($t)if($t){'prior-task'}};SetTask={param($spec)$state.Task=New-TestTaskEvidence $spec};RestoreTask={param($xml)if($xml){$state.Task=New-TestTaskEvidence (&$bootstrap {New-TaskSpec})}else{$state.Task=$null}};RemoveTask={$state.Task=$null}}
+    $state.Task=New-TestTaskEvidence (&$bootstrap {New-TaskSpec})
     $markerBefore=(Get-FileHash (Join-Path $valid.Evidence 'active.json')).Hash
     $installed=&$bootstrap {param($v,$c,$t)Invoke-InstallCore $v $c $t -AllowTestRoot -RetainRollback -ProcessDetector {$null}} $validated $context $target
     Check ($installed.Installed -and $installed.RollbackToken -and (Test-Path $installed.RollbackToken.BackupRoot)) 'valid guarded candidate install retains verified rollback evidence'

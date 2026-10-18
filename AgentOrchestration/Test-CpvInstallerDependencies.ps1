@@ -1,9 +1,11 @@
 [CmdletBinding()]
-param()
+param([string]$BundleRoot)
 $ErrorActionPreference='Stop'
 
-$repoRoot=Split-Path $PSScriptRoot -Parent
-$bundleModule=Import-Module (Join-Path $PSScriptRoot 'Repato.CpvInstallerBundle.psm1') -Force -PassThru
+$repoRoot=if($BundleRoot){[IO.Path]::GetFullPath($BundleRoot)}else{Split-Path $PSScriptRoot -Parent}
+$installerRoot=if($BundleRoot){Join-Path $repoRoot 'AgentOrchestration'}else{$PSScriptRoot}
+$toolRoot=if($BundleRoot){Join-Path $repoRoot 'Tooling/AgentOrchestration'}else{$PSScriptRoot}
+$bundleModule=Import-Module (Join-Path $toolRoot 'Repato.CpvInstallerBundle.psm1') -Force -PassThru
 $sourceFiles=@(& $bundleModule {$script:SourceFiles})
 if($sourceFiles.Count -ne 13){throw "Expected 13 pinned installer source dependencies, found $($sourceFiles.Count)."}
 foreach($relative in $sourceFiles){if(!(Test-Path -LiteralPath (Join-Path $repoRoot ($relative.Replace('/','\'))) -PathType Leaf)){throw "Pinned installer dependency is missing: $relative"}}
@@ -11,7 +13,7 @@ foreach($relative in $sourceFiles){if(!(Test-Path -LiteralPath (Join-Path $repoR
 $platformDependencies=@(& $bundleModule {$script:PlatformDependencies})
 if($platformDependencies.Count -ne 7){throw "Expected 7 declared platform dependencies, found $($platformDependencies.Count)."}
 
-$installerPath=Join-Path $PSScriptRoot 'Install-CpvPreparationAgentCandidate.ps1'
+$installerPath=Join-Path $installerRoot 'Install-CpvPreparationAgentCandidate.ps1'
 $installer=Get-Content -LiteralPath $installerPath -Raw
 $bootstrapImport=$installer.IndexOf("Resolve-RepatoQaLaunchAgentBootstrapModule -ModulePath (Join-Path `$PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')")
 $recoveryImport=$installer.IndexOf("Import-Module (Join-Path `$PSScriptRoot 'Repato.CpvPreparationRecovery.psm1')")
@@ -22,16 +24,16 @@ if($bootstrapImport -lt 0 -or $recoveryImport -lt 0 -or $upgradeImport -lt 0 -or
 }
 
 Import-Module (Join-Path $repoRoot 'QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1') -Force -WarningAction SilentlyContinue
-Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationRecovery.psm1') -Force -WarningAction SilentlyContinue
-Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationUpgrade.psm1') -Force -WarningAction SilentlyContinue
-Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
-. (Join-Path $PSScriptRoot 'Repato.QaLaunchAgentInstall.ps1')
+Import-Module (Join-Path $installerRoot 'Repato.CpvPreparationRecovery.psm1') -Force -WarningAction SilentlyContinue
+Import-Module (Join-Path $installerRoot 'Repato.CpvPreparationUpgrade.psm1') -Force -WarningAction SilentlyContinue
+Import-Module (Join-Path $installerRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
+. (Join-Path $installerRoot 'Repato.QaLaunchAgentInstall.ps1')
 
 $entrypoints=@(
-    (Join-Path $PSScriptRoot 'Install-CpvPreparationAgentCandidate.ps1'),
-    (Join-Path $PSScriptRoot 'Invoke-CpvPreparationRecovery.ps1'),
-    (Join-Path $PSScriptRoot 'Recover-CpvPreparationAgentInstall.ps1'),
-    (Join-Path $PSScriptRoot 'Repato.QaLaunchAgentInstall.ps1')
+    (Join-Path $installerRoot 'Install-CpvPreparationAgentCandidate.ps1'),
+    (Join-Path $installerRoot 'Invoke-CpvPreparationRecovery.ps1'),
+    (Join-Path $installerRoot 'Recover-CpvPreparationAgentInstall.ps1'),
+    (Join-Path $installerRoot 'Repato.QaLaunchAgentInstall.ps1')
 )
 $commands=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach($path in $entrypoints){

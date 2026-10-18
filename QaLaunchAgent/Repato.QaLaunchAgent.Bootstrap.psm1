@@ -56,12 +56,45 @@ function New-TaskSpec {
     [pscustomobject]@{ TaskPath=$script:Contract.TaskPath; TaskName=$script:Contract.TaskName; Principal=$script:Contract.Account; Sid=$script:Contract.Sid; LogonType='Interactive'; RunLevel='Limited'; TriggerType='Logon'; TriggerUser=$script:Contract.Account; Execute=$script:Contract.Executable; Arguments=''; WorkingDirectory=$script:Contract.InstallRoot; MultipleInstances='IgnoreNew'; RestartCount=3; RestartInterval='PT1M' }
 }
 
+function Get-TaskPropertyValue($Object,[string]$Name) {
+    if($null -eq $Object){return $null}
+    $property=$Object.PSObject.Properties[$Name]
+    if($property){$property.Value}
+}
+
+function ConvertTo-TaskSpecEvidence {
+    param([Parameter(Mandatory)]$Task,[scriptblock]$SidResolver)
+    if(!$SidResolver){$SidResolver={param($account)Resolve-RepatoAccountSid $account}}
+    $principal=Get-TaskPropertyValue (Get-TaskPropertyValue $Task 'Principal') 'UserId'
+    $principalObject=Get-TaskPropertyValue $Task 'Principal'
+    $triggerItems=@(Get-TaskPropertyValue $Task 'Triggers');$trigger=if($triggerItems.Count -eq 1){$triggerItems[0]}else{$null}
+    $actionItems=@(Get-TaskPropertyValue $Task 'Actions');$action=if($actionItems.Count -eq 1){$actionItems[0]}else{$null}
+    $settings=Get-TaskPropertyValue $Task 'Settings'
+    $className=[string](Get-TaskPropertyValue (Get-TaskPropertyValue $trigger 'CimClass') 'CimClassName')
+    [pscustomobject]@{
+        TaskPath=Get-TaskPropertyValue $Task 'TaskPath';TaskName=Get-TaskPropertyValue $Task 'TaskName'
+        Principal=$principal;PrincipalResolvedSid=if($principal){& $SidResolver $principal}else{$null}
+        LogonType=[string](Get-TaskPropertyValue $principalObject 'LogonType');RunLevel=[string](Get-TaskPropertyValue $principalObject 'RunLevel')
+        TriggerType=if($className -ceq 'MSFT_TaskLogonTrigger'){'Logon'}else{$className}
+        TriggerUser=Get-TaskPropertyValue $trigger 'UserId';TriggerResolvedSid=if($trigger){$user=Get-TaskPropertyValue $trigger 'UserId';if($user){& $SidResolver $user}else{$null}}else{$null}
+        Execute=Get-TaskPropertyValue $action 'Execute';Arguments=[string](Get-TaskPropertyValue $action 'Arguments');WorkingDirectory=Get-TaskPropertyValue $action 'WorkingDirectory'
+        MultipleInstances=[string](Get-TaskPropertyValue $settings 'MultipleInstances');RestartCount=Get-TaskPropertyValue $settings 'RestartCount';RestartInterval=[string](Get-TaskPropertyValue $settings 'RestartInterval')
+    }
+}
+
 function Get-TaskSpecComparison($Actual) {
     $expected=New-TaskSpec
     foreach($name in $expected.PSObject.Properties.Name) {
         $e=[string]$expected.$name
-        $a=if($null -eq $Actual){$null}else{[string]$Actual.$name}
-        if($name -eq 'Principal') {
+        $property=if($null -eq $Actual){$null}else{$Actual.PSObject.Properties[$name]}
+        $a=if($property){[string]$property.Value}else{$null}
+        if($name -eq 'Sid') {
+            $principalSidProperty=if($Actual){$Actual.PSObject.Properties['PrincipalResolvedSid']}else{$null}
+            $triggerSidProperty=if($Actual){$Actual.PSObject.Properties['TriggerResolvedSid']}else{$null}
+            $principalSid=if($principalSidProperty){[string]$principalSidProperty.Value}else{$null}
+            $triggerSid=if($triggerSidProperty){[string]$triggerSidProperty.Value}else{$null}
+            [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$e;NormalizedActual=[pscustomobject]@{Principal=$principalSid;Trigger=$triggerSid};Match=($principalSid -ceq $e -and $triggerSid -ceq $e)}
+        } elseif($name -eq 'Principal') {
             $expectedSid=$expected.Sid; $actualSid=if($Actual -and $Actual.PSObject.Properties.Name -contains 'PrincipalResolvedSid'){$Actual.PrincipalResolvedSid}elseif($Actual){Resolve-RepatoAccountSid $a}else{$null}
             [pscustomobject]@{Property=$name;Expected=$e;Actual=$a;NormalizedExpected=$expectedSid;NormalizedActual=$actualSid;Match=($actualSid -cne $null -and $actualSid -ceq $expectedSid);ExpectedPrincipalDisplay=$e;ActualPrincipalDisplay=$a;ExpectedPrincipalSid=$expectedSid;ActualPrincipalResolvedSid=$actualSid}
         } elseif($name -eq 'TriggerUser') {
@@ -221,8 +254,8 @@ function New-RealBootstrapContext {
         }
         GetTask = {
             $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue
-            if(!$t){return $null}; $a=@($t.Actions)[0]; $g=@($t.Triggers)[0]
-            [pscustomobject]@{TaskPath=$t.TaskPath;TaskName=$t.TaskName;Principal=$t.Principal.UserId;PrincipalResolvedSid=(Resolve-RepatoAccountSid $t.Principal.UserId);Sid=$script:Contract.Sid;LogonType=[string]$t.Principal.LogonType;RunLevel=[string]$t.Principal.RunLevel;TriggerType=if($g.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'){'Logon'}else{$g.CimClass.CimClassName};TriggerUser=$g.UserId;TriggerResolvedSid=(Resolve-RepatoAccountSid $g.UserId);Execute=$a.Execute;Arguments=[string]$a.Arguments;WorkingDirectory=$a.WorkingDirectory;MultipleInstances=[string]$t.Settings.MultipleInstances;RestartCount=$t.Settings.RestartCount;RestartInterval=[string]$t.Settings.RestartInterval}
+            if(!$t){return $null}
+            ConvertTo-TaskSpecEvidence -Task $t
         }
         GetTaskState = { $t=Get-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue; if($t){$t.State.ToString()}else{'Absent'} }
         StopTask = { Stop-ScheduledTask -TaskPath $script:Contract.TaskPath -TaskName $script:Contract.TaskName -ErrorAction SilentlyContinue }

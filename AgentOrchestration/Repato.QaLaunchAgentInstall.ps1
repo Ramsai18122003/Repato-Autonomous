@@ -50,7 +50,7 @@ function Resolve-RepatoQaLaunchAgentBootstrapModule {
         [scriptblock]$ImportProvider
     )
     $expectedPath=[IO.Path]::GetFullPath($ModulePath)
-    $imported=if($ImportProvider){@(& $ImportProvider $expectedPath)}else{@(Import-Module -Name $expectedPath -Force -PassThru -ErrorAction Stop)}
+    $imported=@(if($ImportProvider){& $ImportProvider $expectedPath}else{Import-Module -Name $expectedPath -Force -PassThru -ErrorAction Stop})
     if($imported.Count -ne 1){throw 'The trusted Launch Agent bootstrap module import is missing or ambiguous.'}
     $module=$imported[0]
     if($module -isnot [Management.Automation.PSModuleInfo] -or $module.Name -cne 'Repato.QaLaunchAgent.Bootstrap' -or
@@ -59,13 +59,15 @@ function Resolve-RepatoQaLaunchAgentBootstrapModule {
 }
 
 function Get-RepatoQaLaunchAgentTaskEvidence {
-    param([Parameter(Mandatory)][Management.Automation.PSModuleInfo]$BootstrapModule)
+    param([Parameter(Mandatory)][Management.Automation.PSModuleInfo]$BootstrapModule,[scriptblock]$GetTask,[scriptblock]$GetRawTask,[scriptblock]$ExportTask)
     $bootstrap=$BootstrapModule
-    $context=& $bootstrap { New-RealBootstrapContext }
-    $actual=& $context.GetTask
-    $raw=Get-ScheduledTask -TaskPath '\Repato\' -TaskName 'Repato QA Launch Agent' -ErrorAction Stop
+    if(!$GetTask){$context=& $bootstrap { New-RealBootstrapContext };$GetTask=$context.GetTask}
+    if(!$GetRawTask){$GetRawTask={Get-ScheduledTask -TaskPath '\Repato\' -TaskName 'Repato QA Launch Agent' -ErrorAction Stop}}
+    if(!$ExportTask){$ExportTask={param($task)Export-ScheduledTask -TaskPath '\Repato\' -TaskName 'Repato QA Launch Agent' -ErrorAction Stop}}
+    $actual=& $GetTask
+    $raw=& $GetRawTask
     $valid=& $bootstrap {param($task) Test-TaskSpec $task} $actual
-    $xml=[string](Export-ScheduledTask -TaskPath '\Repato\' -TaskName 'Repato QA Launch Agent' -ErrorAction Stop)
+    $xml=[string](& $ExportTask $raw)
     $sha=[Security.Cryptography.SHA256]::Create();try{$xmlHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($xml)))).Replace('-','')}finally{$sha.Dispose()}
     [pscustomobject]@{Valid=[bool]$valid;TaskPath=[string]$actual.TaskPath;TaskName=[string]$actual.TaskName;PrincipalSid=[string]$actual.PrincipalResolvedSid;TriggerSid=[string]$actual.TriggerResolvedSid;State=$raw.State.ToString();XmlSha256=$xmlHash}
 }

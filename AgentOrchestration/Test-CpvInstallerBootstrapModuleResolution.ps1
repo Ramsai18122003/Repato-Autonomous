@@ -30,7 +30,7 @@ try {
     Check (!$installer.Contains('Get-Module Repato.QaLaunchAgent.Bootstrap') -and !$installer.Contains('(Get-Module Repato.QaLaunchAgent.Bootstrap)')) 'guarded install and recovery contain no name-based module lookup'
     Check ($installer.Contains('& $bootstrap {param($lease,$context) Invoke-InstallJournalRecoveryCore') -and $installer.Contains('-BootstrapModule $bootstrap')) 'rollback and task-stop paths use the validated module instance'
     $resolveAt=$installer.IndexOf('$bootstrap=Resolve-RepatoQaLaunchAgentBootstrapModule')
-    $preflightAt=$installer.IndexOf('$priorTaskValid=& $bootstrap')
+    $preflightAt=$installer.IndexOf('$priorTaskEvidence=Get-RepatoQaLaunchAgentTaskEvidence -BootstrapModule $bootstrap')
     $journalAt=$installer.IndexOf('New-RepatoQaLaunchAgentBootstrapInstallJournal')
     $stopAt=$installer.IndexOf('Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id')
     $installAt=$installer.IndexOf('Install-RepatoQaLaunchAgentBootstrap -SourceRoot')
