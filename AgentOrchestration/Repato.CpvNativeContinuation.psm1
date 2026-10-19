@@ -72,4 +72,26 @@ function Add-CpvNativeCompanionRequestBinding {
     Assert-CpvContinuationFile ([string]$path.Value) ([string]$hash.Value)
     $Request['recoveredProvenancePath']=[string]$path.Value;$Request['recoveredProvenanceSha256']=[string]$hash.Value
 }
-Export-ModuleMember -Function New-CpvNativeContinuationBinding,Assert-CpvNativeContinuationBinding,Resolve-CpvNativeContinuationExpiry,Add-CpvNativeCompanionRequestBinding
+function Assert-CpvRecoveredQaDeploymentBindingState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Task,[Parameter(Mandatory)]$Workflow,
+        [Parameter(Mandatory)][ValidateRange(1,[long]::MaxValue)][long]$ExpectedTaskRevision,
+        [Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][string]$BuildRequestId,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$CandidateSourceCommit,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$CandidateSha256
+    )
+    if($Task.taskId -cne $TaskId -or [long]$Task.revision -ne $ExpectedTaskRevision -or $Task.status -cne 'in-progress' -or $Task.workflowStage -cne 'qa' -or $Workflow.taskId -cne $TaskId -or $Workflow.workflowId -cne $WorkflowId -or $Workflow.qaWorkflowId -cne 'create-plan-views-v1'){throw 'Recovered deployment binding requires exact QA-ready task/workflow revision.'}
+    $stored=@($Task.deploymentWorkflows|Where-Object {$_.workflowId -ceq $WorkflowId -and $_.taskId -ceq $TaskId})
+    if($stored.Count -ne 1 -or (Get-CpvContinuationHash $stored[0]) -cne (Get-CpvContinuationHash $Workflow)){throw 'Recovered deployment workflow is not the exact current task workflow.'}
+    foreach($name in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){
+        if($Task.PSObject.Properties[$name] -and $Task.$name){throw 'Recovered deployment binding is blocked by native execution state.'}
+    }
+    if(@($Task.approvalRequests|Where-Object {$_.status -ceq 'pending' -or ($_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and !$_.consumedUtc)}).Count){throw 'Recovered deployment binding is blocked by pending or unconsumed native approval.'}
+    if($Task.PSObject.Properties['taraRuns'] -and @($Task.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Recovered deployment binding found native execution history.'}
+    $e=$Workflow.qaBuildEvidence
+    if($Workflow.qaBuildStatus -cne 'succeeded' -or $Workflow.qaBuildRequest.BuildRequestId -cne $BuildRequestId -or $e.BuildRequestId -cne $BuildRequestId -or $e.BuildStatus -cne 'succeeded' -or $e.EvidenceSource -cne 'FrozenCandidate' -or $e.CandidateSourceCommit -cne $CandidateSourceCommit -or $e.SourceCommit -cne $CandidateSourceCommit -or $e.ArtifactSha256 -ine $CandidateSha256){throw 'Recovered deployment binding candidate or build identity mismatch.'}
+    New-CpvNativeContinuationBinding -Task $Task -Workflow $Workflow -ExpectedTaskRevision $ExpectedTaskRevision
+}
+Export-ModuleMember -Function New-CpvNativeContinuationBinding,Assert-CpvNativeContinuationBinding,Resolve-CpvNativeContinuationExpiry,Add-CpvNativeCompanionRequestBinding,Assert-CpvRecoveredQaDeploymentBindingState

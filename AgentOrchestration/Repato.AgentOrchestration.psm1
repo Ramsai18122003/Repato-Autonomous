@@ -125,10 +125,12 @@ function Get-RepatoCanonicalQaDeploymentApprovalEvidence {
     try {
         if($e.PSObject.Properties.Name -contains 'IndependentDeploymentValidation' -and $e.IndependentDeploymentValidation){
             $ind=$e.IndependentDeploymentValidation
+            $recoveredBinding=$ind.StagingDisposition -ceq 'existing-verified-deployment'
+            if($recoveredBinding){$null=New-CpvNativeContinuationBinding -Task $Task -Workflow $Workflow -ExpectedTaskRevision $Task.revision}
             if($ind.Purpose -cne 'independent-current-deployment-validation' -or $ind.TaskId -cne $Task.taskId -or
                $ind.WorkflowId -cne $Workflow.workflowId -or $ind.BuildRequestId -cne $BuildRequestId -or
                $ind.CandidateSourceCommit -cne $CandidateSourceCommit -or $ind.CandidateDllSha256 -ine $CandidateSha256 -or
-               $ind.StagingDisposition -cne 'ambiguous-unresolved' -or $ind.StagingSuccessClaimed -ne $false -or
+               (!$recoveredBinding -and $ind.StagingDisposition -cne 'ambiguous-unresolved') -or $ind.StagingSuccessClaimed -ne $false -or
                $ind.RunnerManifestSha256 -ine $RunnerManifestSha256 -or !$ind.ValidationRequest -or !$ind.Response){
                 throw 'Independent QA validation evidence is inconsistent or claims staging success.'
             }
@@ -138,7 +140,8 @@ function Get-RepatoCanonicalQaDeploymentApprovalEvidence {
             if($ops.Count -ne 1){throw 'Independent QA validation operation is not uniquely bound to this task.'}
             $op=$ops[0];$r=$op.Response;$q=$op.ValidationRequest
             foreach($pair in @(@('TaskId',$Task.taskId),@('WorkflowId',$Workflow.workflowId),@('BuildRequestId',$BuildRequestId),@('CandidateSourceCommit',$CandidateSourceCommit),@('CandidateSha256',$CandidateSha256),@('QaWorkflowId',[string]$Workflow.qaWorkflowId),@('TestId',[string]$Workflow.qaWorkflowId))){if([string]$op.($pair[0]) -cne [string]$pair[1]){throw "Independent QA operation binding mismatch: $($pair[0])."}}
-            if($op.ValidationPurpose -cne 'IndependentAfterAmbiguousStaging' -or $op.RequestDisposition -cne 'completed' -or
+            $expectedPurpose=if($recoveredBinding){'RecoveredQaCurrentDeployment'}else{'IndependentAfterAmbiguousStaging'}
+            if($op.ValidationPurpose -cne $expectedPurpose -or $op.RequestDisposition -cne 'completed' -or
                $op.RequestId -cne $ind.RequestId -or $q.requestId -cne $op.RequestId -or $q.taskId -cne $Task.taskId -or
                $q.workflowId -cne $Workflow.workflowId -or $q.candidateCommit -cne $CandidateSourceCommit -or
                $q.expectedCandidateSha256 -ine $CandidateSha256 -or $q.qaWorkflowId -cne $Workflow.qaWorkflowId -or
@@ -164,7 +167,7 @@ function Get-RepatoCanonicalQaDeploymentApprovalEvidence {
                [IO.Path]::GetFullPath([string]$r.qaAddinRoot) -ine 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA' -or
                $r.qaWorkflowId -cne $Workflow.qaWorkflowId -or $r.testId -cne $Workflow.qaWorkflowId -or
                $e.DeployedRunnerManifestPath -cne $r.runnerManifestPath -or $e.DeployedRunnerManifestSha256 -ine $RunnerManifestSha256){throw 'Independent QA authenticated response no longer matches its operation.'}
-            return [pscustomobject][ordered]@{Mode='independent-current-deployment-validation';OperationId=$op.OperationId;RequestId=$op.RequestId;ValidationRequestSha256=$requestHash;ValidationResponseSha256=$responseHash;CandidateSourceCommit=$CandidateSourceCommit;CandidateSha256=$CandidateSha256;RunnerManifestPath=$RunnerManifestPath;RunnerManifestSha256=$RunnerManifestSha256;ValidationIdentity='RAMSAI\RepatoQA';IsolationPassed=$true;ManifestIntegrityPassed=$true;StagingDisposition='ambiguous-unresolved';StagingSuccessClaimed=$false;OriginalRunnerManifestPath=$originalRunnerManifestPath}
+            return [pscustomobject][ordered]@{Mode='independent-current-deployment-validation';OperationId=$op.OperationId;RequestId=$op.RequestId;ValidationRequestSha256=$requestHash;ValidationResponseSha256=$responseHash;CandidateSourceCommit=$CandidateSourceCommit;CandidateSha256=$CandidateSha256;RunnerManifestPath=$RunnerManifestPath;RunnerManifestSha256=$RunnerManifestSha256;ValidationIdentity='RAMSAI\RepatoQA';IsolationPassed=$true;ManifestIntegrityPassed=$true;StagingDisposition=$ind.StagingDisposition;StagingSuccessClaimed=$false;OriginalRunnerManifestPath=$originalRunnerManifestPath}
         }
         if($e.PSObject.Properties.Name -contains 'StagingSuccessClaimed' -and $e.StagingSuccessClaimed -eq $true){throw 'Staging success cannot be asserted without the supported staging evidence.'}
         $ops=@(if($Task.PSObject.Properties.Name -contains 'deploymentValidationOperations'){$Task.deploymentValidationOperations|Where-Object {$_.ValidationPurpose -ceq 'CanonicalAfterStaging' -and $_.TaskId -ceq $Task.taskId -and $_.WorkflowId -ceq $Workflow.workflowId -and $_.BuildRequestId -ceq $BuildRequestId -and $_.CandidateSourceCommit -ceq $CandidateSourceCommit -and $_.CandidateSha256 -ieq $CandidateSha256 -and $_.RequestDisposition -ceq 'completed'}})
