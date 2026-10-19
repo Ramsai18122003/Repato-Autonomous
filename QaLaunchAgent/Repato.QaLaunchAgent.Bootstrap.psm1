@@ -345,18 +345,25 @@ function Read-InstallJournal([string]$JournalPath,[string]$TargetRoot,[switch]$A
     foreach($pair in @(@($j.stageRoot,$expectedStage),@($j.backupRoot,$expectedBackup),@($j.failedRoot,$expectedFailed))){if([IO.Path]::GetFullPath($pair[0]) -ine [IO.Path]::GetFullPath($pair[1])){throw 'Install journal contains an unsafe sibling path.'}}
     foreach($set in @(@($j.priorFiles),@($j.candidateFiles))){$names=@($set|ForEach-Object name);if($names.Count -ne $script:Contract.RuntimeFiles.Count -or $names.Count -ne @($names|Select-Object -Unique).Count -or @($script:Contract.RuntimeFiles|Where-Object{$_ -cnotin $names}).Count -or @($set|Where-Object{$_.sha256 -notmatch '^[A-Fa-f0-9]{64}'}).Count){throw 'Install journal file inventory is incomplete or invalid.'}}
     if(!$j.hadTarget -and @($j.priorFiles).Count -or $j.hadTarget -and @($j.priorFiles).Count -ne $script:Contract.RuntimeFiles.Count){throw 'Install journal prior runtime presence does not match its hash inventory.'}
-    if([string]::IsNullOrWhiteSpace([string]$j.priorVersion) -or (!$AllowTestRoot -and $j.priorVersion -notin @('1.0.17+4b0066247088','1.0.18+4b0066247088','1.0.19+05933ab8b587','1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e','1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f'))){throw 'Install journal prior release identity is invalid.'}
+    if([string]::IsNullOrWhiteSpace([string]$j.priorVersion) -or (!$AllowTestRoot -and $j.priorVersion -notin @('1.0.17+4b0066247088','1.0.18+4b0066247088','1.0.19+05933ab8b587','1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e','1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f','1.0.22+6119aceaab0a34c3e0323089a29f1cefb2c14aaa'))){throw 'Install journal prior release identity is invalid.'}
     if($j.taskPresent -and (!$j.priorTaskXml -or $j.priorTaskSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or (Get-InstallJournalTextHash ([string]$j.priorTaskXml)) -ine $j.priorTaskSha256 -or $j.priorTaskState -notin @('Ready','Running','Disabled'))){throw 'Install journal prior scheduled-task evidence is invalid.'}
     if(!$j.taskPresent -and ($j.priorTaskXml -or $j.priorTaskSha256)){throw 'Install journal has unexpected prior task evidence.'}
     if($j.requestId -notin @('9953e14c15524fe09440d1c7d7353950','c11b311638a54bfc9ebdd1803671ec40') -or $j.taskId -cne 'task-bf61fe7f22d74df7a92599681da5919e' -or !$j.taskPresent){throw 'Install journal request/task identity or prior task presence mismatch.'}
     if($j.candidateManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
-       $j.candidateVersion -notmatch '^(1\.0\.18\+4b0066247088|1\.0\.19\+[A-Fa-f0-9]{12,40}|1\.0\.20\+[A-Fa-f0-9]{12,40}|1\.0\.21\+[A-Fa-f0-9]{12,40}|1\.0\.22\+[A-Fa-f0-9]{12,40})$'){throw 'Install journal candidate identity is invalid.'}
+       $j.candidateVersion -notmatch '^(1\.0\.18\+4b0066247088|1\.0\.19\+[A-Fa-f0-9]{12,40}|1\.0\.20\+[A-Fa-f0-9]{12,40}|1\.0\.21\+[A-Fa-f0-9]{12,40}|1\.0\.22\+[A-Fa-f0-9]{12,40}|1\.0\.23\+[A-Fa-f0-9]{12,40})$'){throw 'Install journal candidate identity is invalid.'}
     if($j.candidateVersion -match '^1\.0\.22\+' -and ($j.priorVersion -cne '1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f' -or $j.requestId -cne 'c11b311638a54bfc9ebdd1803671ec40')){throw 'Recovery compatibility journal requires the exact 1.0.21 prior release and completed preparation request.'}
+    Assert-CpvRecoveredNativeJournalTransition $j.candidateVersion $j.priorVersion $j.requestId
     if((Get-InstallJournalHash $j) -ine $j.journalSha256){throw 'Install journal integrity hash mismatch; preserve all evidence for manual review.'}
     $j
 }
 
 function Get-InstallJournalTextHash([string]$Value) { $sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value)))).Replace('-','')}finally{$sha.Dispose()} }
+
+function Assert-CpvRecoveredNativeJournalTransition([string]$CandidateVersion,[string]$PriorVersion,[string]$RequestId) {
+    if(($CandidateVersion -match '^1\.0\.23\+' -or $PriorVersion -ceq '1.0.22+6119aceaab0a34c3e0323089a29f1cefb2c14aaa') -and ($CandidateVersion -cnotmatch '^1\.0\.23\+[A-Fa-f0-9]{12,40}$' -or
+        $PriorVersion -cne '1.0.22+6119aceaab0a34c3e0323089a29f1cefb2c14aaa' -or
+        $RequestId -cne 'c11b311638a54bfc9ebdd1803671ec40')){throw 'Recovered-native journal requires exact 1.0.22 prior release and recovered preparation identity.'}
+}
 
 function Set-InstallJournalState($Journal,[string]$State) {
     $allowed=@{Prepared=@('CandidateStaged','RollbackPending');CandidateStaged=@('ServiceStopPending','RollbackPending');ServiceStopPending=@('ServiceStopped','RollbackPending');ServiceStopped=@('BackupMovePending','RollbackPending');BackupMovePending=@('BackupVerified','RollbackPending');BackupVerified=@('ReplacementPending','RollbackPending');ReplacementPending=@('FilesReplaced','RollbackPending');FilesReplaced=@('TaskUpdatePending','RollbackPending');TaskUpdatePending=@('TaskUpdated','RollbackPending');TaskUpdated=@('HealthVerificationPending','RollbackPending');HealthVerificationPending=@('CommitPending','RollbackPending');CommitPending=@('Committed','RollbackPending');RollbackPending=@('RolledBack');Committed=@();RolledBack=@()}
@@ -376,6 +383,10 @@ function New-InstallJournalCore($Validated,$Context,[string]$TargetRoot,$Journal
     $target=[IO.Path]::GetFullPath($TargetRoot).TrimEnd('\\');if(!$AllowTestRoot -and $target -cne [IO.Path]::GetFullPath($script:Contract.InstallRoot).TrimEnd('\\')){throw 'Install-journal target must be the fixed protected install root.'}
     if(!$JournalIdentity -or $JournalIdentity.RequestId -notin @('9953e14c15524fe09440d1c7d7353950','c11b311638a54bfc9ebdd1803671ec40') -or $JournalIdentity.TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e'){throw 'Durable CPV journal identity is not the fixed approved request.'}
     if($Validated.Manifest.productVersion -match '^1\.0\.22\+' -and $JournalIdentity.RequestId -cne 'c11b311638a54bfc9ebdd1803671ec40'){throw 'Recovery compatibility journal requires the completed preparation request.'}
+    if($Validated.Manifest.productVersion -match '^1\.0\.23\+' -and
+        (!$JournalIdentity.PSObject.Properties['RecoveredNativeContinuation'] -or $JournalIdentity.RecoveredNativeContinuation -ne $true)){
+        throw 'Recovered-native journal requires the explicit guarded continuation transition.'
+    }
     $parent=Split-Path $target -Parent;New-Item -ItemType Directory -Path $parent -Force|Out-Null;$path=Join-Path $parent '.QaLaunchAgent.install-journal.json';$lockPath=$path+'.lock'
     $lock=[IO.FileStream]::new($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     try {
@@ -387,8 +398,9 @@ function New-InstallJournalCore($Validated,$Context,[string]$TargetRoot,$Journal
         $had=Test-Path -LiteralPath $target -PathType Container;if(!$had){throw 'Durable CPV upgrade requires a complete prior runtime.'}
         $priorVersion=if($Context.PSObject.Properties.Name -contains 'GetProductVersion'){[string](& $Context.GetProductVersion (Join-Path $target 'Repato.QaLaunchAgent.exe'))}else{[string](Get-Item -LiteralPath (Join-Path $target 'Repato.QaLaunchAgent.exe')).VersionInfo.ProductVersion}
         $priorDllVersion=if($Context.PSObject.Properties.Name -contains 'GetProductVersion'){[string](& $Context.GetProductVersion (Join-Path $target 'Repato.QaLaunchAgent.dll'))}else{[string](Get-Item -LiteralPath (Join-Path $target 'Repato.QaLaunchAgent.dll')).VersionInfo.ProductVersion}
-        if(!$priorVersion -or $priorVersion -cne $priorDllVersion -or (!$AllowTestRoot -and $priorVersion -notin @('1.0.17+4b0066247088','1.0.18+4b0066247088','1.0.19+05933ab8b587','1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e','1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f'))){throw 'Prior executable and DLL do not prove the expected installed release identity.'}
+        if(!$priorVersion -or $priorVersion -cne $priorDllVersion -or (!$AllowTestRoot -and $priorVersion -notin @('1.0.17+4b0066247088','1.0.18+4b0066247088','1.0.19+05933ab8b587','1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e','1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f','1.0.22+6119aceaab0a34c3e0323089a29f1cefb2c14aaa'))){throw 'Prior executable and DLL do not prove the expected installed release identity.'}
         if($Validated.Manifest.productVersion -match '^1\.0\.22\+' -and $priorVersion -cne '1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f'){throw 'Recovery compatibility journal requires the exact installed 1.0.21 release.'}
+        Assert-CpvRecoveredNativeJournalTransition $Validated.Manifest.productVersion $priorVersion $JournalIdentity.RequestId
         $prior=@(foreach($name in $script:Contract.RuntimeFiles){$file=Join-Path $target $name;if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw "Prior runtime is incomplete: $name"};[pscustomobject]@{name=$name;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}})
         if(!(Test-InstallJournalFileSet $target $prior)){throw 'Prior runtime has unexpected files or failed integrity validation.'}
         $id=[guid]::NewGuid().ToString('N');$journal=[pscustomobject][ordered]@{schemaVersion=1;transactionId=$id;generation=[long]1;state='Prepared';targetRoot=$target;journalPath=$path;stageRoot=(Join-Path $parent ('.QaLaunchAgent.stage.'+$id));backupRoot=(Join-Path $parent ('.QaLaunchAgent.backup.'+$id));failedRoot=(Join-Path $parent ('.QaLaunchAgent.failed.'+$id));hadTarget=$had;priorVersion=$priorVersion;priorFiles=$prior;priorTaskXml=$taskXml;priorTaskSha256=if($taskPresent){Get-InstallJournalTextHash $taskXml}else{''};priorTaskState=$state;taskPresent=$taskPresent;requestId=if($JournalIdentity){[string]$JournalIdentity.RequestId}else{''};taskId=if($JournalIdentity){[string]$JournalIdentity.TaskId}else{''};candidateVersion=[string]$Validated.Manifest.productVersion;candidateManifestSha256=[string]$Validated.ManifestSha256;candidateFiles=@($Validated.Manifest.files|ForEach-Object{[pscustomobject]@{name=$_.name;sha256=$_.sha256}});journalSha256=''}
@@ -448,11 +460,11 @@ function Open-InstallJournalLease([string]$TargetRoot,[switch]$AllowTestRoot) {
 }
 
 function New-RepatoQaLaunchAgentBootstrapInstallJournal {
-    [CmdletBinding()]param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ManifestPath,[Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ManifestSha256,[Parameter(Mandatory)][string]$RequestId,[Parameter(Mandatory)][string]$TaskId)
+    [CmdletBinding()]param([Parameter(Mandatory)][string]$SourceRoot,[Parameter(Mandatory)][string]$ManifestPath,[Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ManifestSha256,[Parameter(Mandatory)][string]$RequestId,[Parameter(Mandatory)][string]$TaskId,[switch]$RecoveredNativeContinuation)
     Assert-Administrator;Assert-Identity $script:Contract.Account $script:Contract.Sid
     if($RequestId -notin @('9953e14c15524fe09440d1c7d7353950','c11b311638a54bfc9ebdd1803671ec40') -or $TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e'){throw 'Durable installation journal is restricted to a pinned CPV request identity.'}
     $v=Read-ValidatedManifest $SourceRoot $ManifestPath $ManifestSha256.ToUpperInvariant()
-    New-InstallJournalCore $v (New-RealBootstrapContext) $script:Contract.InstallRoot ([pscustomobject]@{RequestId=$RequestId;TaskId=$TaskId})
+    New-InstallJournalCore $v (New-RealBootstrapContext) $script:Contract.InstallRoot ([pscustomobject]@{RequestId=$RequestId;TaskId=$TaskId;RecoveredNativeContinuation=[bool]$RecoveredNativeContinuation})
 }
 
 function Set-RepatoQaLaunchAgentBootstrapInstallHealthVerification {
@@ -500,6 +512,13 @@ function Restore-RepatoQaLaunchAgentSnapshot {
 function Invoke-InstallCore($Validated,$Context,[string]$TargetRoot,[switch]$AllowTestRoot,[scriptblock]$ProcessDetector,[switch]$RetainRollback,$DurableJournal) {
     & $Context.IsAdministrator
     & $Context.ResolveIdentity $script:Contract.Account $script:Contract.Sid
+    if($Validated.Manifest.productVersion -match '^1\.0\.23\+'){
+        if(!$DurableJournal){throw 'Recovered-native release installation requires its validated durable journal.'}
+        $boundJournal=Get-InstallJournal $DurableJournal
+        Assert-CpvRecoveredNativeJournalTransition $boundJournal.candidateVersion $boundJournal.priorVersion $boundJournal.requestId
+        if($boundJournal.candidateVersion -cne $Validated.Manifest.productVersion -or
+            $boundJournal.candidateManifestSha256 -cne $Validated.ManifestSha256){throw 'Recovered-native installation journal does not bind this exact immutable release.'}
+    }
     if (-not $AllowTestRoot -and [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\') -cne $script:Contract.InstallRoot) { throw 'Install root must be the fixed protected Program Files path.' }
     if (-not $ProcessDetector) { $ProcessDetector = { Get-Process -Name Repato.QaLaunchAgent -ErrorAction SilentlyContinue } }
     if (& $ProcessDetector) { throw 'Refusing update while the launch agent is running.' }

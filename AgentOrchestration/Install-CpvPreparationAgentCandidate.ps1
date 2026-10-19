@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$ReleaseRoot,[Parameter(Mandatory)][string]$ManifestSha256,[switch]$Execute,[switch]$PreflightOnly,
-    [string]$ReconcileRequestId,[string]$CompletedOutcomeRecoveryRequestId,[long]$ExpectedTaskRevision=101,
+    [string]$ReconcileRequestId,[string]$CompletedOutcomeRecoveryRequestId,[switch]$RecoveredNativeContinuation,[long]$ExpectedTaskRevision=101,
     [string]$TaskId='task-bf61fe7f22d74df7a92599681da5919e')
 $ErrorActionPreference='Stop'
 function Get-CpvRevitProcesses {
@@ -17,16 +17,22 @@ if(!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationRecovery.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationUpgrade.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvCompletedOutcomeUpgrade.psm1') -Force -WarningAction SilentlyContinue
+if($RecoveredNativeContinuation){Import-Module (Join-Path $PSScriptRoot 'Repato.CpvRecoveredNativeUpgrade.psm1') -Force -WarningAction SilentlyContinue}
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 . (Join-Path $PSScriptRoot 'Repato.QaLaunchAgentInstall.ps1')
 $bootstrap=Resolve-RepatoQaLaunchAgentBootstrapModule -ModulePath (Join-Path $PSScriptRoot '../QaLaunchAgent/Repato.QaLaunchAgent.Bootstrap.psm1')
 $contract=Get-RepatoQaLaunchAgentBootstrapContract
 $manifest=Join-Path $ReleaseRoot 'Repato.QaLaunchAgent.release.json'
 if((Get-FileHash $manifest).Hash -cne $ManifestSha256){throw 'Release manifest hash mismatch.'}
+$requestedVersion=[string](Get-Content -LiteralPath $manifest -Raw|ConvertFrom-Json).productVersion
+if(($requestedVersion -match '^1\.0\.23\+') -ne [bool]$RecoveredNativeContinuation){throw 'Release 1.0.23 requires exactly the explicit recovered-native continuation deployment mode.'}
 $activeRoot='C:\Users\RepatoQA\AppData\Local\Repato\QaLaunchAgent\Logs\CpvPreparation'
 $activePath=Join-Path $activeRoot 'active.json';$upgrade=$null;$evidenceSnapshot=$null;$validated=$null;$priorFiles=@();$priorTaskValid=$false
-if(Test-Path -LiteralPath $activePath){
-    if($CompletedOutcomeRecoveryRequestId){
+if((Test-Path -LiteralPath $activePath) -or $RecoveredNativeContinuation){
+    if($RecoveredNativeContinuation){
+        if($ReconcileRequestId -or $CompletedOutcomeRecoveryRequestId -or $ExpectedTaskRevision -ne 127){throw 'Recovered-native upgrade requires revision 127 and no legacy upgrade mode.'}
+        $upgradeRequestId='c11b311638a54bfc9ebdd1803671ec40';$completedOutcomeUpgrade=$false
+    }elseif($CompletedOutcomeRecoveryRequestId){
         if($ReconcileRequestId -or $CompletedOutcomeRecoveryRequestId -cne 'c11b311638a54bfc9ebdd1803671ec40') {throw 'Completed-outcome upgrade request identity is invalid or ambiguous.'}
         $upgradeRequestId=$CompletedOutcomeRecoveryRequestId;$completedOutcomeUpgrade=$true
     }else{
@@ -52,7 +58,15 @@ if(Test-Path -LiteralPath $activePath){
     $validated=& $bootstrap {param($root,$path,$hash) Read-ValidatedManifest $root $path $hash} $ReleaseRoot $manifest $ManifestSha256.ToUpperInvariant()
     $productVersion=(Get-Item -LiteralPath $agents[0].Path).VersionInfo.ProductVersion
     $installedIdentity=[pscustomobject]@{ProcessName=$agents[0].ProcessName;Path=$agents[0].Path;ProductVersion=$productVersion;Id=$agents[0].Id;StartTime=$agents[0].StartTime;User=$ownerName;Sid=$ownerSid;SessionId=$agents[0].SessionId}
-    if($completedOutcomeUpgrade){
+    if($RecoveredNativeContinuation){
+        $recoveredReceipt=Invoke-CpvPreparationTransport ([pscustomobject]@{schemaVersion=1;operation='cpv-preparation-recover-completed-status';requestId=$upgradeRequestId})
+        $upgrade=Assert-CpvRecoveredNativeUpgrade -EvidenceRoot $activeRoot -RuntimeRoot 'C:\Repato-Autonomous\Source\QA\TestRuns' `
+            -RequestId $upgradeRequestId -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -StoreRoot (Join-Path $PSScriptRoot '..\QA\MayaRuns') `
+            -Capabilities $capabilities -Receipt $receipt -InstalledAgent $installedIdentity -ProcessSid $ownerSid `
+            -ExpectedExecutable $contract.Executable -ExpectedInstalledVersion '1.0.22+6119aceaab0a34c3e0323089a29f1cefb2c14aaa' -CandidateRoot $validated.SourceRoot `
+            -CandidateManifestPath $manifest -CandidateManifestSha256 $ManifestSha256 -PriorRuntimeFiles $priorFiles `
+            -PriorTaskContractValid ([bool]$priorTaskValid) -NoRevitProcesses $true -BootstrapModule $bootstrap -RecoveryReceipt $recoveredReceipt
+    }elseif($completedOutcomeUpgrade){
         $transitionEvidence=@{}
         $expectedCompletedVersion='1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e'
         if($productVersion -ceq '1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f'){
@@ -85,7 +99,7 @@ if(Test-Path -LiteralPath $activePath){
             -PriorTaskContractValid ([bool]$priorTaskValid) -NoRevitProcesses $true
     }
     $evidenceSnapshot=Get-CpvPreparationUpgradeEvidenceSnapshot -EvidenceRoot $activeRoot -RunDirectory $upgrade.RunDirectory
-} elseif($ReconcileRequestId -or $CompletedOutcomeRecoveryRequestId){throw 'A guarded upgrade request was supplied but no matching active marker exists.'}
+} elseif($ReconcileRequestId -or $CompletedOutcomeRecoveryRequestId -or $RecoveredNativeContinuation){throw 'A guarded upgrade request was supplied but no matching active marker exists.'}
 $revit=@(Get-CpvRevitProcesses)
 if($revit.Count){throw 'Revit must be stopped.'}
 $agents=@(Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
@@ -116,7 +130,7 @@ if($PreflightOnly){
 }
 try {
     if($upgrade){
-        $journalLease=New-RepatoQaLaunchAgentBootstrapInstallJournal -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RequestId $upgradeRequestId -TaskId $TaskId
+        $journalLease=New-RepatoQaLaunchAgentBootstrapInstallJournal -SourceRoot $ReleaseRoot -ManifestPath $manifest -ManifestSha256 $ManifestSha256 -RequestId $upgradeRequestId -TaskId $TaskId -RecoveredNativeContinuation:$RecoveredNativeContinuation
         & $bootstrap {param($lease) $j=Get-InstallJournal $lease;if($j.state -cne 'CandidateStaged'){throw 'Candidate stage was not durably verified.'};Set-InstallJournalState $j 'ServiceStopPending'|Out-Null} $journalLease
     }
     Stop-RepatoQaLaunchAgentForUpdate -ExpectedAgentPid $agents[0].Id -ExpectedAgentStartTime $agents[0].StartTime.ToString('o') -ExpectedSessionId $capabilities.sessionId -AgentExe $contract.Executable -TaskPath $contract.TaskPath -TaskName $contract.TaskName -BootstrapModule $bootstrap
@@ -138,7 +152,7 @@ try {
     $capabilities=Get-CpvPreparationCapabilities
     if($upgrade){
         if($capabilities.reconciliationOperation -cne 'cpv-preparation-reconcile-failed'){throw 'Installed agent does not advertise the exact reconciliation capability.'}
-        if($completedOutcomeUpgrade -and ($capabilities.recoveryOperation -cne 'cpv-preparation-recover-completed' -or
+        if(($completedOutcomeUpgrade -or $RecoveredNativeContinuation) -and ($capabilities.recoveryOperation -cne 'cpv-preparation-recover-completed' -or
             $capabilities.recoveryStatusOperation -cne 'cpv-preparation-recover-completed-status' -or $capabilities.runtimeVersion -cne $validated.Manifest.productVersion)){
             throw 'Installed agent does not advertise the exact completed-outcome recovery runtime.'
         }
