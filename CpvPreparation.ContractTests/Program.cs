@@ -109,19 +109,20 @@ try {
     string orphanedPartial=receiptPath+".crash.reconcile.partial";File.WriteAllText(orphanedPartial,"interrupted partial evidence");
     var resumed=(CpvPreparationReceipt)failedReconciled.Service.Handle(JsonSerializer.Serialize(failedReconciled.Query,CpvPreparationService.StrictJson),now);
     Check(resumed.Status=="FailedReconciled" && File.Exists(orphanedPartial) && !File.Exists(Path.Combine(failedReconciled.Store,"active.json")),"interrupted partial is preserved while terminal receipt resumes safely");
-    (CpvPreparationRecoveryCommit Commit,CpvPreparationService Service,string Store,string OriginalJson,CpvPreparationCompletedRecovery Query) CompletedRecoveryCase(string name, bool corruptResult=false, bool missingResult=false, bool wrongBinding=false, bool expiredAuthorization=false, bool corruptModel=false)
+    (CpvPreparationRecoveryCommit Commit,CpvPreparationService Service,string Store,string OriginalJson,CpvPreparationCompletedRecovery Query) CompletedRecoveryCase(string name, bool corruptResult=false, bool missingResult=false, bool wrongBinding=false, bool expiredAuthorization=false, bool corruptModel=false, int receiptSession=-1, string? receiptUser=null, string? receiptSid=null)
     {
         string testRoot=Path.Combine(root,"completed-recovery-"+name),logRoot=Path.Combine(testRoot,"logs"),store=Path.Combine(logRoot,"CpvPreparation"),runtime=Path.Combine(testRoot,"runtime");Directory.CreateDirectory(store);Directory.CreateDirectory(runtime);
         var rr=Request();string run=Path.Combine(runtime,"cpv-preparation-"+rr.RunId);Directory.CreateDirectory(run);
         string modelPath=Path.Combine(run,"model.rvt"),runnerPath=Path.Combine(run,"tara-"+rr.AttemptId+".request.json"),resultPath=runnerPath+".preparation.json";
         File.Copy(@"C:\Repato-Autonomous\Source\QA\Fixtures\CreatePlanViewsEmpty.rvt",modelPath);
-        if(corruptModel) File.AppendAllText(modelPath,"changed");
+        File.AppendAllText(modelPath,"prepared");
         string modelHash=CpvPreparationService.Hash(modelPath);
+        if(corruptModel) File.AppendAllText(modelPath,"changed");
         var runner=new {schemaVersion=1,operation=CpvPreparationService.RunnerOperation,requestId=rr.AttemptId,taskId=rr.TaskId,workflowId=rr.WorkflowId,attemptId=rr.AttemptId,runId=rr.RunId,requestPath=runnerPath,modelPath,modelSha256=CpvPreparationService.FixtureSha256,selectedManifestPath=QaLaunchPolicy.ExpectedRunnerManifestPath,selectedManifestSha256=rr.CandidateEvidence.RunnerManifestSha256,outputPath=resultPath,expiresUtc=rr.ExpiresUtc};
         File.WriteAllText(runnerPath,JsonSerializer.Serialize(runner));
         string result=JsonSerializer.Serialize(new {Status="Passed",Operation=CpvPreparationService.RunnerOperation,TaskId=rr.TaskId,WorkflowId=rr.WorkflowId,AttemptId=rr.AttemptId,RunId=rr.RunId,ModelPath=modelPath,SourceModelSha256=CpvPreparationService.FixtureSha256,PreparedModelSha256=modelHash,Levels=new[]{new{Name="0",ElevationMeters=0d,ElementId=101L},new{Name="1",ElevationMeters=4d,ElementId=202L},new{Name="2",ElevationMeters=7.8d,ElementId=303L}}});
         if(!missingResult) File.WriteAllText(resultPath,corruptResult?result.Replace(rr.RunId,Guid.NewGuid().ToString("N")):result);
-        var original=new CpvPreparationReceipt(1,CpvPreparationService.Operation,rr.RequestId,rr.TaskId,rr.WorkflowId,rr.AttemptId,rr.RunId,"OutcomeUnknown",identity.User,identity.Sid,identity.SessionId,rr.CandidateEvidence.CandidateDllSha256,rr.CandidateEvidence.RunnerManifestSha256,modelPath,"",runnerPath,"","","",false,"Unknown","preparation-failed-reconcile-required",rr.ExpiresUtc);
+        var original=new CpvPreparationReceipt(1,CpvPreparationService.Operation,rr.RequestId,rr.TaskId,rr.WorkflowId,rr.AttemptId,rr.RunId,"OutcomeUnknown",receiptUser??identity.User,receiptSid??identity.Sid,receiptSession<0?identity.SessionId:receiptSession,rr.CandidateEvidence.CandidateDllSha256,rr.CandidateEvidence.RunnerManifestSha256,modelPath,"",runnerPath,"","","",false,"Unknown","preparation-failed-reconcile-required",rr.ExpiresUtc);
         string originalJson=JsonSerializer.Serialize(original,CpvPreparationService.StrictJson),requestJson=Json(rr);
         string originalPath=Path.Combine(store,rr.RequestId+".json"),requestPath=Path.Combine(store,rr.RequestId+".request.json");
         File.WriteAllText(originalPath,originalJson);File.WriteAllText(requestPath,requestJson);File.WriteAllText(Path.Combine(store,"active.json"),requestJson);string failurePath=Path.Combine(store,rr.RequestId+".failure.txt");File.WriteAllText(failurePath,"IOException: model remained locked after Revit child exit");
@@ -145,6 +146,42 @@ try {
         Reject(()=>item.Service.Handle(JsonSerializer.Serialize(item.Query,CpvPreparationService.StrictJson),now),"invalid completed recovery evidence or expiry");
         Check(File.Exists(Path.Combine(item.Store,"active.json")),"failed recovery preserves active marker");
     }
+    var restartedCase=CompletedRecoveryCase("agent-restarted-session",receiptSession:2);
+    var restartedCommit=(CpvPreparationRecoveryCommit)restartedCase.Service.Handle(JsonSerializer.Serialize(restartedCase.Query,CpvPreparationService.StrictJson),now);
+    Check(restartedCommit.Receipt.Status=="Passed" && restartedCommit.Receipt.CleanupVerified && restartedCommit.Receipt.RollbackStatus=="CommittedDisposableFixtureOnly","regression: recovery completes when the agent restarted into a different Windows session");
+    Check(identity.SessionId==1 && restartedCommit.Receipt.SessionId==2,"recovery preserves the historical receipt's recorded session while running under the current session");
+    Check(restartedCommit.Receipt.User==identity.User && restartedCommit.Receipt.Sid==identity.Sid,"recovery requires the historical receipt to bind the same user and SID as the current session");
+    Reject(()=>new CpvPreparationService(Options("recovery-noninteractive"),new Identity{Interactive=false},new Ledger(),new Boundary()).Handle(JsonSerializer.Serialize(restartedCase.Query,CpvPreparationService.StrictJson),now),"recover-completed still requires a live interactive current session");
+    Reject(()=>new CpvPreparationService(Options("recovery-wronguser"),new Identity{User="wrong"},new Ledger(),new Boundary()).Handle(JsonSerializer.Serialize(restartedCase.Query,CpvPreparationService.StrictJson),now),"recover-completed still requires the authorized current user");
+    Reject(()=>new CpvPreparationService(Options("recovery-wrongsid"),new Identity{Sid="wrong"},new Ledger(),new Boundary()).Handle(JsonSerializer.Serialize(restartedCase.Query,CpvPreparationService.StrictJson),now),"recover-completed still requires the authorized current SID");
+    var sessionZeroCase=CompletedRecoveryCase("receipt-session-zero",receiptSession:0);
+    Reject(()=>sessionZeroCase.Service.Handle(JsonSerializer.Serialize(sessionZeroCase.Query,CpvPreparationService.StrictJson),now),"recovery rejects a receipt that did not record a positive interactive session");
+    var otherUserCase=CompletedRecoveryCase("receipt-other-user",receiptUser:"Ramsai\\SomeoneElse");
+    Reject(()=>otherUserCase.Service.Handle(JsonSerializer.Serialize(otherUserCase.Query,CpvPreparationService.StrictJson),now),"recovery still rejects a receipt written by a different account");
+    var otherSidCase=CompletedRecoveryCase("receipt-other-sid",receiptSid:"S-1-5-21-0-0-0-1000");
+    Reject(()=>otherSidCase.Service.Handle(JsonSerializer.Serialize(otherSidCase.Query,CpvPreparationService.StrictJson),now),"recovery still rejects a receipt written by a different SID");
+    Check(NamedPipeLaunchServer.PreparedFailureCode(new InvalidDataException("completed-recovery-path-or-process-evidence-invalid"))=="completed-recovery-path-or-process-evidence-invalid","agent surfaces the specific CPV failure token to the authenticated client");
+    Check(NamedPipeLaunchServer.PreparedFailureCode(new InvalidDataException("completed-recovery-original-receipt-changed"))=="completed-recovery-original-receipt-changed","agent surfaces every distinct CPV recovery failure token");
+    Check(NamedPipeLaunchServer.PreparedFailureCode(new IOException("model locked at C:\\Repato-Autonomous\\Source\\QA\\TestRuns\\model.rvt"))=="preparation-rejected-or-reconcile-required","agent never leaks path-bearing or on-token errors outside the CPV vocabulary");
+    Check(NamedPipeLaunchServer.PreparedFailureCode(new InvalidOperationException("Unattended preparation stopped at dialog: Save As"))=="preparation-rejected-or-reconcile-required","agent never leaks dialog text or mixed-case detail");
+    Check(NamedPipeLaunchServer.PreparedFailureCode(new InvalidDataException(new string('a',200)))=="preparation-rejected-or-reconcile-required","agent bounds the surfaced failure token length");
+    CpvPreparationCompletedRecoveryReconcile ReconcileQuery(CpvPreparationCompletedRecovery r) =>
+        new(1,CpvPreparationService.RecoverCompletedReconcileOperation,r.RequestId,r.TaskId,r.WorkflowId,r.AttemptId,r.RunId,r.RecoveryApprovalId,
+            r.ApprovalBindingHash,r.OriginalReceiptSha256,r.ActiveMarkerSha256,r.FailureEvidenceSha256,r.RequestSha256);
+    string ReconcileJson(CpvPreparationCompletedRecoveryReconcile q) => JsonSerializer.Serialize(q,CpvPreparationService.StrictJson);
+    string StatusOf(object o) => JsonSerializer.SerializeToElement(o).GetProperty("status").GetString()!;
+    Check(JsonSerializer.SerializeToElement(service.Capabilities()).GetProperty("recoveryReconcileOperation").GetString()==CpvPreparationService.RecoverCompletedReconcileOperation,"authenticated capabilities advertise the completed-recovery reconcile operation");
+    var reconcilePending=CompletedRecoveryCase("reconcile-notexecuted");
+    var before=reconcilePending.Service.Handle(ReconcileJson(ReconcileQuery(reconcilePending.Query)),now);
+    Check(StatusOf(before)=="NotExecuted" && JsonSerializer.SerializeToElement(before).GetProperty("activeMarkerSha256").GetString()==reconcilePending.Query.ActiveMarkerSha256,"positive non-execution evidence reconciles to NotExecuted, never to a bare Not-found");
+    Check(File.Exists(Path.Combine(reconcilePending.Store,"active.json")),"read-only recovery reconciliation preserves the active marker");
+    Reject(()=>reconcilePending.Service.Handle(ReconcileJson(ReconcileQuery(reconcilePending.Query) with { TaskId="task-"+Guid.NewGuid().ToString("N") }),now),"reconcile rejects identity mismatch");
+    Reject(()=>reconcilePending.Service.Handle(ReconcileJson(ReconcileQuery(reconcilePending.Query) with { OriginalReceiptSha256=new string('0',64) }),now),"reconcile rejects a changed original receipt");
+    Reject(()=>reconcilePending.Service.Handle(ReconcileJson(ReconcileQuery(reconcilePending.Query) with { RequestSha256=new string('0',64) }),now),"reconcile rejects changed request evidence");
+    var executedReconcile=completed.Service.Handle(ReconcileJson(ReconcileQuery(completed.Query)),now);
+    Check(JsonSerializer.SerializeToElement(executedReconcile).GetProperty("status").GetString()=="Executed" &&
+        JsonSerializer.SerializeToElement(executedReconcile).GetProperty("recoveryApprovalId").GetString()==completed.Query.RecoveryApprovalId,"committed recovery reconciles to Executed bound to its approval");
+    Reject(()=>completed.Service.Handle(ReconcileJson(ReconcileQuery(completed.Query) with { ApprovalBindingHash=new string('0',64) }),now),"Executed reconcile refuses a mismatched approval binding");
     Console.WriteLine($"PASS: {assertions} CPV preparation protocol assertions; injected processes only; Revit launched=false.");
 } finally {Directory.Delete(root,true);}
 
@@ -155,6 +192,6 @@ sealed class Boundary:ICpvPreparationBoundary {
     public string? ReconciliationError{get;set;}
     public TaskCompletionSource<CpvPreparationOutcome> Completion{get;}=new(TaskCreationOptions.RunContinuationsAsynchronously);
     public void Validate(CpvPreparationRequest r){if(ValidationError!=null)throw new InvalidDataException(ValidationError);}
-    public IDisposable ValidateReconciliation(CpvPreparationRequest r,CpvPreparationReceipt receipt){if(ReconciliationError!=null)throw new InvalidDataException(ReconciliationError);var stream=File.Open(receipt.ModelPath,FileMode.Open,FileAccess.Read,FileShare.None);if(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream))!=CpvPreparationService.FixtureSha256){stream.Dispose();throw new InvalidDataException("reconciliation-model-hash-mismatch");}return stream;}
+    public IDisposable ValidateReconciliation(CpvPreparationRequest r,CpvPreparationReceipt receipt,string expectedModelSha256){if(ReconciliationError!=null)throw new InvalidDataException(ReconciliationError);var stream=File.Open(receipt.ModelPath,FileMode.Open,FileAccess.Read,FileShare.None);if(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream))!=expectedModelSha256){stream.Dispose();throw new InvalidDataException("reconciliation-model-hash-mismatch");}return stream;}
     public async Task<CpvPreparationOutcome> Execute(CpvPreparationRequest r,string dir){Directory.CreateDirectory(dir);File.WriteAllText(Path.Combine(dir,"tara-"+r.AttemptId+".request.json"),"synthetic");return await Completion.Task;}
 }

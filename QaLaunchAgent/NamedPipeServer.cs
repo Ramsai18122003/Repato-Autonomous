@@ -51,10 +51,10 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
                 response = RouteLaunchRequest(line, coordinator, DateTimeOffset.UtcNow);
             }
         }
-        catch
+        catch (Exception exception)
         {
             response = observedOperation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation or CpvPreparationService.ReconcileOperation or CpvPreparationService.RecoverCompletedOperation or CpvPreparationService.RecoverCompletedStatusOperation or CpvPreparationService.RecoverCompletedReconcileOperation
-                ? new { schemaVersion = 1, operation = observedOperation, status = "RejectedOrUnknown", failureCode = "preparation-rejected-or-reconcile-required" }
+                ? new { schemaVersion = 1, operation = observedOperation, status = "RejectedOrUnknown", failureCode = PreparedFailureCode(exception) }
                 : observedOperation == RcpQaLaunchPolicy.Operation
                 ? new RcpQaLaunchResponse(1, RcpQaLaunchPolicy.Operation, "", "", "", RcpQaLaunchPolicy.ToolId, RcpQaLaunchPolicy.ToolId, "", "", "", false, "rejected", null, WindowsIdentity.GetCurrent().Name, WindowsIdentity.GetCurrent().User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, null, "malformed-request")
                 : new QaLaunchResponseV2(2, QaLaunchPolicy.Operation, "", "", false, null, null, null, null, null, null, null, null, null, null, null, null, null, "malformed-request");
@@ -71,6 +71,13 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
             // Its disconnect must not terminate the long-lived scheduled-task listener.
         }
     }
+
+    public static string PreparedFailureCode(Exception exception) =>
+        exception is InvalidDataException or InvalidOperationException &&
+        exception.Message.Length is > 0 and <= 96 &&
+        exception.Message.All(character => character is '-' or '_' || character >= 'a' && character <= 'z')
+            ? exception.Message
+            : "preparation-rejected-or-reconcile-required";
 
     public static object RouteLaunchRequest(string line, LaunchCoordinator coordinator, DateTimeOffset now)
     {

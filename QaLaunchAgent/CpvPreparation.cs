@@ -288,7 +288,7 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
         string resultPath = runnerPath + ".preparation.json";
         if (!Path.GetFullPath(original.ModelPath).Equals(Path.GetFullPath(modelPath), StringComparison.OrdinalIgnoreCase) ||
             !Path.GetFullPath(original.RequestPath).Equals(Path.GetFullPath(runnerPath), StringComparison.OrdinalIgnoreCase) ||
-            original.User != identity.User || original.Sid != identity.Sid || original.SessionId != identity.SessionId ||
+            original.User != identity.User || original.Sid != identity.Sid || original.SessionId <= 0 ||
             !File.Exists(resultPath) || !File.Exists(modelPath) || File.Exists(modelPath + ".slog") || File.Exists(modelPath + ".lck"))
             throw new InvalidDataException("completed-recovery-path-or-process-evidence-invalid");
         if (!Hash(modelPath).Equals(q.ModelSha256, StringComparison.OrdinalIgnoreCase) ||
