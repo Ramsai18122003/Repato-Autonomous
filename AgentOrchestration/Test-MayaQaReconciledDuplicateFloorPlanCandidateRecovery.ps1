@@ -19,7 +19,8 @@ function New-Fixture {
     $attempt='a'*32;$run='b'*32;$claim='c'*32;$native='d'*32;$approvalId='e'*32
     $runtime=Join-Path $runs ($run+'-qa');New-Item -ItemType Directory -Path $runtime -Force|Out-Null
     $model=Join-Path $runtime 'model.rvt';[IO.File]::WriteAllBytes($model,[byte[]](1,2,3,4))
-    $fixture=Join-Path $qa 'Fixtures\CreatePlanViewsEmpty.rvt';New-Item -ItemType Directory -Path (Split-Path $fixture) -Force|Out-Null;[IO.File]::WriteAllBytes($fixture,[byte[]](5,6,7,8))
+    $fixture=Join-Path $qa 'Fixtures\CreatePlanViewsEmpty.rvt';New-Item -ItemType Directory -Path (Split-Path $fixture) -Force|Out-Null;[IO.File]::WriteAllBytes($fixture,[byte[]](5,6,7,8));$fixtureHash=(Get-FileHash $fixture -Algorithm SHA256).Hash
+    $sidecar=$model+'.fixture.json';[ordered]@{fixtureId='CreatePlanViewsEmpty';sourceSha256=$fixtureHash}|ConvertTo-Json|Set-Content -LiteralPath $sidecar
     $prepRequest=Join-Path $runs 'fixture-preparation.request.json';$prepResult=$prepRequest+'.preparation.json'
     [IO.File]::WriteAllText($prepRequest,'{"operation":"prepare-fixture"}');[IO.File]::WriteAllText($prepResult,'{"Status":"Passed"}')
     $requestPath=Join-Path $runtime 'maya-tara.request.json';$resultPath=$requestPath+'.result.json';$reportPath=Join-Path $reports ($run+'.json');$journalPath=Join-Path $runtime 'journal.txt'
@@ -32,11 +33,13 @@ function New-Fixture {
     $receipt|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $resultPath
     [IO.File]::WriteAllText($journalPath,'Application shutdown completed')
     $resultHash=(Get-FileHash $resultPath -Algorithm SHA256).Hash;$reportHash=(Get-FileHash $reportPath -Algorithm SHA256).Hash;$journalHash=(Get-FileHash $journalPath -Algorithm SHA256).Hash
-    $prep=[pscustomobject]@{RequestPath=$prepRequest;RequestSha256=(Get-FileHash $prepRequest -Algorithm SHA256).Hash;ResultPath=$prepResult;ResultSha256=(Get-FileHash $prepResult -Algorithm SHA256).Hash}
+    $prep=[pscustomobject]@{RequestPath=$prepRequest;RequestSha256=(Get-FileHash $prepRequest -Algorithm SHA256).Hash;ResultPath=$prepResult;ResultSha256=(Get-FileHash $prepResult -Algorithm SHA256).Hash;AttemptId=$attempt;RunId=$run;PreparedModelPath=$model;PreparedModelSha256=$modelHash}
     $binding=[ordered]@{TaskId=$taskId;WorkflowId=$workflowId;AttemptId=$attempt;RunId=$run;CandidateSha256=$candidateHash;ModelPath=$model;ModelSha256=$modelHash}
     $approval=[pscustomobject][ordered]@{requestId=$approvalId;action='qa-run';attemptId=$attempt;runId=$run;requiredLevel='user';status='approved';decidedBy='user';decidedUtc=[DateTimeOffset]::UtcNow.AddHours(-3).ToString('O');expiresUtc=$expires;consumedUtc=$null;executionBinding=$binding;bindingHash=(Get-ObjectHash $binding)}
     $cleanup=[pscustomobject]@{TaskId=$taskId;AttemptId=$attempt;RunId=$run;ClaimId=$claim;NativeRequestId=$native;NativeProcessId=7824;ProcessExitConfirmed=$true;Forced=$false;ModelUnlocked=$true;RetryAuthorized=$false;FailureClass='duplicate-floor-plan-view-family-type';TransactionStatus='NotStarted';RollbackStatus='NotRequired';ModelSha256=$modelHash;RequestPath=$requestPath;RequestSha256=(Get-FileHash $requestPath -Algorithm SHA256).Hash;ReceiptPath=$resultPath;ReceiptSha256=$resultHash;ReportPath=$reportPath;ReportSha256=$reportHash;JournalPath=$journalPath;JournalSha256=$journalHash;ExitVerification='terminal-journal-no-process-model-unlocked'}
     $execution=[pscustomobject]@{TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId='create-plan-views-v1';TestId='create-plan-views-v1';AttemptId=$attempt;RunId=$run;FailedClaimId=$claim;ClaimId=$null;ClaimOwner=$null;ClaimStatus='released';NativeRequestId=$native;NativeProcessId=7824;Stage='qa-failed';ExecutionStatus='QaFailed';FailureCode='duplicate-floor-plan-view-family-type';TransactionStatus='NotStarted';RollbackStatus='NotRequired';VerificationStatus='Failed';CompletionStatus='Failed';SideEffectsPerformed=$false;LaunchedUtc=[DateTimeOffset]::UtcNow.AddHours(-2.5).ToString('O');RequestPath=$requestPath;ResultPath=$resultPath;ReceiptPath=$resultPath;ReportPath=$reportPath;ResultSha256=$resultHash;ReportSha256=$reportHash;DisposableModelPath=$model;DisposableModelSha256=$modelHash;ArtifactSha256=$candidateHash;AuthoritativeFixturePath=$fixture;AuthoritativeFixtureSha256=(Get-FileHash $fixture -Algorithm SHA256).Hash;FixturePreparationEvidence=$prep;CleanupStatus='Verified';CleanupEvidence=$cleanup}
+    $handoffId='handoff-'+[guid]::NewGuid().ToString('N')
+    $workflowPlan=[pscustomobject]@{qaRunId=$run;qaModelPath=$model;qaSidecarPath=$sidecar;qaFixtureId='CreatePlanViewsEmpty';qaFixtureSha256=$fixtureHash;qaFixtureSpecSha256='';qaTestId='create-plan-views-v1';qaDisposableModelSha256=$modelHash;qaFixturePreparationEvidence=$prep;qaReportPath=$reportPath;qaReportSha256=$reportHash;qaEvidence=$null;qaVerificationStatus='Failed';qaCompletionStatus='Failed';qaCompletedUtc=$null;qaHandoffId=$handoffId;qaHandoff=[pscustomobject]@{HandoffId=$handoffId;HandoffStatus='ready';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId='create-plan-views-v1';ModelPath=$model;SidecarPath=$sidecar};qaApprovalId=$approvalId;qaApprovalStatus='approved'}
     $store=Join-Path $scratch ('Store-'+[guid]::NewGuid().ToString('N'));New-RepatoTask $store $taskId 'CPV retest recovery' 'synthetic duplicate FloorPlan failure recovery' 'qa/cpv-duplicate-recovery' -RequiredApprovalLevel user|Out-Null
     Invoke-RepatoStoreMutation $store {
         param($data,$preview)
@@ -46,7 +49,9 @@ function New-Fixture {
         $t|Add-Member NoteProperty mayaTaraExecution $execution -Force
         $t|Add-Member NoteProperty mayaTaraQaPacket ([pscustomobject]@{TaskId=$taskId;WorkflowId=$workflowId;AttemptId=$attempt;RunId=$run;ModelPath=$model}) -Force
         $t|Add-Member NoteProperty approvalRequests ([object[]]@($approval)) -Force
-        $t|Add-Member NoteProperty deploymentWorkflows ([object[]]@([pscustomobject]@{taskId=$taskId;workflowId=$workflowId;workflowRevision=1;qaWorkflowId='create-plan-views-v1';qaBuildStatus='succeeded';qaBuildRequest=[pscustomobject]@{BuildRequestId='previous-build'};qaBuildEvidence=[pscustomobject]@{BuildRequestId='previous-build';ArtifactSha256=$candidateHash}})) -Force
+        $workflow=[pscustomobject]@{taskId=$taskId;workflowId=$workflowId;workflowRevision=1;taskRevision=9;stage='planned';qaWorkflowId='create-plan-views-v1';qaBuildStatus='succeeded';qaBuildRequest=[pscustomobject]@{BuildRequestId='previous-build'};qaBuildEvidence=[pscustomobject]@{BuildRequestId='previous-build';ArtifactSha256=$candidateHash}}
+        foreach($property in $workflowPlan.PSObject.Properties){$workflow|Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force}
+        $t|Add-Member NoteProperty deploymentWorkflows ([object[]]@($workflow)) -Force
         $t
     }|Out-Null
     [pscustomobject]@{Store=$store;TaskId=$taskId;WorkflowId=$workflowId;Attempt=$attempt;Run=$run;Claim=$claim;Native=$native;Approval=$approvalId;ResultHash=$resultHash;ReportHash=$reportHash;ModelHash=$modelHash}
@@ -58,6 +63,11 @@ function Invoke-Recovery($fixture,[long]$revision=9,[string]$claim=$fixture.Clai
 
 function Get-ActiveApprovals($approvals) {
     & $module {param($items) @(Get-MayaQaActiveCanonicalExecutionApprovals -Approvals $items)} $approvals
+}
+
+function Invoke-WorkflowPlanReset($fixture,[long]$revision=$null,[string]$attempt=$fixture.Attempt,[string]$run=$fixture.Run,[string]$claim=$fixture.Claim,[string]$native=$fixture.Native,[string]$approval=$fixture.Approval,[string]$resultHash=$fixture.ResultHash,[string]$reportHash=$fixture.ReportHash,[string]$modelHash=$fixture.ModelHash,[switch]$DryRun) {
+    if(!$revision){$revision=[long](Find-RepatoTask (Read-RepatoTaskStore $fixture.Store) $fixture.TaskId).revision}
+    Reset-MayaQaReconciledDuplicateFloorPlanWorkflowPlan -StoreRoot $fixture.Store -TaskId $fixture.TaskId -WorkflowId $fixture.WorkflowId -ExpectedTaskRevision $revision -FailedAttemptId $attempt -FailedRunId $run -FailedClaimId $claim -NativeRequestId $native -ApprovalRequestId $approval -ExpectedResultSha256 $resultHash -ExpectedReportSha256 $reportHash -ExpectedModelSha256 $modelHash -DryRun:$DryRun
 }
 
 try {
@@ -72,6 +82,22 @@ try {
     if($done.Status -cne 'Recovered' -or $after.status -cne 'in-progress' -or $after.workflowStage -cne 'build-checks' -or $after.mayaTaraExecution -or $after.mayaTaraAttempt){throw 'Successful recovery did not archive the failure and clear active pointers.'}
     if(@($after.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $good.Attempt -and $_.FailureCode -ceq 'duplicate-floor-plan-view-family-type'}).Count -ne 1){throw 'Original failed execution was not preserved.'}
     if((Get-ObjectHash $after.approvalRequests[0]) -cne $approvalBefore -or $after.approvalRequests[0].consumedUtc){throw 'Historical approval was altered or falsely marked consumed.'}
+    $planDry=Invoke-WorkflowPlanReset $good -revision ([long]$after.revision) -DryRun
+    if($planDry.Status -cne 'DryRun' -or [long](Find-RepatoTask (Read-RepatoTaskStore $good.Store) $good.TaskId).revision -ne [long]$after.revision){throw 'Workflow-plan reset dry run mutated task state.'}
+    $planReset=Invoke-WorkflowPlanReset $good -revision ([long]$after.revision)
+    $after=Find-RepatoTask (Read-RepatoTaskStore $good.Store) $good.TaskId
+    $workflowAfter=@($after.deploymentWorkflows|Where-Object workflowId -ceq $good.WorkflowId)[0]
+    if($planReset.Status -cne 'Archived' -or $workflowAfter.qaRunId -or $workflowAfter.qaModelPath -or $workflowAfter.qaSidecarPath -or $workflowAfter.qaFixturePreparationEvidence -or $workflowAfter.qaHandoff -or $workflowAfter.qaApprovalId){throw 'Reconciled workflow plan was not archived and cleared.'}
+    if(@($workflowAfter.qaRunHistory|Where-Object {$_.RunId -ceq $good.Run}).Count -ne 1 -or $workflowAfter.qaRunHistory[0].FixturePreparationEvidence.ResultSha256 -cne $after.mayaTaraExecutionHistory[0].FixturePreparationEvidence.ResultSha256){throw 'Prior run and fixture-preparation evidence were not preserved in workflow history.'}
+    if((Get-ObjectHash $after.approvalRequests[0]) -cne $approvalBefore -or $after.approvalRequests[0].consumedUtc){throw 'Workflow-plan reset altered or consumed the expired historical approval.'}
+    $resetRevision=[long]$after.revision;$resetReplay=Invoke-WorkflowPlanReset $good -revision $resetRevision
+    if($resetReplay.Status -cne 'AlreadyArchived' -or [long](Find-RepatoTask (Read-RepatoTaskStore $good.Store) $good.TaskId).revision -ne $resetRevision){throw 'Workflow-plan reset replay was not idempotent.'}
+    $resetRejected=$false;try{Invoke-WorkflowPlanReset $good -revision $resetRevision -modelHash ('0'*64)|Out-Null}catch{$resetRejected=$true}
+    if(!$resetRejected -or [long](Find-RepatoTask (Read-RepatoTaskStore $good.Store) $good.TaskId).revision -ne $resetRevision){throw 'Mismatched-model workflow-plan reset was accepted or mutated task state.'}
+    $nullPointers=[pscustomobject]@{mayaTaraAttempt=$null;mayaTaraExecution=$null;mayaTaraQaPacket=$null;mayaTaraExecutionEvidence=$null}
+    $hasNullState=& $module {param($value)Test-MayaQaTaskHasTaraExecutionState -Task $value} $nullPointers
+    $hasActiveState=& $module {param($value)Test-MayaQaTaskHasTaraExecutionState -Task $value} ([pscustomobject]@{mayaTaraExecution=[pscustomobject]@{ExecutionStatus='QaFailed'}})
+    if($hasNullState -or !$hasActiveState){throw 'Tara execution-state guard did not distinguish null placeholders from an active record.'}
     $head=(& git -C (Split-Path $PSScriptRoot -Parent) rev-parse HEAD).Trim()
     $buildSource=[pscustomobject]@{RepositoryRoot=(Split-Path $PSScriptRoot -Parent);ExpectedSourceCommit=$head;ProjectRelativePath='Forma.RevitConnector.csproj'}
     $buildPlan=New-MayaQaCandidateReplacementBuildRequest -StoreRoot $good.Store -TaskId $good.TaskId -WorkflowId $good.WorkflowId -QaWorkflowId 'create-plan-views-v1' -AuthenticatedBuildSource $buildSource -SourceBranch 'fix/cpv-native-retest-20261020' -ProjectPath 'Forma.RevitConnector.csproj' -DryRun
@@ -103,7 +129,7 @@ try {
     if($active.Count -ne 1){throw 'Only the unexpired, unconsumed user approval should block a fresh request.'}
     $badExpiryRejected=$false;try{Get-ActiveApprovals @([pscustomobject]@{action='qa-run';status='pending';expiresUtc='invalid'})|Out-Null}catch{$badExpiryRejected=$true}
     if(!$badExpiryRejected){throw 'Malformed approval expiry was accepted.'}
-    [pscustomobject]@{Success=$true;DryRunReadOnly=$true;ExactEvidenceRequired=$true;ExpiredApprovalPreservedUnconsumed=$true;OriginalFailurePreserved=$true;ReplacementBuildPathEligible=$true;ReplayIdempotent=$true;NegativeCases=$cases.Count;ApprovalExpiryGating=$true;NativeLaunchPerformed=$false}|ConvertTo-Json -Compress
+    [pscustomobject]@{Success=$true;DryRunReadOnly=$true;ExactEvidenceRequired=$true;ExpiredApprovalPreservedUnconsumed=$true;OriginalFailurePreserved=$true;WorkflowPlanArchived=$true;ReplacementBuildPathEligible=$true;ReplayIdempotent=$true;NegativeCases=($cases.Count+1);ApprovalExpiryGating=$true;NullTaraStateHandled=$true;NativeLaunchPerformed=$false}|ConvertTo-Json -Compress
 }
 finally {
     & $module {$script:MayaQaRootOverrideForTests=$null}

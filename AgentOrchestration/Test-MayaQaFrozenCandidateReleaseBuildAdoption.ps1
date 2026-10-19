@@ -4,13 +4,13 @@ Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force 
 $workflowModule=Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -PassThru -WarningAction SilentlyContinue
 
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$candidate=Join-Path $repo 'DeploymentCandidates\AgentBuilds\ReleaseCandidate-c3b318586677'
+$sourceCommit=(& git -C $repo rev-parse HEAD).Trim()
+$candidate=Join-Path $repo ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$sourceCommit.Substring(0,12))
 $dll=Join-Path $candidate 'Repato.Revit.dll'
 $manifest=Join-Path $candidate 'Repato.addin'
 $provenance=Join-Path $candidate 'release-manifest.json'
 $artifactHash=(Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
 $manifestHash=(Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash
-$sourceCommit='c3b318586677bac45cb07463ed67d03981dc6d4c'
 $store=Join-Path ([IO.Path]::GetTempPath()) ('maya-frozen-build-adoption-'+[guid]::NewGuid().ToString('N'))
 $taskId='task-frozen-build-adoption-'+[guid]::NewGuid().ToString('N')
 $runner=Join-Path $repo 'QA\Repato.CreatePlanViews.TestRunner.addin'

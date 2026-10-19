@@ -5,8 +5,8 @@ Import-Module (Join-Path $here 'Repato.Deployment.v4.psm1') -Force -WarningActio
 Import-Module (Join-Path $here 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 
 $taskId='task-bf61fe7f22d74df7a92599681da5919e';$workflowId='fa2c2f578cbc40cbacac45c96313ca4c';$buildId='build-4b47d1c11c6b48e094b2d75f0097af04'
-$commit='c3b318586677bac45cb07463ed67d03981dc6d4c';$qaId='create-plan-views-v1'
-$candidate=Join-Path (Split-Path $here -Parent) 'DeploymentCandidates\AgentBuilds\ReleaseCandidate-c3b318586677';$candidateHash=(Get-FileHash (Join-Path $candidate 'Repato.Revit.dll') -Algorithm SHA256).Hash
+$repoRoot=Split-Path $here -Parent;$commit=(& git -C $repoRoot rev-parse HEAD).Trim();$qaId='create-plan-views-v1'
+$candidate=Join-Path $repoRoot ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$commit.Substring(0,12));$candidateHash=(Get-FileHash (Join-Path $candidate 'Repato.Revit.dll') -Algorithm SHA256).Hash
 $sourceRunner=Join-Path (Split-Path $here -Parent) 'QA\Repato.CreatePlanViews.TestRunner.addin';$runnerHash=(Get-FileHash $sourceRunner -Algorithm SHA256).Hash
 $installedRunner='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$addinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA'
 $fixture=Join-Path (Split-Path $here -Parent) 'QA\Fixtures\CreatePlanViewsEmpty.rvt';$madeFixture=$false

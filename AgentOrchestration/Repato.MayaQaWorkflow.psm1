@@ -1670,6 +1670,145 @@ function Recover-MayaQaReconciledDuplicateFloorPlanFailureForCandidateReplacemen
     }
 }
 
+function Reset-MayaQaReconciledDuplicateFloorPlanWorkflowPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][ValidateRange(1,[long]::MaxValue)][long]$ExpectedTaskRevision,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$FailedAttemptId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$FailedRunId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$FailedClaimId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$NativeRequestId,
+        [Parameter(Mandatory)][string]$ApprovalRequestId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedResultSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedReportSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedModelSha256,
+        [switch]$DryRun
+    )
+    $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    if(!$task -or [long]$task.revision -ne $ExpectedTaskRevision){throw 'Reconciled workflow-plan reset task revision is stale.'}
+    $workflows=@($task.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId)
+    if($workflows.Count -ne 1 -or [string]$workflows[0].taskId -cne $TaskId){throw 'Reconciled workflow-plan reset task/workflow identity is invalid.'}
+    $workflow=$workflows[0]
+    $retirement=if($task.PSObject.Properties['mayaQaCandidateReplacementRetirement']){$task.mayaQaCandidateReplacementRetirement}else{$null}
+    $executionRecords=@()
+    if($task.PSObject.Properties['mayaTaraExecutionHistory']){$executionRecords=@($task.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $FailedAttemptId -and $_.RunId -ceq $FailedRunId})}
+    $attemptRecords=@()
+    if($task.PSObject.Properties['mayaTaraAttemptHistory']){$attemptRecords=@($task.mayaTaraAttemptHistory|Where-Object {$_.AttemptId -ceq $FailedAttemptId -and $_.RunId -ceq $FailedRunId})}
+    $approvalRecords=@($task.approvalRequests|Where-Object {$_.requestId -ceq $ApprovalRequestId -and $_.action -ceq 'qa-run'})
+    if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'build-checks' -or
+        !$retirement -or $retirement.ReconciledNativeFailure -ne $true -or
+        $retirement.WorkflowId -cne $WorkflowId -or $retirement.FailedAttemptId -cne $FailedAttemptId -or
+        $retirement.FailedRunId -cne $FailedRunId -or $retirement.FailedClaimId -cne $FailedClaimId -or
+        $retirement.NativeRequestId -cne $NativeRequestId -or
+        $retirement.HistoricalApprovalRequestId -cne $ApprovalRequestId -or
+        $retirement.HistoricalApprovalDisposition -cne 'expired-unconsumed' -or
+        $retirement.ResultSha256 -ine $ExpectedResultSha256 -or $retirement.ReportSha256 -ine $ExpectedReportSha256 -or
+        $retirement.ModelSha256 -ine $ExpectedModelSha256 -or $executionRecords.Count -ne 1 -or
+        $attemptRecords.Count -ne 1 -or $approvalRecords.Count -ne 1) {
+        throw 'Reconciled workflow-plan reset is not bound to the exact archived native failure.'
+    }
+    $execution=$executionRecords[0]
+    $attempt=$attemptRecords[0]
+    $approval=$approvalRecords[0]
+    if($execution.FailedClaimId -cne $FailedClaimId -or $execution.NativeRequestId -cne $NativeRequestId -or
+        $execution.ResultSha256 -ine $ExpectedResultSha256 -or $execution.ReportSha256 -ine $ExpectedReportSha256 -or
+        $execution.DisposableModelSha256 -ine $ExpectedModelSha256 -or
+        $execution.TransactionStatus -cne 'NotStarted' -or $execution.RollbackStatus -cne 'NotRequired' -or
+        $execution.ClaimStatus -cne 'released' -or $attempt.AttemptId -cne $FailedAttemptId -or
+        $attempt.RunId -cne $FailedRunId -or $approval.status -cne 'approved' -or $approval.consumedUtc) {
+        throw 'Archived failure, attempt, or historical approval disposition is inconsistent.'
+    }
+    if((Get-MayaQaCanonicalObjectSha256 $approval) -ine [string]$retirement.HistoricalApprovalSha256){throw 'Historical approval record changed after failure reconciliation.'}
+    $approvalExpiry=[DateTimeOffset]::MinValue
+    if(![DateTimeOffset]::TryParse([string]$approval.expiresUtc,[ref]$approvalExpiry) -or $approvalExpiry -gt [DateTimeOffset]::UtcNow){
+        throw 'Historical approval is not verifiably expired.'
+    }
+    if(@(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count){throw 'Revit is active; reconciled workflow-plan reset is blocked.'}
+    $alreadyArchived=@()
+    if($workflow.PSObject.Properties['qaRunHistory']){$alreadyArchived=@($workflow.qaRunHistory|Where-Object {$_.RunId -ceq $FailedRunId})}
+    if([string]::IsNullOrWhiteSpace([string]$workflow.qaRunId)){
+        if($alreadyArchived.Count -ne 1 -or $workflow.qaModelPath -or $workflow.qaSidecarPath -or
+            $workflow.qaFixturePreparationEvidence -or $workflow.qaHandoff -or $workflow.qaApprovalId) {
+            throw 'Workflow plan is partially reset or has ambiguous archive history.'
+        }
+        return [pscustomobject]@{Status='AlreadyArchived';TaskId=$TaskId;WorkflowId=$WorkflowId;FailedRunId=$FailedRunId;FailureEvidencePreserved=$true;HistoricalApprovalPreserved=$true;NativeLaunchPerformed=$false;SideEffectsPerformed=$false}
+    }
+    if([string]$workflow.qaWorkflowId -cne 'create-plan-views-v1' -or
+        [string]$workflow.qaRunId -cne $FailedRunId -or
+        [IO.Path]::GetFullPath([string]$workflow.qaModelPath) -ine [IO.Path]::GetFullPath([string]$execution.DisposableModelPath) -or
+        [string]$workflow.qaDisposableModelSha256 -ine $ExpectedModelSha256 -or
+        [string]$workflow.qaFixturePreparationEvidence.RunId -cne $FailedRunId -or
+        [string]$workflow.qaFixturePreparationEvidence.AttemptId -cne $FailedAttemptId -or
+        [string]$workflow.qaFixturePreparationEvidence.PreparedModelSha256 -ine $ExpectedModelSha256 -or
+        [string]$workflow.qaApprovalId -cne $ApprovalRequestId -or [string]$workflow.qaApprovalStatus -cne 'approved' -or
+        $alreadyArchived.Count) {
+        throw 'Current workflow plan does not match the exact reconciled failure or already has an archive.'
+    }
+    $modelPath=[IO.Path]::GetFullPath([string]$workflow.qaModelPath)
+    $sidecarPath=[IO.Path]::GetFullPath([string]$workflow.qaSidecarPath)
+    if(!(Test-Path -LiteralPath $modelPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash -ine $ExpectedModelSha256 -or
+        !(Test-Path -LiteralPath $sidecarPath -PathType Leaf)) {
+        throw 'Reconciled workflow model or sidecar is missing or changed.'
+    }
+    $sidecar=Get-Content -LiteralPath $sidecarPath -Raw -ErrorAction Stop|ConvertFrom-Json -ErrorAction Stop
+    if([string]$sidecar.fixtureId -cne [string]$workflow.qaFixtureId -or
+        [string]$sidecar.sourceSha256 -ine [string]$workflow.qaFixtureSha256) {
+        throw 'Reconciled workflow sidecar provenance does not match the prior plan.'
+    }
+    $preparation=$workflow.qaFixturePreparationEvidence
+    foreach($pair in @(@($preparation.RequestPath,$preparation.RequestSha256),@($preparation.ResultPath,$preparation.ResultSha256))) {
+        if(!$pair[0] -or $pair[1] -notmatch '^[A-Fa-f0-9]{64}$' -or
+            !(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine [string]$pair[1]) {
+            throw 'Prior fixture-preparation evidence is missing or changed.'
+        }
+    }
+    $handoff=$workflow.qaHandoff
+    if($handoff -and
+        ($handoff.HandoffId -cne $workflow.qaHandoffId -or
+         [IO.Path]::GetFullPath([string]$handoff.ModelPath) -ine $modelPath -or
+         [IO.Path]::GetFullPath([string]$handoff.SidecarPath) -ine $sidecarPath)) {
+        throw 'Prior workflow handoff identity or model binding changed.'
+    }
+    if($DryRun){return [pscustomobject]@{Status='DryRun';TaskId=$TaskId;WorkflowId=$WorkflowId;FailedRunId=$FailedRunId;FailureEvidencePreserved=$true;HistoricalApprovalPreserved=$true;ModelUnchanged=$true;NativeLaunchPerformed=$false;SideEffectsPerformed=$false}}
+    $archive=[pscustomobject][ordered]@{
+        ArchivedUtc=Get-RepatoUtc;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=[string]$workflow.qaWorkflowId
+        RunId=[string]$workflow.qaRunId;ModelPath=$modelPath;SidecarPath=$sidecarPath
+        FixtureId=[string]$workflow.qaFixtureId;FixtureSha256=[string]$workflow.qaFixtureSha256
+        FixtureSpecSha256=[string]$workflow.qaFixtureSpecSha256;TestId=[string]$workflow.qaTestId
+        DisposableModelSha256=[string]$workflow.qaDisposableModelSha256
+        FixturePreparationEvidence=$preparation;ReportPath=$workflow.qaReportPath;ReportSha256=$workflow.qaReportSha256
+        Evidence=$workflow.qaEvidence;VerificationStatus=$workflow.qaVerificationStatus
+        CompletionStatus=$workflow.qaCompletionStatus;CompletedUtc=$workflow.qaCompletedUtc
+        HandoffId=$workflow.qaHandoffId;Handoff=$handoff;ApprovalId=$workflow.qaApprovalId
+        ApprovalStatus=$workflow.qaApprovalStatus;FailedAttemptId=$FailedAttemptId;FailedClaimId=$FailedClaimId
+        NativeRequestId=$NativeRequestId;FailedResultSha256=$ExpectedResultSha256
+        FailedReportSha256=$ExpectedReportSha256;FailedCandidateSha256=[string]$execution.ArtifactSha256
+        HistoricalApprovalSha256=(Get-MayaQaCanonicalObjectSha256 $approval)
+    }
+    $mutation=@(Invoke-RepatoWorkflowMutation $StoreRoot $TaskId $WorkflowId ([long]$workflow.workflowRevision) $ExpectedTaskRevision {
+        param($current)
+        if([string]$current.qaRunId -cne $FailedRunId -or
+            [string]$current.qaDisposableModelSha256 -ine $ExpectedModelSha256 -or
+            [string]$current.qaApprovalId -cne $ApprovalRequestId) {
+            throw 'Reconciled workflow-plan reset compare-and-swap failed.'
+        }
+        if($current.PSObject.Properties.Name -notcontains 'qaRunHistory'){$current|Add-Member NoteProperty qaRunHistory ([object[]]@()) -Force}
+        $current.qaRunHistory=[object[]]@($current.qaRunHistory)+$archive
+        foreach($name in @('qaRunId','qaModelPath','qaSidecarPath','qaFixtureId','qaFixtureSha256','qaFixtureSpecSha256',
+            'qaTestId','qaDisposableModelSha256','qaFixturePreparationEvidence','qaReportPath','qaReportSha256','qaEvidence',
+            'qaVerificationStatus','qaCompletionStatus','qaCompletedUtc','qaHandoffId','qaHandoff','qaApprovalId','qaApprovalStatus')) {
+            $current|Add-Member -NotePropertyName $name -NotePropertyValue $null -Force
+        }
+        return $current
+    })[-1]
+    [pscustomobject]@{Status='Archived';TaskId=$TaskId;WorkflowId=$WorkflowId;FailedRunId=$FailedRunId;TaskRevision=$mutation.TaskRevision;WorkflowRevision=$mutation.Workflow.workflowRevision;FailureEvidencePreserved=$true;HistoricalApprovalPreserved=$true;NativeLaunchPerformed=$false;SideEffectsPerformed=$true}
+}
+
 function Resolve-MayaQaRequestWorkflow {
     param([Parameter(Mandatory)][string]$Request)
     $text=$Request.Trim().ToLowerInvariant()
@@ -1994,7 +2133,7 @@ function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation {
     if($e.PSObject.Properties.Name -contains 'DeploymentValidation' -and $e.DeploymentValidation){throw 'Historical deployment validation evidence is already present.'}
     $approval=@($s.Task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})
     if($FreshApprovalAfterDeployment){if($approval.Count){throw 'Fresh candidate staging cannot reuse an existing QA approval.'}}elseif($approval.Count -ne 1){throw 'QA approval is not exactly pending.'}
-    foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($s.Task.PSObject.Properties.Name -contains $n){throw 'Tara state already exists.'}}
+    if(Test-MayaQaTaskHasTaraExecutionState -Task $s.Task){throw 'Tara state already exists.'}
     $revit=if($RevitProcessProvider){@(& $RevitProcessProvider)}else{@(Get-Process Revit -ErrorAction SilentlyContinue)}
     if(@($revit).Count){throw 'Revit is running.'}
     $null=Resolve-MayaQaSourceRunnerManifestEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
@@ -2318,6 +2457,15 @@ function Get-MayaQaActiveCanonicalExecutionApprovals {
     ,$active
 }
 
+function Test-MayaQaTaskHasTaraExecutionState {
+    param([Parameter(Mandatory)][object]$Task)
+    foreach($name in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence') {
+        $property=$Task.PSObject.Properties[$name]
+        if($property -and $null -ne $property.Value){return $true}
+    }
+    $false
+}
+
 function Test-MayaQaFrozenCandidate {
     [CmdletBinding()]
     param(
@@ -2403,7 +2551,8 @@ function Invoke-MayaQaFrozenCandidateEvidence {
         $last=@($storeTask.history)[-1];if($last.event -cne 'deployment-validation-completed' -or [string]$last.details -cnotmatch [regex]::Escape([string]$storedOp.OperationId)){throw 'Task history changed after independent validation completed.'}
         if([string]$storedOp.RequestId -cne [string]$storedOp.Response.requestId -or [string]$storedOp.Response.candidateCommit -ine $verified.SourceCommit -or [string]$storedOp.Response.candidateSha256 -ine $verified.ArtifactSha256 -or [string]$storedOp.Response.runnerManifestSha256 -ine $trustedRunnerManifestSha256 -or [IO.Path]::GetFullPath([string]$storedOp.Response.runnerManifestPath) -ine [IO.Path]::GetFullPath([string]$DeploymentEvidence.runnerManifestPath)){throw 'Independent deployment-validation response is not bound to the persisted candidate.'}
         if([string]$DeploymentEvidence.requestId -cne [string]$storedOp.RequestId -or [string]$DeploymentEvidence.candidateCommit -ine $verified.SourceCommit -or [string]$DeploymentEvidence.candidateSha256 -ine $verified.ArtifactSha256 -or !$DeploymentEvidence.succeeded -or !$DeploymentEvidence.isolationPassed -or !$DeploymentEvidence.manifestIntegrityPassed){throw 'Independent deployment-validation result is invalid.'}
-        if($storeTask.status -cne 'in-progress' -or (!$recoveredBinding -and $storeTask.workflowStage -cne 'build-checks') -or @($storeTask.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and [string]::IsNullOrWhiteSpace([string]$_.consumedUtc)))}).Count){throw 'Task state or approval state changed before independent evidence persistence.'}
+        $activeApprovals=Get-MayaQaActiveCanonicalExecutionApprovals -Approvals @($storeTask.approvalRequests)
+        if($storeTask.status -cne 'in-progress' -or (!$recoveredBinding -and $storeTask.workflowStage -cne 'build-checks') -or $activeApprovals.Count){throw 'Task state or approval state changed before independent evidence persistence.'}
         foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($storeTask.PSObject.Properties.Name -contains $n -and $storeTask.$n){throw 'Tara state appeared before independent evidence persistence.'}}
         if([long]$storeTask.revision -ne ([long]$storedOp.TransmittingTaskRevision+1)){throw 'Independent validation evidence compare-and-swap revision is stale.'}
         $independentValidation=[pscustomobject][ordered]@{Purpose='independent-current-deployment-validation';OperationId=$storedOp.OperationId;RequestId=$storedOp.RequestId;ValidationRequest=$storedOp.ValidationRequest;ValidationRequestSha256=$storedOp.ValidationRequestSha256;TaskId=$TaskId;WorkflowId=$WorkflowId;BuildRequestId=$storedOp.BuildRequestId;CandidateSourceCommit=$storedOp.CandidateSourceCommit;CandidateDllSha256=$storedOp.CandidateSha256;RunnerManifestPath=$DeploymentEvidence.runnerManifestPath;RunnerManifestSha256=$DeploymentEvidence.runnerManifestSha256;Response=$storedOp.Response;StagingDisposition='ambiguous-unresolved';StagingSuccessClaimed=$false}
@@ -2765,7 +2914,7 @@ function Request-MayaQaCanonicalExecutionApproval {
     if($expectedRecoveredHash){$binding['NativeContinuation']=New-CpvNativeContinuationBinding -Task $task -Workflow $workflow -ExpectedTaskRevision $ExpectedTaskRevision}
     $json=ConvertTo-Json -InputObject $binding -Depth 20 -Compress;$sha=[Security.Cryptography.SHA256]::Create();try{$bindingHash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','')}finally{$sha.Dispose()}
     $expectedRevision=[long]$ExpectedTaskRevision
-    $updated=Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$current=Find-RepatoTask $data $TaskId;if([long]$current.revision -ne $expectedRevision -or $current.status -cne 'in-progress' -or $current.workflowStage -cne 'qa'){throw 'Canonical approval compare-and-swap state changed.'};if(@($current.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and !$_.consumedUtc))}).Count){throw 'An active QA approval appeared during request creation.'};$ws=@($current.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId);if($ws.Count -ne 1 -or $ws[0].qaBuildEvidence.ArtifactSha256 -ine $CandidateSha256 -or $ws[0].qaBuildEvidence.CandidateSourceCommit -cne $CandidateSourceCommit -or $ws[0].qaBuildEvidence.RunnerManifestSha256 -ine $binding.RunnerManifestSha256){throw 'Candidate or manifest changed during approval creation.'};$latestProof=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $current -Workflow $ws[0] -BuildRequestId $BuildRequestId -CandidateSourceCommit $CandidateSourceCommit -CandidateSha256 $CandidateSha256 -RunnerManifestPath $binding.RunnerManifestPath -RunnerManifestSha256 $binding.RunnerManifestSha256;if((ConvertTo-Json -InputObject $latestProof -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $binding.DeploymentValidationEvidence -Depth 20 -Compress)){throw 'Deployment-validation evidence changed during approval creation.'};if($binding.Contains('NativeContinuation')){Assert-CpvNativeContinuationBinding -Task $current -Workflow $ws[0] -Binding $binding.NativeContinuation};$q=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;executionBinding=$binding;previousStatus='in-progress';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason=$null;consumedUtc=$null};$current.approvalRequests=[object[]]@($current.approvalRequests)+$q;$current.status='awaiting-approval';$current.workflowStage='approval';Add-RepatoHistory $current 'approval-requested' 'Maya' 'qa-run bound to validated candidate, deployment evidence, manifest, isolation, and execution plan';$q.requestedRevision=[long]$current.revision;$current}
+    $updated=Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)$current=Find-RepatoTask $data $TaskId;if([long]$current.revision -ne $expectedRevision -or $current.status -cne 'in-progress' -or $current.workflowStage -cne 'qa'){throw 'Canonical approval compare-and-swap state changed.'};if((Get-MayaQaActiveCanonicalExecutionApprovals -Approvals @($current.approvalRequests)).Count){throw 'An active QA approval appeared during request creation.'};$ws=@($current.deploymentWorkflows|Where-Object workflowId -ceq $WorkflowId);if($ws.Count -ne 1 -or $ws[0].qaBuildEvidence.ArtifactSha256 -ine $CandidateSha256 -or $ws[0].qaBuildEvidence.CandidateSourceCommit -cne $CandidateSourceCommit -or $ws[0].qaBuildEvidence.RunnerManifestSha256 -ine $binding.RunnerManifestSha256){throw 'Candidate or manifest changed during approval creation.'};$latestProof=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $current -Workflow $ws[0] -BuildRequestId $BuildRequestId -CandidateSourceCommit $CandidateSourceCommit -CandidateSha256 $CandidateSha256 -RunnerManifestPath $binding.RunnerManifestPath -RunnerManifestSha256 $binding.RunnerManifestSha256;if((ConvertTo-Json -InputObject $latestProof -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $binding.DeploymentValidationEvidence -Depth 20 -Compress)){throw 'Deployment-validation evidence changed during approval creation.'};if($binding.Contains('NativeContinuation')){Assert-CpvNativeContinuationBinding -Task $current -Workflow $ws[0] -Binding $binding.NativeContinuation};$q=[pscustomobject][ordered]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='pending';bindingHash=$bindingHash;executionBinding=$binding;previousStatus='in-progress';requestedRevision=[long]0;approvedRevision=$null;requestedUtc=Get-RepatoUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes($ExpiryMinutes).ToString('O');decidedUtc=$null;decidedBy=$null;reason=$null;consumedUtc=$null};$current.approvalRequests=[object[]]@($current.approvalRequests)+$q;$current.status='awaiting-approval';$current.workflowStage='approval';Add-RepatoHistory $current 'approval-requested' 'Maya' 'qa-run bound to validated candidate, deployment evidence, manifest, isolation, and execution plan';$q.requestedRevision=[long]$current.revision;$current}
     @($updated.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'pending'})[-1]
 }
 
@@ -3176,7 +3325,7 @@ function New-MayaQaRun {
                 [string]$binding.CandidateSha256 -ieq $evidenceHash)
         }
         if(!$freshPlan -and !$recoveryPlan){throw 'Create Plan Views QA planning requires build-checks or a supported approved-run recovery state.'}
-        if($freshPlan -and @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and !$_.consumedUtc))}).Count){throw 'An active QA approval prevents new plan preparation.'}
+        if($freshPlan -and (Get-MayaQaActiveCanonicalExecutionApprovals -Approvals @($task.approvalRequests)).Count){throw 'An active QA approval prevents new plan preparation.'}
         if($w.PSObject.Properties.Name -contains 'qaRunId' -and ![string]::IsNullOrWhiteSpace([string]$w.qaRunId)){throw 'Create Plan Views QA run already exists.'}
         if($freshPlan){foreach($n in 'qaModelPath','qaSidecarPath','qaFixturePreparationEvidence'){if($w.PSObject.Properties.Name -contains $n -and $null -ne $w.$n -and ![string]::IsNullOrWhiteSpace([string]$w.$n)){throw 'Create Plan Views QA plan is partially prepared.'}}}
         foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties.Name -contains $n -and $task.$n){throw 'Existing Tara execution state prevents new plan preparation.'}}
@@ -3727,6 +3876,7 @@ Export-ModuleMember -Function Request-MayaQaRecoveredExpiredAttemptApproval
 Export-ModuleMember -Function Repair-MayaQaExpiredPreparedApprovalHistory
 Export-ModuleMember -Function Repair-MayaQaCanonicalRunIdentity
 Export-ModuleMember -Function Recover-MayaQaReconciledDuplicateFloorPlanFailureForCandidateReplacement
+Export-ModuleMember -Function Reset-MayaQaReconciledDuplicateFloorPlanWorkflowPlan
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)

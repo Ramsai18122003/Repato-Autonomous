@@ -102,6 +102,21 @@ function Add-RepatoHistory($Task,[string]$Event,[string]$Actor,[string]$Details)
     $Task.history = [object[]]@($Task.history) + [pscustomobject]@{timestampUtc=(Get-RepatoUtc);event=$Event;actor=$Actor;details=$Details}
 }
 
+function Get-RepatoActiveQaApprovals {
+    param([AllowEmptyCollection()][object[]]$Approvals)
+    $active=@()
+    foreach($approval in $Approvals) {
+        if($approval.action -cne 'qa-run' -or
+            ($approval.status -cne 'pending' -and !($approval.status -ceq 'approved' -and !$approval.consumedUtc))) {continue}
+        $expiry=[DateTimeOffset]::MinValue
+        if(![DateTimeOffset]::TryParse([string]$approval.expiresUtc,[ref]$expiry)) {
+            throw 'An active QA approval has an invalid expiry and cannot be safely superseded.'
+        }
+        if($expiry -gt [DateTimeOffset]::UtcNow){$active+=,$approval}
+    }
+    ,$active
+}
+
 function Get-RepatoCanonicalQaDeploymentApprovalEvidence {
     param(
         [Parameter(Mandatory)][object]$Task,[Parameter(Mandatory)][object]$Workflow,
@@ -228,6 +243,7 @@ function Update-RepatoTask {
         }
         $taskWorkflows=if($task.PSObject.Properties.Name -contains 'deploymentWorkflows'){@($task.deploymentWorkflows)}else{@()}
         $canonicalQaTransition=($WorkflowStage -ceq 'qa' -and $task.workflowStage -ceq 'build-checks' -and @($taskWorkflows|Where-Object {$_.qaWorkflowId -ceq 'create-plan-views-v1'}).Count -gt 0)
+        $activeCanonicalQaApprovals=if($canonicalQaTransition){@(Get-RepatoActiveQaApprovals -Approvals @($task.approvalRequests))}else{@()}
         if($WorkflowStage -ceq 'qa' -and $ExpectedQaWorkflowId -ceq 'create-plan-views-v1' -and !$canonicalQaTransition){throw 'Create Plan Views QA transition is duplicate or starts from an incompatible task stage.'}
         if($canonicalQaTransition){
             if($ExpectedTaskRevision -lt 1 -or !$ExpectedWorkflowId -or $ExpectedWorkflowRevision -lt 1 -or $ExpectedQaWorkflowId -cne 'create-plan-views-v1'){throw 'Create Plan Views build-checks to QA transition requires task and workflow compare-and-swap bindings.'}
@@ -235,7 +251,7 @@ function Update-RepatoTask {
             $workflow=@($task.deploymentWorkflows|Where-Object workflowId -ceq $ExpectedWorkflowId)
             if($task.status -cne 'in-progress' -or $canonicalWorkflows.Count -ne 1 -or [string]$canonicalWorkflows[0].workflowId -cne $ExpectedWorkflowId -or $workflow.Count -ne 1 -or [string]$workflow[0].qaRunId -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$' -or
                [string]$workflow[0].stage -notin @('planned','validated') -or
-               @($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and [string]::IsNullOrWhiteSpace([string]$_.consumedUtc)))}).Count -gt 0 -or
+               $activeCanonicalQaApprovals.Count -gt 0 -or
                ($task.PSObject.Properties.Name -contains 'mayaTaraAttempt' -and $task.mayaTaraAttempt) -or
                ($task.PSObject.Properties.Name -contains 'mayaTaraExecution' -and $task.mayaTaraExecution) -or
                ($task.PSObject.Properties.Name -contains 'mayaTaraQaPacket' -and $task.mayaTaraQaPacket) -or

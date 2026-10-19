@@ -3,8 +3,8 @@ Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -War
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.Deployment.psm1') -Force -WarningAction SilentlyContinue
 $taskId='task-bf61fe7f22d74df7a92599681da5919e';$workflowId='fa2c2f578cbc40cbacac45c96313ca4c';$buildId='build-4b47d1c11c6b48e094b2d75f0097af04'
-$commit='c3b318586677bac45cb07463ed67d03981dc6d4c';$qa='create-plan-views-v1'
-$repoRoot=Split-Path $PSScriptRoot -Parent;$candidate=Join-Path $repoRoot 'DeploymentCandidates\AgentBuilds\ReleaseCandidate-c3b318586677';$dll=Join-Path $candidate 'Repato.Revit.dll';$candidateHash=(Get-FileHash $dll -Algorithm SHA256).Hash;$provenance=Join-Path $candidate 'release-manifest.json';$candidateManifest=Join-Path $candidate 'Repato.addin';$candidateManifestHash=(Get-FileHash $candidateManifest -Algorithm SHA256).Hash
+$repoRoot=Split-Path $PSScriptRoot -Parent;$commit=(& git -C $repoRoot rev-parse HEAD).Trim();$qa='create-plan-views-v1'
+$candidate=Join-Path $repoRoot ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$commit.Substring(0,12));$dll=Join-Path $candidate 'Repato.Revit.dll';$candidateHash=(Get-FileHash $dll -Algorithm SHA256).Hash;$provenance=Join-Path $candidate 'release-manifest.json';$candidateManifest=Join-Path $candidate 'Repato.addin';$candidateManifestHash=(Get-FileHash $candidateManifest -Algorithm SHA256).Hash
 $sourceManifest=Join-Path (Split-Path $PSScriptRoot -Parent) 'QA\Repato.CreatePlanViews.TestRunner.addin';$manifestHash=(Get-FileHash $sourceManifest -Algorithm SHA256).Hash
 $installedManifest='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$addonRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA'
 $tmp=Join-Path ([IO.Path]::GetTempPath()) ('maya-independent-validation-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $tmp|Out-Null
