@@ -2434,7 +2434,7 @@ function Resolve-MayaQaAuthenticatedBuildSource {
     $commonGitDirectory=(& git -C $PSScriptRoot rev-parse --path-format=absolute --git-common-dir 2>$null).Trim()
     if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonGitDirectory)){throw 'Primary repository identity could not be resolved for authenticated build-source validation.'}
     $primary=[IO.Path]::GetFullPath((Split-Path -Parent $commonGitDirectory))
-    if($null -eq $AuthenticatedBuildSource){return [pscustomobject]@{RepositoryRoot=$primary;ProjectPath=[IO.Path]::GetFullPath((Join-Path $primary 'Forma.RevitConnector.csproj'));ExpectedSourceCommit=$null;Isolated=$false}}
+    if($null -eq $AuthenticatedBuildSource){return [pscustomobject]@{RepositoryRoot=$primary;PrimaryRepositoryRoot=$primary;ProjectPath=[IO.Path]::GetFullPath((Join-Path $primary 'Forma.RevitConnector.csproj'));ExpectedSourceCommit=$null;Isolated=$false}}
     foreach($n in 'RepositoryRoot','ExpectedSourceCommit','ProjectRelativePath'){
         if($AuthenticatedBuildSource.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$AuthenticatedBuildSource.$n)){throw "AuthenticatedBuildSource is missing $n."}
     }
@@ -2449,7 +2449,7 @@ function Resolve-MayaQaAuthenticatedBuildSource {
     $projectRel=([string]$AuthenticatedBuildSource.ProjectRelativePath).TrimStart('\','/');if([IO.Path]::IsPathRooted($projectRel) -or $projectRel -match '(^|[\\/])\.\.([\\/]|$)'){throw 'Authenticated project path must remain relative to the worktree.'}
     $project=[IO.Path]::GetFullPath((Join-Path $root $projectRel));$prefix=$root.TrimEnd('\')+'\';if(!$project.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $project -PathType Leaf)){throw 'Authenticated project path is outside or missing from the worktree.'}
     if((Get-Item -LiteralPath $project -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Authenticated project path is a reparse point.'}
-    [pscustomobject]@{RepositoryRoot=$root;ProjectPath=$project;ExpectedSourceCommit=[string]$AuthenticatedBuildSource.ExpectedSourceCommit;Isolated=$true}
+    [pscustomobject]@{RepositoryRoot=$root;PrimaryRepositoryRoot=$primary;ProjectPath=$project;ExpectedSourceCommit=[string]$AuthenticatedBuildSource.ExpectedSourceCommit;Isolated=$true}
 }
 
 function Get-MayaQaActiveCanonicalExecutionApprovals {
@@ -2527,7 +2527,10 @@ function Invoke-MayaQaFrozenCandidateEvidence {
     if($workflow.PSObject.Properties.Name -notcontains 'qaBuildRequest' -or !$workflow.qaBuildRequest){throw 'Persisted Neil build request is missing.'}
     if($workflow.qaWorkflowId -cne $QaWorkflowId){throw 'QA workflow identity mismatch.'}
     if($workflow.PSObject.Properties.Name -notcontains 'qaBuildEvidence' -or $workflow.qaBuildEvidence.PSObject.Properties.Name -notcontains 'SourceCommit' -or [string]::IsNullOrWhiteSpace([string]$workflow.qaBuildEvidence.SourceCommit)){throw 'Source-bound Neil build evidence is required.'}
-    $oldBuildEvidence=$workflow.qaBuildEvidence;$repoRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$candidateRoot=[IO.Path]::GetFullPath((Join-Path $repoRoot 'DeploymentCandidates\AgentBuilds')).TrimEnd('\')+'\';$candidateDirectory=[IO.Path]::GetFullPath($verified.CandidateDirectory)
+    $oldBuildEvidence=$workflow.qaBuildEvidence;$repoRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$sourceBoundary=$null
+    if($workflow.qaBuildRequest.AuthenticatedBuildSource){$sourceBoundary=Resolve-MayaQaAuthenticatedBuildSource $workflow.qaBuildRequest.AuthenticatedBuildSource
+        if($sourceBoundary.RepositoryRoot -ine $repoRoot -or ($sourceBoundary.ExpectedSourceCommit -and $sourceBoundary.ExpectedSourceCommit -ine [string]$oldBuildEvidence.SourceCommit)){throw 'Frozen candidate adoption is not bound to the authenticated build worktree.'}}
+    $candidateRepositoryRoot=if($sourceBoundary){$sourceBoundary.PrimaryRepositoryRoot}else{$repoRoot};$candidateRoot=[IO.Path]::GetFullPath((Join-Path $candidateRepositoryRoot 'DeploymentCandidates\AgentBuilds')).TrimEnd('\')+'\';$candidateDirectory=[IO.Path]::GetFullPath($verified.CandidateDirectory)
     if($BindDeploymentEvidenceOnly -and (!$DeploymentValidationOperation -or !$DeploymentEvidence -or $oldBuildEvidence.EvidenceSource -cne 'FrozenCandidate' -or $oldBuildEvidence.ArtifactPath -ine $verified.ArtifactPath -or $oldBuildEvidence.CandidateSourceCommit -cne $verified.SourceCommit -or $oldBuildEvidence.BuildRequestId -cne $workflow.qaBuildRequest.BuildRequestId)){throw 'Deployment-only binding requires the already adopted candidate and completed independent proof.'}
     if(!$candidateDirectory.StartsWith($candidateRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Frozen candidate is outside the active repository DeploymentCandidates\\AgentBuilds root.'}
     if([string]$verified.SourceCommit -cne [string]$oldBuildEvidence.SourceCommit){throw 'Frozen candidate source commit does not match Neil build evidence.'}
@@ -2629,13 +2632,16 @@ function New-MayaQaCanonicalCandidate {
     $e=$workflow.qaBuildEvidence
     foreach($n in 'BuildRequestId','SourceCommit','ArtifactPath','ArtifactSha256','ManifestPath','ManifestSha256'){if($e.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$e.$n)){throw "Authenticated build evidence is missing $n."}}
     if([string]$e.SourceCommit -notmatch '^[A-Fa-f0-9]{40}$' -or [string]$e.ArtifactSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$e.ManifestSha256 -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Authenticated build evidence identity or hash is invalid.'}
-    $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$artifact=[IO.Path]::GetFullPath([string]$e.ArtifactPath);$expected=[IO.Path]::GetFullPath((Join-Path $repo 'bin\Release\net8.0-windows\Repato.Revit.dll'))
+    $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'));$sourceBoundary=$null
+    if($workflow.qaBuildRequest.AuthenticatedBuildSource){$sourceBoundary=Resolve-MayaQaAuthenticatedBuildSource $workflow.qaBuildRequest.AuthenticatedBuildSource
+        if($sourceBoundary.RepositoryRoot -ine $repo -or ($sourceBoundary.ExpectedSourceCommit -and $sourceBoundary.ExpectedSourceCommit -ine [string]$e.SourceCommit)){throw 'Frozen candidate source is not bound to the authenticated build worktree.'}}
+    $artifact=[IO.Path]::GetFullPath([string]$e.ArtifactPath);$expected=[IO.Path]::GetFullPath((Join-Path $repo 'bin\Release\net8.0-windows\Repato.Revit.dll'))
     if($artifact -ine $expected -or [IO.Path]::GetFileName($artifact) -cne 'Repato.Revit.dll'){throw 'Authenticated artifact is not the approved Release Repato.Revit.dll.'}
     if(!(Test-Path -LiteralPath $artifact -PathType Leaf)){throw 'Authenticated Neil artifact is missing.'}
     $actual=(Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash;if($actual -ine [string]$e.ArtifactSha256){throw 'Authenticated Neil artifact hash mismatch.'}
     $manifest=[IO.Path]::GetFullPath([string]$e.ManifestPath);$expectedManifest=[IO.Path]::GetFullPath((Join-Path $repo 'Repato.addin'))
     if($manifest -ine $expectedManifest -or !(Test-Path -LiteralPath $manifest -PathType Leaf) -or (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ine [string]$e.ManifestSha256){throw 'Authenticated add-in manifest hash mismatch.'}
-    $root=[IO.Path]::GetFullPath((Join-Path $repo 'DeploymentCandidates\AgentBuilds'));$name='ReleaseCandidate-'+([string]$e.SourceCommit).Substring(0,12);$dir=[IO.Path]::GetFullPath((Join-Path $root $name));$prefix=$root.TrimEnd('\')+'\'
+    $candidateRepositoryRoot=if($sourceBoundary){$sourceBoundary.PrimaryRepositoryRoot}else{$repo};$root=[IO.Path]::GetFullPath((Join-Path $candidateRepositoryRoot 'DeploymentCandidates\AgentBuilds'));$name='ReleaseCandidate-'+([string]$e.SourceCommit).Substring(0,12);$dir=[IO.Path]::GetFullPath((Join-Path $root $name));$prefix=$root.TrimEnd('\')+'\'
     if(!$dir.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($dir) -ne $name){throw 'Canonical candidate path escaped the approved root.'}
     $dll=Join-Path $dir 'Repato.Revit.dll';$addin=Join-Path $dir 'Repato.addin';$prov=Join-Path $dir 'release-manifest.json'
     if(Test-Path -LiteralPath $dir){
@@ -2691,6 +2697,9 @@ function New-MayaQaPersistedCandidateEvidence {
     if([IO.Path]::GetFullPath($e.RunnerManifestPath) -ine $runnerPath -and (!(Test-Path -LiteralPath $e.RunnerManifestPath -PathType Leaf) -or (Get-FileHash -LiteralPath $e.RunnerManifestPath -Algorithm SHA256).Hash -ine $sourceRunnerHash)){throw 'Persisted candidate runner manifest copy differs from trusted source evidence.'}
     $candidate=New-RepatoCandidateEvidence -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateSourceCommit $e.CandidateSourceCommit -CandidateDirectory $e.CandidateDirectory -CandidateDllPath $e.ArtifactPath -CandidateDllSha256 $e.ArtifactSha256 -NeilBuildArtifactSha256 $e.ArtifactSha256 -RunnerManifestPath $runnerPath -RunnerManifestSha256 $e.RunnerManifestSha256 -CandidateProvenancePath $e.CandidateProvenancePath
     $activeRepositoryRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    if($w.qaBuildRequest.AuthenticatedBuildSource){$sourceBoundary=Resolve-MayaQaAuthenticatedBuildSource $w.qaBuildRequest.AuthenticatedBuildSource
+        if($sourceBoundary.RepositoryRoot -ine $activeRepositoryRoot -or ($sourceBoundary.ExpectedSourceCommit -and $sourceBoundary.ExpectedSourceCommit -ine [string]$e.SourceCommit)){throw 'Persisted candidate is not bound to the authenticated build worktree.'}
+        $activeRepositoryRoot=$sourceBoundary.PrimaryRepositoryRoot}
     $root=[IO.Path]::GetFullPath((Join-Path $activeRepositoryRoot 'DeploymentCandidates\AgentBuilds'))
     $null=Resolve-RepatoCandidateEvidence -Evidence $candidate -AuthenticatedEvidence $candidate -ApprovedCandidateRoot $root -ApprovedRunnerManifestRoot $runnerRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId
     $candidate

@@ -2,8 +2,8 @@ $ErrorActionPreference='Stop'
 $here=$PSScriptRoot
 Import-Module (Join-Path $here 'Repato.AgentOrchestration.psm1') -Force
 Import-Module (Join-Path $here 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
-$taskId='task-active-candidate-root';$qa='create-plan-views-v1';$testId=$qa;$commit='0123456789abcdef0123456789abcdef01234567'
-$repo=[IO.Path]::GetFullPath((Join-Path $here '..'));$candidateRoot=Join-Path $repo 'DeploymentCandidates\AgentBuilds';$folderName='SyntheticRootTest-'+[guid]::NewGuid().ToString('N');$inside=Join-Path $candidateRoot $folderName;$outside=Join-Path ([IO.Path]::GetTempPath()) ('candidate-outside-'+[guid]::NewGuid().ToString('N'));$store=Join-Path ([IO.Path]::GetTempPath()) ('candidate-root-store-'+[guid]::NewGuid().ToString('N'))
+$taskId='task-active-candidate-root';$qa='create-plan-views-v1';$testId=$qa
+$repo=[IO.Path]::GetFullPath((Join-Path $here '..'));$commit=(& git -C $repo rev-parse HEAD).Trim();$primaryRepo=[IO.Path]::GetFullPath((Split-Path -Parent ((& git -C $repo rev-parse --path-format=absolute --git-common-dir).Trim())));$candidateRoot=Join-Path $primaryRepo 'DeploymentCandidates\AgentBuilds';$folderName='SyntheticRootTest-'+[guid]::NewGuid().ToString('N');$inside=Join-Path $candidateRoot $folderName;$outside=Join-Path ([IO.Path]::GetTempPath()) ('candidate-outside-'+[guid]::NewGuid().ToString('N'));$store=Join-Path ([IO.Path]::GetTempPath()) ('candidate-root-store-'+[guid]::NewGuid().ToString('N'))
 try {
     $bootstrap=New-MayaQaBootstrap -StoreRoot $store -QaWorkflowId $qa -RunId 'active-root-test' -TaskId $taskId
     $trustedRunner=Join-Path $repo ('QA\Repato.CreatePlanViews.TestRunner.addin');$runnerHash=(Get-FileHash $trustedRunner -Algorithm SHA256).Hash
@@ -13,7 +13,7 @@ try {
     }
     $valid=New-CandidateFiles $inside $commit
     Invoke-RepatoStoreMutation $store {param($d,$preview)
-        $t=Find-RepatoTask $d $taskId;$w=@($t.deploymentWorkflows|Where-Object workflowId -ceq $bootstrap.WorkflowId)[0];$w|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force;$w|Add-Member NoteProperty qaBuildRequest ([pscustomobject]@{BuildRequestId='synthetic-build'}) -Force
+        $t=Find-RepatoTask $d $taskId;$w=@($t.deploymentWorkflows|Where-Object workflowId -ceq $bootstrap.WorkflowId)[0];$w|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force;$w|Add-Member NoteProperty qaBuildRequest ([pscustomobject]@{BuildRequestId='synthetic-build';AuthenticatedBuildSource=[pscustomobject]@{RepositoryRoot=$repo;ExpectedSourceCommit=$commit;ProjectRelativePath='Forma.RevitConnector.csproj'}}) -Force
         $w|Add-Member NoteProperty qaBuildEvidence ([pscustomobject]@{BuildRequestId='synthetic-build';BuildStatus='succeeded';EvidenceSource='FrozenCandidate';SourceCommit=$commit;CandidateSourceCommit=$commit;CandidateDirectory=$valid.Directory;CandidateProvenancePath=$valid.Provenance;ArtifactPath=$valid.Dll;ArtifactSha256=$valid.Hash;RunnerManifestPath=$trustedRunner;RunnerManifestSha256=$runnerHash}) -Force;$d
     }|Out-Null
     $accepted=New-MayaQaPersistedCandidateEvidence -StoreRoot $store -TaskId $taskId -WorkflowId $bootstrap.WorkflowId -QaWorkflowId $qa -TestId $testId

@@ -4,8 +4,9 @@ Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force 
 $workflowModule=Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -PassThru -WarningAction SilentlyContinue
 
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$primaryRepo=[IO.Path]::GetFullPath((Split-Path -Parent ((& git -C $repo rev-parse --path-format=absolute --git-common-dir).Trim())))
 $sourceCommit=(& git -C $repo rev-parse HEAD).Trim()
-$candidate=Join-Path $repo ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$sourceCommit.Substring(0,12))
+$candidate=Join-Path $primaryRepo ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$sourceCommit.Substring(0,12))
 $dll=Join-Path $candidate 'Repato.Revit.dll'
 $manifest=Join-Path $candidate 'Repato.addin'
 $provenance=Join-Path $candidate 'release-manifest.json'
@@ -24,11 +25,11 @@ try {
     $approvalCount=@($task.approvalRequests).Count
     $approvalStatuses=@($task.approvalRequests|ForEach-Object status)
     & $workflowModule {
-    param($storeRoot,$id,$wid,$workflowRevision,$taskRevision,$source,$artifact,$artifactSha256,$addinManifest,$addinManifestSha256)
+    param($storeRoot,$id,$wid,$workflowRevision,$taskRevision,$source,$artifact,$artifactSha256,$addinManifest,$addinManifestSha256,$worktreeRoot)
     Invoke-RepatoWorkflowMutation $storeRoot $id $wid $workflowRevision $taskRevision {
         param($w)
         $w|Add-Member NoteProperty qaBuildStatus 'succeeded' -Force
-        $w|Add-Member NoteProperty qaBuildRequest ([pscustomobject]@{BuildRequestId='synthetic-release-build'}) -Force
+        $w|Add-Member NoteProperty qaBuildRequest ([pscustomobject]@{BuildRequestId='synthetic-release-build';AuthenticatedBuildSource=[pscustomobject]@{RepositoryRoot=$worktreeRoot;ExpectedSourceCommit=$source;ProjectRelativePath='Forma.RevitConnector.csproj'}}) -Force
         $w|Add-Member NoteProperty qaBuildEvidence ([pscustomobject]@{
             BuildRequestId='synthetic-release-build';BuildStatus='succeeded';SourceCommit=$source
             ArtifactPath=$artifact;ArtifactSha256=$artifactSha256
@@ -36,7 +37,7 @@ try {
         }) -Force
         return $w
     }|Out-Null
-    } $store $taskId $boot.WorkflowId $workflow.workflowRevision $task.revision $sourceCommit (Join-Path $repo 'bin\Release\net8.0-windows\Repato.Revit.dll') $artifactHash $manifest $manifestHash
+    } $store $taskId $boot.WorkflowId $workflow.workflowRevision $task.revision $sourceCommit (Join-Path $repo 'bin\Release\net8.0-windows\Repato.Revit.dll') $artifactHash $manifest $manifestHash $repo
 
     $adopted=Invoke-MayaQaFrozenCandidateEvidence -StoreRoot $store -TaskId $taskId -WorkflowId $boot.WorkflowId -QaWorkflowId 'create-plan-views-v1' -CandidateDirectory $candidate -CandidateDllPath $dll -ExpectedSha256 $artifactHash -ExpectedSourceCommit $sourceCommit
     $after=Find-RepatoTask (Read-RepatoTaskStore $store) $taskId

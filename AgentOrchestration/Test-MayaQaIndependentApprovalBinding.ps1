@@ -5,8 +5,8 @@ Import-Module (Join-Path $here 'Repato.Deployment.v4.psm1') -Force -WarningActio
 Import-Module (Join-Path $here 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 
 $taskId='task-bf61fe7f22d74df7a92599681da5919e';$workflowId='fa2c2f578cbc40cbacac45c96313ca4c';$buildId='build-4b47d1c11c6b48e094b2d75f0097af04'
-$repoRoot=Split-Path $here -Parent;$commit=(& git -C $repoRoot rev-parse HEAD).Trim();$qaId='create-plan-views-v1'
-$candidate=Join-Path $repoRoot ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$commit.Substring(0,12));$candidateHash=(Get-FileHash (Join-Path $candidate 'Repato.Revit.dll') -Algorithm SHA256).Hash
+$repoRoot=Split-Path $here -Parent;$commit=(& git -C $repoRoot rev-parse HEAD).Trim();$primaryRepo=Split-Path -Parent ((& git -C $repoRoot rev-parse --path-format=absolute --git-common-dir).Trim());$qaId='create-plan-views-v1'
+$candidate=Join-Path $primaryRepo ('DeploymentCandidates\AgentBuilds\ReleaseCandidate-'+$commit.Substring(0,12));$candidateHash=(Get-FileHash (Join-Path $candidate 'Repato.Revit.dll') -Algorithm SHA256).Hash
 $sourceRunner=Join-Path (Split-Path $here -Parent) 'QA\Repato.CreatePlanViews.TestRunner.addin';$runnerHash=(Get-FileHash $sourceRunner -Algorithm SHA256).Hash
 $installedRunner='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\Repato.CreatePlanViews.TestRunner.addin';$addinRoot='C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA'
 $fixture=Join-Path (Split-Path $here -Parent) 'QA\Fixtures\CreatePlanViewsEmpty.rvt';$madeFixture=$false
@@ -29,7 +29,7 @@ function New-ApprovalFixture([string]$mode){
     $op=[pscustomobject][ordered]@{SchemaVersion=1;OperationId=$opId;RequestId=$requestId;TaskId=$taskId;WorkflowId=$workflowId;ExpectedTaskRevision=1;BuildRequestId=$buildId;CandidateSourceCommit=$commit;CandidateSha256=$candidateHash;QaWorkflowId=$qaId;TestId=$qaId;ValidationPurpose='IndependentAfterAmbiguousStaging';ValidationRequest=$req;ValidationRequestSha256=$reqHash;RequestDisposition='completed';TransmittingTaskRevision=1;Response=$resp}
     $ind=[pscustomobject][ordered]@{Purpose='independent-current-deployment-validation';OperationId=$opId;RequestId=$requestId;ValidationRequest=$req;ValidationRequestSha256=$reqHash;TaskId=$taskId;WorkflowId=$workflowId;BuildRequestId=$buildId;CandidateSourceCommit=$commit;CandidateDllSha256=$candidateHash;RunnerManifestPath=$installedRunner;RunnerManifestSha256=$runnerHash;Response=$resp;StagingDisposition='ambiguous-unresolved';StagingSuccessClaimed=$false}
     $e|Add-Member NoteProperty IndependentDeploymentValidation $ind -Force
-    $wf=[pscustomobject][ordered]@{workflowId=$workflowId;taskId=$taskId;workflowRevision=1;taskRevision=1;stage='validated';status='validated';qaWorkflowId=$qaId;qaTestId=$qaId;qaBuildRequest=[pscustomobject]@{BuildRequestId=$buildId};qaBuildStatus='succeeded';qaBuildEvidence=$e}
+    $wf=[pscustomobject][ordered]@{workflowId=$workflowId;taskId=$taskId;workflowRevision=1;taskRevision=1;stage='validated';status='validated';qaWorkflowId=$qaId;qaTestId=$qaId;qaBuildRequest=[pscustomobject]@{BuildRequestId=$buildId;AuthenticatedBuildSource=[pscustomobject]@{RepositoryRoot=$repoRoot;ExpectedSourceCommit=$commit;ProjectRelativePath='Forma.RevitConnector.csproj'}};qaBuildStatus='succeeded';qaBuildEvidence=$e}
     $null=Invoke-RepatoStoreMutation $store {param($d,$preview)$t=Find-RepatoTask $d $taskId;$t.status='in-progress';$t.workflowStage='build-checks';$t|Add-Member NoteProperty deploymentWorkflows ([object[]]@($wf)) -Force;$t|Add-Member NoteProperty deploymentValidationOperations ([object[]]@($op)) -Force;Add-RepatoHistory $t 'deployment-validation-completed' 'Maya' "operation=$opId";$d}
     switch($mode){
         'operation-id' {Invoke-RepatoStoreMutation $store {param($d,$p)(Find-RepatoTask $d $taskId).deploymentWorkflows[0].qaBuildEvidence.IndependentDeploymentValidation.OperationId='bad';$d}|Out-Null}
