@@ -56,6 +56,12 @@ injects absent/present/unknown processes. Six assertions passed in WindowsPS5.1 
 PS7, including fail-closed unknown process evidence. No guard or expiry weakened.
 No agent binary or immutable release artifact changed.
 
+After correction, an elevated supported PreflightOnly under Set-StrictMode Latest
+passed for the exact1.0.22 release and revision122 retained reservation. All28
+protected/runtime files and the installed process remained unchanged. Evidence:
+corrected-strict-preflight.complete, corrected-strict-preflight.stdout.log and
+corrected-strict-preflight-protected.json. This was read-only; attempt count stays1.
+
 Files introduced/changed this turn:
 - Invoke-CpvAuthorizedAgent122Installation.ps1: exact release pins, fresh preflight,
   one invocation, persistent CreateNew authorization receipt, protected snapshots,
