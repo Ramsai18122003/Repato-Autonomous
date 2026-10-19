@@ -53,7 +53,7 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         }
         catch
         {
-            response = observedOperation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation or CpvPreparationService.ReconcileOperation or CpvPreparationService.RecoverCompletedOperation or CpvPreparationService.RecoverCompletedStatusOperation
+            response = observedOperation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation or CpvPreparationService.ReconcileOperation or CpvPreparationService.RecoverCompletedOperation or CpvPreparationService.RecoverCompletedStatusOperation or CpvPreparationService.RecoverCompletedReconcileOperation
                 ? new { schemaVersion = 1, operation = observedOperation, status = "RejectedOrUnknown", failureCode = "preparation-rejected-or-reconcile-required" }
                 : observedOperation == RcpQaLaunchPolicy.Operation
                 ? new RcpQaLaunchResponse(1, RcpQaLaunchPolicy.Operation, "", "", "", RcpQaLaunchPolicy.ToolId, RcpQaLaunchPolicy.ToolId, "", "", "", false, "rejected", null, WindowsIdentity.GetCurrent().Name, WindowsIdentity.GetCurrent().User?.Value ?? "", System.Diagnostics.Process.GetCurrentProcess().SessionId, null, "malformed-request")
@@ -77,7 +77,7 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         using var document = JsonDocument.Parse(line);
         string? operation = document.RootElement.TryGetProperty("operation", out var op) ? op.GetString() : null;
         if (operation == CpvPreparationService.CapabilitiesOperation) return coordinator.PreparationCapabilities();
-        if (operation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation or CpvPreparationService.ReconcileOperation or CpvPreparationService.RecoverCompletedOperation or CpvPreparationService.RecoverCompletedStatusOperation)
+        if (operation is CpvPreparationService.Operation or CpvPreparationService.StatusOperation or CpvPreparationService.ReconcileOperation or CpvPreparationService.RecoverCompletedOperation or CpvPreparationService.RecoverCompletedStatusOperation or CpvPreparationService.RecoverCompletedReconcileOperation)
             return coordinator.HandlePreparation(line, now);
         if (operation == RcpQaLaunchPolicy.Operation)
         {
