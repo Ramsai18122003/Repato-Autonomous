@@ -48,7 +48,11 @@ function Assert-RepatoTask($Task) {
     Assert-RepatoValue RequiredApprovalLevel ([string]$Task.requiredApprovalLevel) $script:ApprovalLevels
     foreach ($name in @('logs','reportPaths','approvalRequests','executorRuns','history')) { if ($Task.$name -isnot [Array]) { throw "Malformed task: $name must be an array." } }
     if ($Task.revision -isnot [long] -and $Task.revision -isnot [int]) { throw 'Malformed task revision.' }
-    $null = [DateTimeOffset]::Parse($Task.createdUtc)
+    if($Task.createdUtc -is [datetime]){$null=[DateTimeOffset]$Task.createdUtc}
+    elseif($Task.createdUtc -isnot [DateTimeOffset]){
+        $createdUtc=[DateTimeOffset]::MinValue
+        if(![DateTimeOffset]::TryParse([string]$Task.createdUtc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$createdUtc)){throw 'Malformed task creation timestamp.'}
+    }
 }
 
 function Read-RepatoTaskStore([string]$StoreRoot) {
