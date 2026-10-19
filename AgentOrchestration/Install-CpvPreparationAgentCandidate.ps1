@@ -53,12 +53,30 @@ if(Test-Path -LiteralPath $activePath){
     $productVersion=(Get-Item -LiteralPath $agents[0].Path).VersionInfo.ProductVersion
     $installedIdentity=[pscustomobject]@{ProcessName=$agents[0].ProcessName;Path=$agents[0].Path;ProductVersion=$productVersion;Id=$agents[0].Id;StartTime=$agents[0].StartTime;User=$ownerName;Sid=$ownerSid;SessionId=$agents[0].SessionId}
     if($completedOutcomeUpgrade){
+        $transitionEvidence=@{}
+        $expectedCompletedVersion='1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e'
+        if($productVersion -ceq '1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f'){
+            $expectedCompletedVersion=$productVersion
+            $recoveryModule=Import-Module (Join-Path $PSScriptRoot 'Repato.CpvCompletedOutcomeRecovery.psm1') -PassThru -WarningAction SilentlyContinue
+            $transitionEvidence=& $recoveryModule {param($store,$id,$revision)
+                $t=Find-RepatoTask (Read-RepatoTaskStore $store) $id
+                if($t.revision -ne $revision -or $revision -ne 122){throw 'Revision-122 transition is stale.'}
+                $a=Assert-CpvOutcomeRecoveryReservationResettable -Task $t -ApprovalId 'acfd8643ed2846b8a43b98d3a74c3217'
+                $current=Assert-CpvOutcomeRecoveryResult -Task $t -Recovery $t.cpvPreparationRecovery -ExpectedTaskRevision $a.outcomeRecoveryBinding.ExpectedTaskRevision -Transport $null
+                $null=Assert-CpvOutcomeRecoveryApprovedSnapshotCurrent -Binding $a.outcomeRecoveryBinding -Current $current
+                $b=$a.outcomeRecoveryBinding;$r=$t.cpvPreparationRecovery.Request
+                $query=[pscustomobject]@{schemaVersion=1;operation='cpv-preparation-recover-completed-reconcile';requestId=$r.requestId;taskId=$id;workflowId=$r.workflowId;attemptId=$r.attemptId;runId=$r.runId;recoveryApprovalId=$a.requestId;approvalBindingHash=$a.bindingHash;originalReceiptSha256=$b.Snapshot.OriginalReceiptSha256;activeMarkerSha256=$b.Snapshot.ActiveMarkerSha256;failureEvidenceSha256=$b.Snapshot.FailureEvidenceSha256;requestSha256=$b.Snapshot.PreparationRequestSha256}
+                $proof=Invoke-CpvPreparationTransport $query
+                $null=Assert-CpvOutcomeRecoveryNonExecutionProof -Proof $proof -Approval $a -Request $r
+                @{NonExecutionProof=$proof;CurrentApprovedSnapshot=$current}
+            } (Join-Path $PSScriptRoot '..\QA\MayaRuns') $TaskId $ExpectedTaskRevision
+        }
         $upgrade=Assert-CpvCompletedOutcomeUpgrade -EvidenceRoot $activeRoot -RuntimeRoot 'C:\Repato-Autonomous\Source\QA\TestRuns' `
             -RequestId $upgradeRequestId -TaskId $TaskId -ExpectedTaskRevision $ExpectedTaskRevision -StoreRoot (Join-Path $PSScriptRoot '..\QA\MayaRuns') `
             -Capabilities $capabilities -Receipt $receipt -InstalledAgent $installedIdentity -ProcessSid $ownerSid `
-            -ExpectedExecutable $contract.Executable -ExpectedInstalledVersion '1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e' -CandidateRoot $validated.SourceRoot `
+            -ExpectedExecutable $contract.Executable -ExpectedInstalledVersion $expectedCompletedVersion -CandidateRoot $validated.SourceRoot `
             -CandidateManifestPath $manifest -CandidateManifestSha256 $ManifestSha256 -PriorRuntimeFiles $priorFiles `
-            -PriorTaskContractValid ([bool]$priorTaskValid) -NoRevitProcesses $true -BootstrapModule $bootstrap
+            -PriorTaskContractValid ([bool]$priorTaskValid) -NoRevitProcesses $true -BootstrapModule $bootstrap @transitionEvidence
     }else{
         $upgrade=Assert-CpvPreparationUpgradeEvidence -EvidenceRoot $activeRoot -RuntimeRoot 'C:\Repato-Autonomous\Source\QA\TestRuns' `
             -RequestId $upgradeRequestId -TaskId $TaskId -Capabilities $capabilities -Receipt $receipt -InstalledAgent $installedIdentity -ProcessSid $ownerSid `

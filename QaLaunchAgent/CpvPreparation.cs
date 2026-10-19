@@ -21,7 +21,8 @@ public sealed record CpvPreparationCompletedRecoveryReconcile(int SchemaVersion,
     string OriginalReceiptSha256, string ActiveMarkerSha256, string FailureEvidenceSha256, string RequestSha256);
 public sealed record CpvPreparationRecoveryCommit(int SchemaVersion, CpvPreparationReceipt Receipt, string RecoveryApprovalId,
     long ExpectedTaskRevision, string ApprovalBindingHash, DateTimeOffset AuthorizationExpiresUtc,
-    string OriginalReceiptSha256, string ActiveMarkerSha256, string FailureEvidenceSha256, string RequestSha256, string ResultSha256, string ModelSha256, DateTimeOffset VerifiedUtc);
+    string OriginalReceiptSha256, string ActiveMarkerSha256, string FailureEvidenceSha256, string RequestSha256, string ResultSha256, string ModelSha256, DateTimeOffset VerifiedUtc,
+    string? RecoveredProvenancePath = null, string? RecoveredProvenanceSha256 = null);
 public sealed record CpvPreparationReceipt(int SchemaVersion, string Operation, string RequestId, string TaskId,
     string WorkflowId, string AttemptId, string RunId, string Status, string User, string Sid, int SessionId,
     string CandidateSha256, string ManifestSha256, string ModelPath, string ModelSha256, string RequestPath,
@@ -105,7 +106,7 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
             lock (gate)
             {
                 string path = Path.Combine(Store, q.RequestId + ".recovered.json");
-                return File.Exists(path) ? JsonSerializer.Deserialize<CpvPreparationRecoveryCommit>(File.ReadAllText(path), StrictJson)! :
+                return File.Exists(path) ? ReadRecoveryCommit(path) :
                     new { schemaVersion = 1, operation = RecoverCompletedStatusOperation, requestId = q.RequestId, status = "NotFound" };
             }
         }
@@ -304,18 +305,36 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
         if (!lockedHash.Equals(q.ModelSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("completed-recovery-model-changed-during-validation");
         string sidecarPath = modelPath + ".fixture.json";
+        if (!File.Exists(sidecarPath)) throw new InvalidDataException("completed-recovery-historical-sidecar-missing");
+        RevitCpvPreparationBoundary.NoLinks(sidecarPath);
+        string historicalSidecarSha256 = Hash(sidecarPath);
         var sidecar = new { fixtureId = "CreatePlanViewsEmpty", sourceSha256 = FixtureSha256, preparedModelSha256 = q.ModelSha256,
             fixturePreparationRequestPath = runnerPath, fixturePreparationRequestSha256 = Hash(runnerPath),
             fixturePreparationResultPath = resultPath, fixturePreparationResultSha256 = q.ResultSha256,
             fixturePreparationAttemptId = q.AttemptId, fixturePreparationRunId = q.RunId,
             recoveredFromOutcomeUnknown = true, recoveryApprovalId = q.RecoveryApprovalId,
-            originalFailureReceiptSha256 = q.OriginalReceiptSha256 };
+            originalFailureReceiptSha256 = q.OriginalReceiptSha256,
+            schemaVersion = 1, requestId = q.RequestId, taskId = q.TaskId, workflowId = q.WorkflowId,
+            historicalSidecarPath = sidecarPath, historicalSidecarSha256,
+            approvalBindingHash = q.ApprovalBindingHash, originalReceiptSha256 = q.OriginalReceiptSha256,
+            activeMarkerSha256 = q.ActiveMarkerSha256, failureEvidenceSha256 = q.FailureEvidenceSha256,
+            requestSha256 = q.RequestSha256 };
         string sidecarJson = JsonSerializer.Serialize(sidecar, StrictJson);
         if (File.Exists(sidecarPath))
         {
             using var existing = JsonDocument.Parse(File.ReadAllText(sidecarPath));
             var side = existing.RootElement;
-            if (side.GetProperty("fixtureId").GetString() != "CreatePlanViewsEmpty" ||
+            RejectDuplicateProperties(side);
+            string[] requiredSidecarFields = ["fixtureId", "sourceSha256", "preparedModelSha256",
+                "fixturePreparationRequestPath", "fixturePreparationRequestSha256", "fixturePreparationResultPath",
+                "fixturePreparationResultSha256", "fixturePreparationAttemptId", "fixturePreparationRunId"];
+            bool sourceOnly = side.ValueKind == JsonValueKind.Object && side.EnumerateObject().Count() == 2 &&
+                side.TryGetProperty("fixtureId", out var fixture) && fixture.ValueKind == JsonValueKind.String && fixture.GetString() == "CreatePlanViewsEmpty" &&
+                side.TryGetProperty("sourceSha256", out var source) && source.ValueKind == JsonValueKind.String && source.GetString() == FixtureSha256;
+            if (!sourceOnly && (side.ValueKind != JsonValueKind.Object || side.EnumerateObject().Count() != requiredSidecarFields.Length || requiredSidecarFields.Any(name =>
+                !side.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String))
+                ) throw new InvalidDataException("completed-recovery-existing-sidecar-mismatch");
+            if (!sourceOnly && (side.GetProperty("fixtureId").GetString() != "CreatePlanViewsEmpty" ||
                 side.GetProperty("sourceSha256").GetString() != FixtureSha256 ||
                 side.GetProperty("preparedModelSha256").GetString() != q.ModelSha256 ||
                 side.GetProperty("fixturePreparationRequestPath").GetString() != runnerPath ||
@@ -323,16 +342,25 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
                 side.GetProperty("fixturePreparationResultPath").GetString() != resultPath ||
                 side.GetProperty("fixturePreparationResultSha256").GetString() != q.ResultSha256 ||
                 side.GetProperty("fixturePreparationAttemptId").GetString() != q.AttemptId ||
-                side.GetProperty("fixturePreparationRunId").GetString() != q.RunId)
+                side.GetProperty("fixturePreparationRunId").GetString() != q.RunId))
                 throw new InvalidDataException("completed-recovery-existing-sidecar-mismatch");
         }
-        else WriteDurable(sidecarPath, sidecarJson);
+        string provenancePath = modelPath + ".recovered.fixture.json";
+        if (File.Exists(provenancePath))
+        {
+            RevitCpvPreparationBoundary.NoLinks(provenancePath);
+            if (File.ReadAllText(provenancePath) != sidecarJson)
+                throw new InvalidDataException("completed-recovery-provenance-replay-mismatch");
+        }
+        else WriteDurable(provenancePath, sidecarJson);
+        if (Hash(sidecarPath) != historicalSidecarSha256)
+            throw new InvalidDataException("completed-recovery-historical-sidecar-changed");
         var recovered = original with { Status = "Passed", ModelSha256 = q.ModelSha256, RequestSha256 = Hash(runnerPath),
             ResultPath = resultPath, ResultSha256 = q.ResultSha256, CleanupVerified = true,
             RollbackStatus = "CommittedDisposableFixtureOnly", FailureCode = null };
         var commit = new CpvPreparationRecoveryCommit(1, recovered, q.RecoveryApprovalId, q.ExpectedTaskRevision,
             q.ApprovalBindingHash, q.AuthorizationExpiresUtc, q.OriginalReceiptSha256, q.ActiveMarkerSha256, q.FailureEvidenceSha256, q.RequestSha256,
-            q.ResultSha256, q.ModelSha256, now);
+            q.ResultSha256, q.ModelSha256, now, provenancePath, Hash(provenancePath));
         if (File.Exists(recoveryPath))
         {
             var existing = JsonSerializer.Deserialize<CpvPreparationRecoveryCommit>(File.ReadAllText(recoveryPath), StrictJson)
@@ -342,7 +370,8 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
                 existing.AuthorizationExpiresUtc != q.AuthorizationExpiresUtc || existing.OriginalReceiptSha256 != q.OriginalReceiptSha256 ||
                 existing.ActiveMarkerSha256 != q.ActiveMarkerSha256 ||
                 existing.FailureEvidenceSha256 != q.FailureEvidenceSha256 ||
-                existing.RequestSha256 != q.RequestSha256 || existing.ResultSha256 != q.ResultSha256 || existing.ModelSha256 != q.ModelSha256)
+                existing.RequestSha256 != q.RequestSha256 || existing.ResultSha256 != q.ResultSha256 || existing.ModelSha256 != q.ModelSha256 ||
+                existing.RecoveredProvenancePath != commit.RecoveredProvenancePath || existing.RecoveredProvenanceSha256 != commit.RecoveredProvenanceSha256)
                 throw new InvalidDataException("completed-recovery-replay-binding-mismatch");
             commit = existing;
         }
@@ -370,9 +399,11 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
         string recoveryPath = Path.Combine(Store, q.RequestId + ".recovered.json");
         if (File.Exists(recoveryPath))
         {
-            var commit = JsonSerializer.Deserialize<CpvPreparationRecoveryCommit>(File.ReadAllText(recoveryPath), StrictJson)
-                ?? throw new InvalidDataException("completed-recovery-reconcile-commit-invalid");
-            if (commit.RecoveryApprovalId != q.RecoveryApprovalId || commit.ApprovalBindingHash != q.ApprovalBindingHash)
+            var commit = ReadRecoveryCommit(recoveryPath);
+            Match(q, commit.Receipt);
+            if (commit.RecoveryApprovalId != q.RecoveryApprovalId || commit.ApprovalBindingHash != q.ApprovalBindingHash ||
+                commit.OriginalReceiptSha256 != q.OriginalReceiptSha256 || commit.ActiveMarkerSha256 != q.ActiveMarkerSha256 ||
+                commit.FailureEvidenceSha256 != q.FailureEvidenceSha256 || commit.RequestSha256 != q.RequestSha256)
                 throw new InvalidDataException("completed-recovery-reconcile-commit-binding-mismatch");
             return new { schemaVersion = 1, operation = RecoverCompletedReconcileOperation, requestId = q.RequestId, status = "Executed",
                 recoveryApprovalId = commit.RecoveryApprovalId, approvalBindingHash = commit.ApprovalBindingHash,
@@ -386,6 +417,8 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
         var original = JsonSerializer.Deserialize<CpvPreparationReceipt>(File.ReadAllText(originalPath), StrictJson)
             ?? throw new InvalidDataException("completed-recovery-reconcile-original-receipt-invalid");
         Match(q, original);
+        if (File.Exists(original.ModelPath + ".recovered.fixture.json"))
+            throw new InvalidDataException("completed-recovery-reconcile-uncommitted-provenance-present");
         if (original.Status != "OutcomeUnknown" || original.FailureCode != "preparation-failed-reconcile-required" ||
             original.CleanupVerified || original.RollbackStatus != "Unknown" || original.ModelSha256 != "" ||
             original.ResultPath != "" || original.ResultSha256 != "")
@@ -458,12 +491,46 @@ public sealed class CpvPreparationService(QaAgentOptions options, IIdentitySessi
         if (q.RequestId != r.RequestId || q.TaskId != r.TaskId || q.WorkflowId != r.WorkflowId || q.AttemptId != r.AttemptId || q.RunId != r.RunId)
             throw new InvalidDataException("completed-recovery-reconcile-identity-mismatch");
     }
+    private static CpvPreparationRecoveryCommit ReadRecoveryCommit(string path)
+    {
+        var commit = JsonSerializer.Deserialize<CpvPreparationRecoveryCommit>(File.ReadAllText(path), StrictJson)
+            ?? throw new InvalidDataException("completed-recovery-commit-invalid");
+        string expectedPath = commit.Receipt.ModelPath + ".recovered.fixture.json";
+        if (File.Exists(expectedPath)) RevitCpvPreparationBoundary.NoLinks(expectedPath);
+        if (File.Exists(commit.Receipt.ModelPath + ".fixture.json")) RevitCpvPreparationBoundary.NoLinks(commit.Receipt.ModelPath + ".fixture.json");
+        if (commit.SchemaVersion != 1 || commit.RecoveredProvenancePath != expectedPath ||
+            commit.RecoveredProvenanceSha256 is null || !Sha256(commit.RecoveredProvenanceSha256) ||
+            !File.Exists(expectedPath) || Hash(expectedPath) != commit.RecoveredProvenanceSha256)
+            throw new InvalidDataException("completed-recovery-provenance-integrity-invalid");
+        using var doc = JsonDocument.Parse(File.ReadAllText(expectedPath));
+        var p = doc.RootElement; RejectDuplicateProperties(p);
+        var fields = new Dictionary<string, string> {
+            ["fixtureId"] = "CreatePlanViewsEmpty", ["sourceSha256"] = FixtureSha256,
+            ["preparedModelSha256"] = commit.ModelSha256, ["fixturePreparationRequestPath"] = commit.Receipt.RequestPath,
+            ["fixturePreparationRequestSha256"] = commit.Receipt.RequestSha256,
+            ["fixturePreparationResultPath"] = commit.Receipt.ResultPath, ["fixturePreparationResultSha256"] = commit.ResultSha256,
+            ["fixturePreparationAttemptId"] = commit.Receipt.AttemptId, ["fixturePreparationRunId"] = commit.Receipt.RunId,
+            ["requestId"] = commit.Receipt.RequestId, ["taskId"] = commit.Receipt.TaskId, ["workflowId"] = commit.Receipt.WorkflowId,
+            ["recoveryApprovalId"] = commit.RecoveryApprovalId, ["approvalBindingHash"] = commit.ApprovalBindingHash,
+            ["originalReceiptSha256"] = commit.OriginalReceiptSha256, ["originalFailureReceiptSha256"] = commit.OriginalReceiptSha256,
+            ["activeMarkerSha256"] = commit.ActiveMarkerSha256,
+            ["failureEvidenceSha256"] = commit.FailureEvidenceSha256, ["requestSha256"] = commit.RequestSha256,
+            ["historicalSidecarPath"] = commit.Receipt.ModelPath + ".fixture.json" };
+        if (p.ValueKind != JsonValueKind.Object || fields.Any(f => !p.TryGetProperty(f.Key, out var v) ||
+                v.ValueKind != JsonValueKind.String || v.GetString() != f.Value) ||
+            !p.TryGetProperty("schemaVersion", out var schema) || schema.ValueKind != JsonValueKind.Number || schema.GetInt32() != 1 ||
+            !p.TryGetProperty("recoveredFromOutcomeUnknown", out var recovered) || recovered.ValueKind != JsonValueKind.True ||
+            !p.TryGetProperty("historicalSidecarSha256", out var historical) || historical.ValueKind != JsonValueKind.String ||
+            !File.Exists(fields["historicalSidecarPath"]) || Hash(fields["historicalSidecarPath"]) != historical.GetString())
+            throw new InvalidDataException("completed-recovery-provenance-binding-invalid");
+        return commit;
+    }
     private object Read(string id) {
         if (!File.Exists(Path.Combine(Store, id + ".json"))) return new { schemaVersion = 1, operation = StatusOperation, requestId = id, status = "NotFound" };
         var receipt = JsonSerializer.Deserialize<CpvPreparationReceipt>(File.ReadAllText(Path.Combine(Store, id + ".json")), StrictJson)!;
         string recoveredPath = Path.Combine(Store, id + ".recovered.json");
         if (!File.Exists(Path.Combine(Store, "active.json")) && File.Exists(recoveredPath))
-            return JsonSerializer.Deserialize<CpvPreparationRecoveryCommit>(File.ReadAllText(recoveredPath), StrictJson)!.Receipt;
+            return ReadRecoveryCommit(recoveredPath).Receipt;
         return receipt.Status == "Executing" && !running.Contains(id) ? receipt with { Status = "OutcomeUnknown", FailureCode = "agent-interrupted-reconcile-required" } : receipt;
     }
     private void Write(CpvPreparationReceipt receipt) {

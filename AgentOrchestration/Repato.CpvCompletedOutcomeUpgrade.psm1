@@ -33,8 +33,13 @@ function Assert-CpvCompletedOutcomeUpgrade {
         [Parameter(Mandatory)][string]$ExpectedInstalledVersion,[Parameter(Mandatory)][string]$CandidateRoot,
         [Parameter(Mandatory)][string]$CandidateManifestPath,[Parameter(Mandatory)][string]$CandidateManifestSha256,
         [Parameter(Mandatory)][object[]]$PriorRuntimeFiles,[Parameter(Mandatory)][bool]$PriorTaskContractValid,
-        [Parameter(Mandatory)][bool]$NoRevitProcesses,[Parameter(Mandatory)]$BootstrapModule)
-    if($RequestId -cne $script:RequestId -or $TaskId -cne $script:TaskId -or $ExpectedInstalledVersion -cne '1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e'){
+        [Parameter(Mandatory)][bool]$NoRevitProcesses,[Parameter(Mandatory)]$BootstrapModule,
+        $NonExecutionProof,$CurrentApprovedSnapshot)
+    Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Global -WarningAction SilentlyContinue
+    $currentTransition=$ExpectedInstalledVersion -ceq '1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f'
+    $candidatePattern=if($currentTransition){'1\.0\.22\+[A-Fa-f0-9]{12,40}'}else{'1\.0\.21\+[A-Fa-f0-9]{12,40}'}
+    $reservationId=if($currentTransition){'acfd8643ed2846b8a43b98d3a74c3217'}else{$script:StaleReservationApprovalId}
+    if($RequestId -cne $script:RequestId -or $TaskId -cne $script:TaskId -or ($ExpectedInstalledVersion -cne '1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e' -and !$currentTransition)){
         throw 'Completed-outcome upgrade is restricted to the exact active request and pinned installed runtime.'
     }
     if(!$Capabilities -or $Capabilities.operation -cne 'cpv-preparation-capabilities' -or $Capabilities.supported -ne $true -or
@@ -55,14 +60,26 @@ function Assert-CpvCompletedOutcomeUpgrade {
     $storedRequestHash=Get-CpvCompletedUpgradeHash $recovery.Request
     if($storedRequestHash -ine $recovery.RequestHash){throw "Authoritative preparation request hash changed: stored $($recovery.RequestHash), computed $storedRequestHash."}
     if($recovery.OutcomeRecoveryApprovalId){
-        if($recovery.OutcomeRecoveryApprovalId -ine $script:StaleReservationApprovalId -or !$recovery.PSObject.Properties['OutcomeRecoveryRequest'] -or
+        if($recovery.OutcomeRecoveryApprovalId -cne $reservationId -or !$recovery.PSObject.Properties['OutcomeRecoveryRequest'] -or
             !$recovery.OutcomeRecoveryRequest -or !$recovery.PSObject.Properties['OutcomeRecoveryRequestHash'] -or
             [string]$recovery.OutcomeRecoveryRequestHash -notmatch '^[A-Fa-f0-9]{64}$' -or
             [string]$recovery.OutcomeRecoveryRequest.requestId -cne $RequestId -or [string]$recovery.OutcomeRecoveryRequest.taskId -cne $TaskId){
             throw 'An unexpected outcome recovery reservation blocks the guarded runtime upgrade.'
         }
-        $reservation=@($task.approvalRequests|Where-Object {$_.requestId -ceq $script:StaleReservationApprovalId -and $_.action -ceq $script:StaleReservationAction -and $_.status -ceq 'approved' -and $_.consumedUtc})
+        $reservation=@($task.approvalRequests|Where-Object {$_.requestId -ceq $reservationId -and $_.action -ceq $script:StaleReservationAction -and $_.status -ceq 'approved' -and $_.consumedUtc})
         if($reservation.Count -ne 1){throw 'The expected consumed outcome recovery reservation is unavailable or changed.'}
+    }
+    if($currentTransition){
+        if($ExpectedTaskRevision -ne 122 -or $recovery.OutcomeRecoveryApprovalId -cne $reservationId){throw 'Revision-122 retained reservation is required for the 1.0.22 transition.'}
+        if(!$Capabilities.PSObject.Properties['runtimeVersion'] -or $Capabilities.runtimeVersion -cne $ExpectedInstalledVersion -or
+            !$CurrentApprovedSnapshot -or $CurrentApprovedSnapshot.AgentVersion -cne $ExpectedInstalledVersion -or
+            $CurrentApprovedSnapshot.AgentSessionId -ne $Capabilities.sessionId){throw 'Current authenticated snapshot runtime or session differs from the installed agent.'}
+        $recoveryModule=Import-Module (Join-Path $PSScriptRoot 'Repato.CpvCompletedOutcomeRecovery.psm1') -PassThru -WarningAction SilentlyContinue
+        & $recoveryModule {param($t,$id,$proof,$snapshot)
+            $a=Assert-CpvOutcomeRecoveryReservationResettable -Task $t -ApprovalId $id
+            $null=Assert-CpvOutcomeRecoveryApprovedSnapshotCurrent -Binding $a.outcomeRecoveryBinding -Current $snapshot
+            $null=Assert-CpvOutcomeRecoveryNonExecutionProof -Proof $proof -Approval $a -Request $t.cpvPreparationRecovery.Request
+        } $task $reservationId $NonExecutionProof $CurrentApprovedSnapshot
     }
     if(@($task.approvalRequests|Where-Object status -ceq 'pending').Count){throw 'A pending approval blocks the guarded runtime upgrade.'}
     if(@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.PSObject.Properties['executionBinding'] -and $_.executionBinding -and $_.executionBinding.RunId -ceq $recovery.Request.runId}).Count){throw 'A native QA approval already exists for this preparation run.'}
@@ -117,19 +134,20 @@ function Assert-CpvCompletedOutcomeUpgrade {
     $releaseRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\DeploymentCandidates\AgentReleases')).TrimEnd('\')+'\'
     if(!$candidate.StartsWith($releaseRoot,[StringComparison]::OrdinalIgnoreCase) -or
        (Split-Path $manifestPath -Leaf) -cne 'Repato.QaLaunchAgent.release.json' -or
-       (Split-Path $candidate -Leaf) -notmatch '^Repato\.QaLaunchAgent-1\.0\.21\+[A-Fa-f0-9]{12,40}$'){
+       (Split-Path $candidate -Leaf) -notmatch ('^Repato\.QaLaunchAgent-'+$candidatePattern+'$')){
         throw 'Release candidate root is outside the pinned agent-release catalog.'
     }
     if(!$manifestPath.StartsWith($candidate+'\',[StringComparison]::OrdinalIgnoreCase) -or (Get-FileHash $manifestPath -Algorithm SHA256).Hash -ine $CandidateManifestSha256){throw 'Release manifest is not pinned to the candidate root.'}
     $manifest=Get-Content $manifestPath -Raw|ConvertFrom-Json
     if($manifest.product -cne 'Repato.QaLaunchAgent' -or $manifest.account -cne $script:User -or $manifest.sid -cne $script:Sid -or
-       $manifest.productVersion -notmatch '^1\.0\.21\+[A-Fa-f0-9]{12,40}$' -or @($manifest.files).Count -ne 4 -or
+       $manifest.productVersion -notmatch ('^'+$candidatePattern+'$') -or @($manifest.files).Count -ne 4 -or
        @($manifest.files.name|Select-Object -Unique).Count -ne 4 -or @($script:RuntimeFiles|Where-Object {$_ -notin @($manifest.files.name)}).Count){throw 'Candidate release identity or version is not the required recovery release.'}
     foreach($entry in $manifest.files){$path=Join-Path $candidate $entry.name;if($entry.name -notin $script:RuntimeFiles -or $entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or !(Test-Path $path -PathType Leaf) -or (Get-FileHash $path -Algorithm SHA256).Hash -ine $entry.sha256){throw 'Candidate runtime file manifest or bytes are invalid.'}}
     $agentRoot=Split-Path $ExpectedExecutable -Parent;$journalPath=Join-Path (Split-Path $agentRoot -Parent) '.QaLaunchAgent.install-journal.json'
     $journal=& $BootstrapModule {param($path,$target) Read-InstallJournal $path $target} $journalPath $agentRoot
     $baselineOk = ($journal.state -eq 'Committed' -and $journal.generation -eq 13 -and $journal.candidateVersion -eq $ExpectedInstalledVersion -and $journal.requestId -in @('9953e14c15524fe09440d1c7d7353950','c11b311638a54bfc9ebdd1803671ec40') -and $journal.taskId -eq $TaskId)
-    if(!$baselineOk) {
+    if($currentTransition){$baselineOk=($journal.state -ceq 'Committed' -and $journal.generation -eq 13 -and $journal.candidateVersion -ceq $ExpectedInstalledVersion -and $journal.priorVersion -ceq '1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e' -and $journal.requestId -ceq $RequestId -and $journal.taskId -ceq $TaskId)}
+    if(!$baselineOk -and !$currentTransition) {
       $baselineOk = ($journal.state -eq 'RolledBack' -and $journal.priorVersion -eq $ExpectedInstalledVersion -and $journal.taskId -eq $TaskId)
     }
     if(!$baselineOk){throw 'Committed generation-13 rollback journal is not the expected installed baseline.'}

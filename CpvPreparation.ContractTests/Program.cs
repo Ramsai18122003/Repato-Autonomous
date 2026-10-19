@@ -7,6 +7,8 @@ void Reject(Action action, string name) { assertions++; try { action(); } catch 
 string root = Path.Combine(Path.GetTempPath(), "repato-cpv-protocol-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 try {
+    if (args.Contains("--verify-failure-reporting"))
+        throw new InvalidDataException("synthetic-failure-reporting-probe");
     var now = DateTimeOffset.UtcNow;
     var identity = new Identity();
     var evidence = new QaCandidateEvidence(1, "task-" + Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"),
@@ -116,6 +118,7 @@ try {
         string modelPath=Path.Combine(run,"model.rvt"),runnerPath=Path.Combine(run,"tara-"+rr.AttemptId+".request.json"),resultPath=runnerPath+".preparation.json";
         File.Copy(@"C:\Repato-Autonomous\Source\QA\Fixtures\CreatePlanViewsEmpty.rvt",modelPath);
         File.AppendAllText(modelPath,"prepared");
+        File.WriteAllText(modelPath+".fixture.json", "{\"fixtureId\":\"CreatePlanViewsEmpty\",\"sourceSha256\":\""+CpvPreparationService.FixtureSha256+"\"}");
         string modelHash=CpvPreparationService.Hash(modelPath);
         if(corruptModel) File.AppendAllText(modelPath,"changed");
         var runner=new {schemaVersion=1,operation=CpvPreparationService.RunnerOperation,requestId=rr.AttemptId,taskId=rr.TaskId,workflowId=rr.WorkflowId,attemptId=rr.AttemptId,runId=rr.RunId,requestPath=runnerPath,modelPath,modelSha256=CpvPreparationService.FixtureSha256,selectedManifestPath=QaLaunchPolicy.ExpectedRunnerManifestPath,selectedManifestSha256=rr.CandidateEvidence.RunnerManifestSha256,outputPath=resultPath,expiresUtc=rr.ExpiresUtc};
@@ -130,6 +133,55 @@ try {
         var svc=new CpvPreparationService(Options("completed-"+name) with {LogRoot=logRoot,RuntimeRoot=runtime},identity,new Ledger(),boundary);
         return (null!,svc,store,originalJson,q);
     }
+    var sourceSidecarCase=CompletedRecoveryCase("source-only-sidecar");
+    var sourceSidecarModel=JsonSerializer.Deserialize<CpvPreparationRequest>(File.ReadAllText(Path.Combine(sourceSidecarCase.Store,sourceSidecarCase.Query.RequestId+".request.json")),CpvPreparationService.StrictJson)!;
+    var sourceSidecarPath=Path.Combine(root,"completed-recovery-source-only-sidecar","runtime","cpv-preparation-"+sourceSidecarModel.RunId,"model.rvt.fixture.json");
+    const string sourceSidecarJson="{\"fixtureId\":\"CreatePlanViewsEmpty\",\"sourceSha256\":\"92CC9E434E2C4DD6720A2AA564E19F4E1A30EB3DA63CEA73CF737F875B9EDD45\"}";
+    File.WriteAllText(sourceSidecarPath,sourceSidecarJson);
+    using(var sourceDocument=JsonDocument.Parse(sourceSidecarJson)) {
+        try { sourceDocument.RootElement.GetProperty("preparedModelSha256"); throw new Exception("Legacy missing-property failure not reproduced"); }
+        catch(KeyNotFoundException ex) { Check(NamedPipeLaunchServer.PreparedFailureCode(ex)=="preparation-rejected-or-reconcile-required","source-only sidecar reproduces masked legacy failure"); }
+    }
+    var sourceCommit=(CpvPreparationRecoveryCommit)sourceSidecarCase.Service.Handle(JsonSerializer.Serialize(sourceSidecarCase.Query,CpvPreparationService.StrictJson),now);
+    Check(File.ReadAllText(sourceSidecarPath)==sourceSidecarJson,"historical source-only sidecar remains byte-for-byte unchanged");
+    Check(sourceCommit.RecoveredProvenancePath==sourceCommit.Receipt.ModelPath+".recovered.fixture.json" &&
+        CpvPreparationService.Hash(sourceCommit.RecoveredProvenancePath)==sourceCommit.RecoveredProvenanceSha256,"separate recovered provenance published and bound to durable commit");
+    using(var provenance=JsonDocument.Parse(File.ReadAllText(sourceCommit.RecoveredProvenancePath!))) {
+        var p=provenance.RootElement;
+        Check(p.GetProperty("historicalSidecarSha256").GetString()==CpvPreparationService.Hash(sourceSidecarPath),"provenance binds exact historical sidecar bytes");
+        Check(p.GetProperty("approvalBindingHash").GetString()==sourceSidecarCase.Query.ApprovalBindingHash &&
+            p.GetProperty("originalReceiptSha256").GetString()==sourceSidecarCase.Query.OriginalReceiptSha256 &&
+            p.GetProperty("activeMarkerSha256").GetString()==sourceSidecarCase.Query.ActiveMarkerSha256 &&
+            p.GetProperty("failureEvidenceSha256").GetString()==sourceSidecarCase.Query.FailureEvidenceSha256 &&
+            p.GetProperty("requestSha256").GetString()==sourceSidecarCase.Query.RequestSha256,"provenance retains approved evidence and approval binding identities");
+    }
+    foreach(var historical in new[]{"{}",sourceSidecarJson.Replace("CreatePlanViewsEmpty","WrongFixture"),sourceSidecarJson.Replace(CpvPreparationService.FixtureSha256,new string('0',64)),sourceSidecarJson.TrimEnd('}')+",\"preparedModelSha256\":\""+new string('A',64)+"\"}",sourceSidecarJson.TrimEnd('}')+",\"sourceSha256\":\""+CpvPreparationService.FixtureSha256+"\"}"}) {
+        var bad=CompletedRecoveryCase("bad-history-"+Guid.NewGuid().ToString("N"));
+        string badHistoryModel=JsonSerializer.Deserialize<CpvPreparationReceipt>(bad.OriginalJson,CpvPreparationService.StrictJson)!.ModelPath;
+        File.WriteAllText(badHistoryModel+".fixture.json",historical);
+        Reject(()=>bad.Service.Handle(JsonSerializer.Serialize(bad.Query,CpvPreparationService.StrictJson),now),"reject invalid, duplicate, or partially prepared historical sidecar");
+        Check(File.ReadAllText(badHistoryModel+".fixture.json")==historical && !File.Exists(badHistoryModel+".recovered.fixture.json") && File.Exists(Path.Combine(bad.Store,"active.json")),"invalid history remains unchanged and publishes no recovered provenance");
+    }
+    var missingHistory=CompletedRecoveryCase("missing-history");
+    string missingModel=JsonSerializer.Deserialize<CpvPreparationReceipt>(missingHistory.OriginalJson,CpvPreparationService.StrictJson)!.ModelPath;
+    File.Delete(missingModel+".fixture.json");
+    try { missingHistory.Service.Handle(JsonSerializer.Serialize(missingHistory.Query,CpvPreparationService.StrictJson),now); throw new Exception("Missing history unexpectedly accepted"); }
+    catch (InvalidDataException ex) { Check(ex.Message=="completed-recovery-historical-sidecar-missing","missing historical evidence produces the exact fail-closed diagnostic without crashing the harness"); }
+    var preparedHistory=CompletedRecoveryCase("prepared-history");
+    var preparedReceipt=JsonSerializer.Deserialize<CpvPreparationReceipt>(preparedHistory.OriginalJson,CpvPreparationService.StrictJson)!;
+    string preparedHistoryJson=JsonSerializer.Serialize(new {fixtureId="CreatePlanViewsEmpty",sourceSha256=CpvPreparationService.FixtureSha256,
+        preparedModelSha256=preparedHistory.Query.ModelSha256,fixturePreparationRequestPath=preparedReceipt.RequestPath,
+        fixturePreparationRequestSha256=CpvPreparationService.Hash(preparedReceipt.RequestPath),fixturePreparationResultPath=preparedReceipt.RequestPath+".preparation.json",
+        fixturePreparationResultSha256=preparedHistory.Query.ResultSha256,fixturePreparationAttemptId=preparedHistory.Query.AttemptId,
+        fixturePreparationRunId=preparedHistory.Query.RunId});
+    File.WriteAllText(preparedReceipt.ModelPath+".fixture.json",preparedHistoryJson);
+    var preparedCommit=(CpvPreparationRecoveryCommit)preparedHistory.Service.Handle(JsonSerializer.Serialize(preparedHistory.Query,CpvPreparationService.StrictJson),now);
+    Check(preparedCommit.Receipt.Status=="Passed" && File.ReadAllText(preparedReceipt.ModelPath+".fixture.json")==preparedHistoryJson,"fully bound legacy prepared history is accepted and preserved");
+    var collisionCase=CompletedRecoveryCase("publication-collision");
+    string collisionModel=JsonSerializer.Deserialize<CpvPreparationReceipt>(collisionCase.OriginalJson,CpvPreparationService.StrictJson)!.ModelPath;
+    File.WriteAllText(collisionModel+".recovered.fixture.json","unrelated protected evidence");
+    Reject(()=>collisionCase.Service.Handle(JsonSerializer.Serialize(collisionCase.Query,CpvPreparationService.StrictJson),now),"unmatched recovered provenance is never overwritten");
+    Check(File.ReadAllText(collisionModel+".recovered.fixture.json")=="unrelated protected evidence","publication collision preserves existing evidence");
     var completedBoundary=new Boundary();
     var completed=CompletedRecoveryCase("valid");
     var committed=(CpvPreparationRecoveryCommit)completed.Service.Handle(JsonSerializer.Serialize(completed.Query,CpvPreparationService.StrictJson),now);
@@ -140,6 +192,28 @@ try {
     Check(recoveredStatus.Status=="Passed" && recoveredStatus.ModelSha256==completed.Query.ModelSha256,"status exposes verified recovery only after marker removal");
     var recoveryCommitStatus=(CpvPreparationRecoveryCommit)completed.Service.Handle(JsonSerializer.Serialize(new CpvPreparationCompletedRecoveryStatus(1,CpvPreparationService.RecoverCompletedStatusOperation,completed.Query.RequestId),CpvPreparationService.StrictJson),now);
     Check(recoveryCommitStatus.RecoveryApprovalId==completed.Query.RecoveryApprovalId && recoveryCommitStatus.ExpectedTaskRevision==completed.Query.ExpectedTaskRevision,"authenticated recovery status binds terminal evidence to approval and task revision");
+    string terminalCommitPath=Path.Combine(completed.Store,completed.Query.RequestId+".recovered.json");
+    string terminalCommitBytes=File.ReadAllText(terminalCommitPath),provenanceBytes=File.ReadAllText(committed.RecoveredProvenancePath!);
+    string requestEvidenceBytes=File.ReadAllText(Path.Combine(completed.Store,completed.Query.RequestId+".request.json"));
+    // Simulate interruption after publishing the commit but before removing the marker.
+    File.WriteAllText(Path.Combine(completed.Store,"active.json"),requestEvidenceBytes);
+    var resumedCommit=(CpvPreparationRecoveryCommit)completed.Service.Handle(JsonSerializer.Serialize(completed.Query,CpvPreparationService.StrictJson),now.AddSeconds(1));
+    Check(resumedCommit==committed && File.ReadAllText(terminalCommitPath)==terminalCommitBytes &&
+        File.ReadAllText(committed.RecoveredProvenancePath!)==provenanceBytes,"interrupted durable commit resumes idempotently without rewriting commit or provenance");
+    Check(File.ReadAllText(Path.Combine(completed.Store,completed.Query.RequestId+".json"))==completed.OriginalJson &&
+        File.ReadAllText(Path.Combine(completed.Store,completed.Query.RequestId+".request.json"))==requestEvidenceBytes,"idempotent completion preserves original receipt and request evidence");
+    object RecoveryStatus() => completed.Service.Handle(JsonSerializer.Serialize(new CpvPreparationCompletedRecoveryStatus(1,CpvPreparationService.RecoverCompletedStatusOperation,completed.Query.RequestId),CpvPreparationService.StrictJson),now);
+    File.AppendAllText(committed.RecoveredProvenancePath!," ");
+    Reject(()=>RecoveryStatus(),"status refuses changed recovered provenance hash");
+    File.WriteAllText(committed.RecoveredProvenancePath!,provenanceBytes);
+    string historicalBytes=File.ReadAllText(committed.Receipt.ModelPath+".fixture.json");
+    File.AppendAllText(committed.Receipt.ModelPath+".fixture.json"," ");
+    Reject(()=>RecoveryStatus(),"status refuses changed historical sidecar even semantically identical JSON");
+    File.WriteAllText(committed.Receipt.ModelPath+".fixture.json",historicalBytes);
+    File.Delete(committed.RecoveredProvenancePath!);
+    Reject(()=>RecoveryStatus(),"status refuses missing recovered provenance");
+    File.WriteAllText(committed.RecoveredProvenancePath!,provenanceBytes);
+    Check((CpvPreparationRecoveryCommit)RecoveryStatus()==committed,"restoring exact synthetic evidence restores authenticated status");
     Reject(()=>completed.Service.Handle(JsonSerializer.Serialize(completed.Query,CpvPreparationService.StrictJson),now),"duplicate completed recovery after terminal commit");
     foreach(var item in new[]{CompletedRecoveryCase("bad-result",corruptResult:true),CompletedRecoveryCase("missing-result",missingResult:true),CompletedRecoveryCase("model-binding",wrongBinding:true),CompletedRecoveryCase("bad-model",corruptModel:true),CompletedRecoveryCase("expired",expiredAuthorization:true)})
     {
@@ -182,8 +256,25 @@ try {
     Check(JsonSerializer.SerializeToElement(executedReconcile).GetProperty("status").GetString()=="Executed" &&
         JsonSerializer.SerializeToElement(executedReconcile).GetProperty("recoveryApprovalId").GetString()==completed.Query.RecoveryApprovalId,"committed recovery reconciles to Executed bound to its approval");
     Reject(()=>completed.Service.Handle(ReconcileJson(ReconcileQuery(completed.Query) with { ApprovalBindingHash=new string('0',64) }),now),"Executed reconcile refuses a mismatched approval binding");
+    Reject(()=>completed.Service.Handle(ReconcileJson(ReconcileQuery(completed.Query) with { OriginalReceiptSha256=new string('0',64) }),now),"Executed reconcile refuses changed original evidence binding");
+    Reject(()=>collisionCase.Service.Handle(ReconcileJson(ReconcileQuery(collisionCase.Query)),now),"orphaned provenance prevents a false NotExecuted attestation");
+    var publicationInterrupted=CompletedRecoveryCase("publication-interrupted");
+    var publicationCommit=(CpvPreparationRecoveryCommit)publicationInterrupted.Service.Handle(JsonSerializer.Serialize(publicationInterrupted.Query,CpvPreparationService.StrictJson),now);
+    string publicationBytes=File.ReadAllText(publicationCommit.RecoveredProvenancePath!);
+    File.Delete(Path.Combine(publicationInterrupted.Store,publicationInterrupted.Query.RequestId+".recovered.json"));
+    File.WriteAllText(Path.Combine(publicationInterrupted.Store,"active.json"),File.ReadAllText(Path.Combine(publicationInterrupted.Store,publicationInterrupted.Query.RequestId+".request.json")));
+    Reject(()=>publicationInterrupted.Service.Handle(ReconcileJson(ReconcileQuery(publicationInterrupted.Query)),now),"interrupted provenance publication requires positive repair rather than non-execution reset");
+    var publicationResumed=(CpvPreparationRecoveryCommit)publicationInterrupted.Service.Handle(JsonSerializer.Serialize(publicationInterrupted.Query,CpvPreparationService.StrictJson),now.AddSeconds(1));
+    Check(publicationResumed.Receipt.Status=="Passed" && File.ReadAllText(publicationCommit.RecoveredProvenancePath!)==publicationBytes,"exact interrupted provenance publication resumes without evidence rewrite");
     Console.WriteLine($"PASS: {assertions} CPV preparation protocol assertions; injected processes only; Revit launched=false.");
-} finally {Directory.Delete(root,true);}
+} catch (Exception ex) {
+    // Report assertion/setup failures as a normal nonzero exit, without Windows Error Reporting UI.
+    Console.Error.WriteLine(ex);
+    Environment.ExitCode = 1;
+} finally {
+    try { Directory.Delete(root,true); }
+    catch (Exception ex) { Console.Error.WriteLine("Synthetic fixture cleanup failed: " + ex); Environment.ExitCode = 1; }
+}
 
 sealed class Identity:IIdentitySessionProvider {public string User{get;set;}=QaLaunchPolicy.ExpectedUser;public string Sid{get;set;}=QaLaunchPolicy.ExpectedUserSid;public int SessionId=>1;public bool Interactive{get;set;}=true;}
 sealed class Ledger:IReplayLedger {readonly HashSet<string> keys=[];public int Count=>keys.Count;public bool TryReserve(string id,DateTimeOffset now)=>keys.Add(id);public bool TryReserve(QaLaunchRequest r,DateTimeOffset now)=>TryReserve(r.RequestId,now);}

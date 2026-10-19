@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'Repato.CpvRecoveredProvenance.psm1') -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.Deployment.v4.psm1') -WarningAction SilentlyContinue
 . (Join-Path $PSScriptRoot 'MayaQa.TaraExecution.ps1')
@@ -615,7 +616,7 @@ function Test-MayaQaCorrelatedDisposableFixtureProvenance {
     if(!$source.StartsWith(([IO.Path]::GetFullPath($fixtures)).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !$model.StartsWith($runtime.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $source -PathType Leaf) -or !(Test-Path -LiteralPath $model -PathType Leaf)){throw 'Recorded disposable fixture identity/hash validation failed.'}
     if((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ine $SourceSha256 -or (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash -ine $ModelSha256){throw 'Recorded disposable fixture identity/hash validation failed.'}
     $sidePath=$model+'.fixture.json';if(!(Test-Path -LiteralPath $sidePath -PathType Leaf)){throw 'Recorded disposable fixture provenance sidecar is missing.'}
-    try{$side=Get-Content -LiteralPath $sidePath -Raw|ConvertFrom-Json}catch{throw 'Recorded disposable fixture provenance sidecar is malformed.'}
+    try{$side=Read-CpvFixtureProvenance -SidecarPath $sidePath}catch{throw "Recorded disposable fixture provenance sidecar is malformed: $($_.Exception.Message)"}
     if([string]$side.fixtureId -cne $FixtureId -or [string]$side.sourceSha256 -ine $SourceSha256 -or [string]$side.preparedModelSha256 -ine $ModelSha256){throw 'Recorded disposable fixture provenance hashes do not match.'}
     $requestPath=[IO.Path]::GetFullPath([string]$side.fixturePreparationRequestPath);$resultPath=[IO.Path]::GetFullPath([string]$side.fixturePreparationResultPath);$runsPrefix=([IO.Path]::GetFullPath($runs)).TrimEnd('\')+'\'
     if(!$requestPath.StartsWith($runsPrefix,[StringComparison]::OrdinalIgnoreCase) -or !$resultPath.StartsWith($runsPrefix,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $requestPath -PathType Leaf) -or !(Test-Path -LiteralPath $resultPath -PathType Leaf) -or (Get-FileHash -LiteralPath $requestPath -Algorithm SHA256).Hash -ine [string]$side.fixturePreparationRequestSha256 -or (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash -ine [string]$side.fixturePreparationResultSha256){throw 'Recorded disposable fixture preparation evidence is missing or has a hash mismatch.'}
@@ -2473,7 +2474,8 @@ function Request-MayaQaCanonicalExecutionApproval {
     $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\';$storePath=[IO.Path]::GetFullPath($StoreRoot);$runtime=[IO.Path]::GetFullPath($(if($storePath.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){$env:TEMP}else{Get-MayaQaRuntimeRoot}));$model=[IO.Path]::GetFullPath([string]$workflow.qaModelPath);$sidecar=[IO.Path]::GetFullPath([string]$workflow.qaSidecarPath)
     if(!$model.StartsWith($runtime.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !$sidecar.StartsWith($runtime.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $model -PathType Leaf) -or !(Test-Path -LiteralPath $sidecar -PathType Leaf)){throw 'Canonical disposable model is missing or outside the approved QA runtime.'}
     $modelHash=(Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash;$definition=Get-MayaQaWorkflowDefinition $workflow.qaWorkflowId
-    $sidecarData=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json
+    $expectedRecoveredHash=if($workflow.qaFixturePreparationEvidence -and $workflow.qaFixturePreparationEvidence.PSObject.Properties['RecoveredProvenanceSha256']){[string]$workflow.qaFixturePreparationEvidence.RecoveredProvenanceSha256}else{''}
+    $sidecarData=Read-CpvFixtureProvenance -SidecarPath $sidecar -ExpectedRecoveredProvenanceSha256 $expectedRecoveredHash
     if($workflow.qaWorkflowId -cne 'create-plan-views-v1' -or $workflow.qaTestId -cne $workflow.qaWorkflowId -or $workflow.qaFixtureId -cne $definition.FixtureId -or $sidecarData.fixtureId -cne $workflow.qaFixtureId -or $sidecarData.sourceSha256 -ine $workflow.qaFixtureSha256 -or $modelHash -ine $workflow.qaDisposableModelSha256){throw 'Canonical execution plan fixture or model identity is invalid.'}
     $candidate=New-MayaQaPersistedCandidateEvidence -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $workflow.qaWorkflowId -TestId $workflow.qaWorkflowId
     $deploymentBinding=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $task -Workflow $workflow -BuildRequestId $BuildRequestId -CandidateSourceCommit $CandidateSourceCommit -CandidateSha256 $CandidateSha256 -RunnerManifestPath $candidate.RunnerManifestPath -RunnerManifestSha256 $candidate.RunnerManifestSha256

@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'Repato.CpvRecoveredProvenance.psm1') -WarningAction SilentlyContinue
 
 function Assert-TaraPath {
     param([string]$Path,[string]$Root,[switch]$Leaf)
@@ -105,7 +106,8 @@ function New-TaraRevitQaPlan {
     $reportRoot=Assert-TaraPath $ReportDirectory $qa
     if($reportRoot -ine (Join-Path $qa 'Reports') -or !(Test-Path -LiteralPath $reportRoot -PathType Container)){throw 'ReportDirectory must be the existing native QA Reports directory.'}
     $source=Assert-TaraPath $Context.SourceFixturePath (Join-Path $qa 'Fixtures') -Leaf
-    $side=Get-Content -LiteralPath $sidecar -Raw|ConvertFrom-Json
+    $expectedRecoveredHash=if($Context.PSObject.Properties['FixturePreparationEvidence'] -and $Context.FixturePreparationEvidence -and $Context.FixturePreparationEvidence.PSObject.Properties['RecoveredProvenanceSha256']){[string]$Context.FixturePreparationEvidence.RecoveredProvenanceSha256}else{''}
+    $side=Read-CpvFixtureProvenance -SidecarPath $sidecar -ExpectedRecoveredProvenanceSha256 $expectedRecoveredHash
     if($side.fixtureId -cne $Context.FixtureId -or $side.sourceSha256 -ine $Context.FixtureSha256){throw 'Fixture sidecar identity or expected source hash mismatch.'}
     if((Get-TaraSha256 $source) -ine $Context.FixtureSha256){throw 'Authoritative source fixture hash mismatch.'}
     $preparation=if($Context.PSObject.Properties.Name -contains 'FixturePreparationEvidence'){$Context.FixturePreparationEvidence}else{$null}

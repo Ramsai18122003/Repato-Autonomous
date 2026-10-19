@@ -88,6 +88,52 @@ function Read-InstallJournal { param($Path,$TargetRoot) [pscustomobject]@{state=
     $reservedArgs=@{}+$args
     $reservedAccepted=Assert-CpvCompletedOutcomeUpgrade @reservedArgs
     Check ($reservedAccepted.CandidateVersion -eq '1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f') 'the exact stale consumed outcome-recovery reservation does not block the 1.0.21 upgrade gate'
+    # Exact revision-122 transition: synthetic consumed human authorization and
+    # correlated non-execution proof; no live store, pipe, or runtime operations.
+    $currentTask=ConvertTo-Json -InputObject $roundTrip -Depth 25|ConvertFrom-Json
+    $currentTask.revision=[long]122
+    $currentTask.cpvPreparationRecovery.RequestHash=& $upgradeModule {param($v)Get-CpvCompletedUpgradeHash $v} $currentTask.cpvPreparationRecovery.Request
+    $currentId='acfd8643ed2846b8a43b98d3a74c3217'
+    $snapshot=[pscustomobject][ordered]@{TaskId=$taskId;OriginalReceiptSha256=('1'*64);ActiveMarkerSha256=('2'*64);FailureEvidenceSha256=('3'*64);PreparationRequestSha256=('4'*64);ResultSha256=('5'*64);ModelSha256=('6'*64);AgentVersion='1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f';AgentSessionId=2}
+    $outcomeModule=Import-Module (Join-Path $PSScriptRoot 'Repato.CpvCompletedOutcomeRecovery.psm1') -PassThru -WarningAction SilentlyContinue
+    $binding122=[pscustomobject][ordered]@{SchemaVersion='cpv-preparation-outcome-recovery-approval-v1';ApprovalId=$currentId;TaskId=$taskId;RecoveryRequestId=$requestId;ExpectedTaskRevision=120;Snapshot=$snapshot;SnapshotHash=(& $outcomeModule {param($v)Get-CpvOutcomeRecoveryHash $v} $snapshot)}
+    $approvalHash=& $outcomeModule {param($v)Get-CpvOutcomeRecoveryHash $v} $binding122
+    $payload=[pscustomobject][ordered]@{schemaVersion=1;operation='cpv-preparation-recover-completed';requestId=$requestId;taskId=$taskId;workflowId=$workflow;attemptId=$attempt;runId=$runId;recoveryApprovalId=$currentId;expectedTaskRevision=120;approvalBindingHash=$approvalHash;authorizationExpiresUtc='2026-10-19T07:00:00Z';originalReceiptSha256=$snapshot.OriginalReceiptSha256;activeMarkerSha256=$snapshot.ActiveMarkerSha256;failureEvidenceSha256=$snapshot.FailureEvidenceSha256;requestSha256=$snapshot.PreparationRequestSha256;resultSha256=$snapshot.ResultSha256;modelSha256=$snapshot.ModelSha256}
+    $currentTask.cpvPreparationRecovery.OutcomeRecoveryApprovalId=$currentId
+    $currentTask.cpvPreparationRecovery.OutcomeRecoveryRequest=$payload
+    $currentTask.cpvPreparationRecovery.OutcomeRecoveryRequestHash=& $outcomeModule {param($v)Get-CpvOutcomeRecoveryHash $v} $payload
+    $currentTask.approvalRequests=@($currentTask.approvalRequests)+@([pscustomobject]@{requestId=$currentId;action='cpv-preparation-outcome-recovery';requiredLevel='user';status='approved';decidedBy='user';consumedUtc='2026-10-19T06:50:07Z';approvedRevision=121;expiresUtc=$payload.authorizationExpiresUtc;bindingHash=$approvalHash;outcomeRecoveryBinding=$binding122})
+    [IO.File]::WriteAllText((Join-Path $store 'tasks.json'),(ConvertTo-Json -InputObject ([pscustomobject]@{schemaVersion=1;tasks=[object[]]@($currentTask)}) -Depth 25))
+    $proof=$payload|Select-Object *;$proof.operation='cpv-preparation-recover-completed-reconcile';$proof|Add-Member NoteProperty status 'NotExecuted'
+    $nextRoot=Join-Path $testRelease ('Repato.QaLaunchAgent-1.0.22+'+('a'*40));New-Item -ItemType Directory -Path $nextRoot|Out-Null
+    foreach($n in $fileNames){Copy-Item -LiteralPath (Join-Path $candidateRoot $n) -Destination (Join-Path $nextRoot $n)}
+    $nextRelease=$release|ConvertTo-Json -Depth 6|ConvertFrom-Json;$nextRelease.productVersion='1.0.22+'+('a'*40);$nextRelease.sourceCommit=('a'*40)
+    $nextManifest=Join-Path $nextRoot 'Repato.QaLaunchAgent.release.json';$nextRelease|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $nextManifest -Encoding UTF8
+    $nextBootstrapPath=Join-Path $temp 'Revision122Bootstrap.psm1';@'
+function Read-InstallJournal {param($Path,$TargetRoot) [pscustomobject]@{state='Committed';generation=13;candidateVersion='1.0.21+3dd4a4bb9b51c040bd8997f403bc1dbd27ff188f';priorVersion='1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e';requestId='c11b311638a54bfc9ebdd1803671ec40';taskId='task-bf61fe7f22d74df7a92599681da5919e';journalSha256=('D'*64)}}
+'@|Set-Content -LiteralPath $nextBootstrapPath -Encoding UTF8
+    $nextArgs=@{}+$args;$nextArgs.ExpectedTaskRevision=122;$nextArgs.ExpectedInstalledVersion=$snapshot.AgentVersion;$nextArgs.InstalledAgent=$installedIdentity|Select-Object *;$nextArgs.InstalledAgent.ProductVersion=$snapshot.AgentVersion;$nextArgs.CandidateRoot=$nextRoot;$nextArgs.CandidateManifestPath=$nextManifest;$nextArgs.CandidateManifestSha256=Get-Hash $nextManifest;$nextArgs.BootstrapModule=Import-Module $nextBootstrapPath -PassThru -Force;$nextArgs.NonExecutionProof=$proof;$nextArgs.CurrentApprovedSnapshot=$snapshot
+    $storeBefore=Get-Hash (Join-Path $store 'tasks.json');$historicalBefore=Get-Hash ($model+'.fixture.json')
+    $nextArgs.Capabilities=$caps|Select-Object *;$nextArgs.Capabilities|Add-Member NoteProperty runtimeVersion $snapshot.AgentVersion
+    $nextAccepted=Assert-CpvCompletedOutcomeUpgrade @nextArgs
+    Check ($nextAccepted.CandidateVersion -eq $nextRelease.productVersion) 'exact consumed revision-122 reservation permits 1.0.22 candidate'
+    $null=Assert-CpvCompletedOutcomeUpgrade @nextArgs
+    Check ((Get-Hash (Join-Path $store 'tasks.json')) -ceq $storeBefore -and (Get-Hash ($model+'.fixture.json')) -ceq $historicalBefore -and (Get-Hash (Join-Path $logs 'active.json')) -ceq $activeHash) 'repeated preflight preserves reservation and protected historical bytes'
+    $badNext=@{}+$nextArgs;$badNext.NonExecutionProof=$null;Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'non-execution'
+    $badNext=@{}+$nextArgs;$badNext.CurrentApprovedSnapshot=$snapshot|Select-Object *;$badNext.CurrentApprovedSnapshot.AgentSessionId=1;Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'runtime or session'
+    $badNext=@{}+$nextArgs;$badNext.NonExecutionProof=$proof|Select-Object *;$badNext.NonExecutionProof.status='Executed';Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'reports.*executed'
+    $badNext=@{}+$nextArgs;$badNext.NonExecutionProof=$proof|Select-Object *;$badNext.NonExecutionProof.approvalBindingHash=('0'*64);Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'non-execution'
+    $badNext=@{}+$nextArgs;$badNext.CurrentApprovedSnapshot=$snapshot|Select-Object *;$badNext.CurrentApprovedSnapshot.ModelSha256=('0'*64);Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'approved snapshot'
+    $badNext=@{}+$nextArgs;$badNext.ExpectedTaskRevision=123;Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'revision changed'
+    $badNext=@{}+$nextArgs;$badNext.CandidateRoot=$candidateRoot;$badNext.CandidateManifestPath=$manifest;$badNext.CandidateManifestSha256=$manifestHash;Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'pinned agent-release'
+    $storeBytes=[IO.File]::ReadAllBytes((Join-Path $store 'tasks.json'))
+    $currentTask.cpvPreparationRecovery.OutcomeRecoveryRequestHash=('0'*64)
+    [IO.File]::WriteAllText((Join-Path $store 'tasks.json'),(ConvertTo-Json -InputObject ([pscustomobject]@{schemaVersion=1;tasks=[object[]]@($currentTask)}) -Depth 25))
+    Reject {Assert-CpvCompletedOutcomeUpgrade @nextArgs} 'request hash changed'
+    [IO.File]::WriteAllBytes((Join-Path $store 'tasks.json'),$storeBytes)
+    $proofWithoutHash=$proof|Select-Object * -ExcludeProperty originalReceiptSha256
+    $badNext=@{}+$nextArgs;$badNext.NonExecutionProof=$proofWithoutHash;Reject {Assert-CpvCompletedOutcomeUpgrade @badNext} 'non-execution'
+    [IO.File]::WriteAllText((Join-Path $store 'tasks.json'),(ConvertTo-Json -InputObject ([pscustomobject]@{schemaVersion=1;tasks=[object[]]@($reservedTask)}) -Depth 20))
     $reservedTask.cpvPreparationRecovery.OutcomeRecoveryApprovalId=[guid]::NewGuid().ToString('N')
     [IO.File]::WriteAllText((Join-Path $store 'tasks.json'),(ConvertTo-Json -InputObject ([pscustomobject]@{schemaVersion=1;tasks=[object[]]@($reservedTask)}) -Depth 20))
     Reject {Assert-CpvCompletedOutcomeUpgrade @reservedArgs} 'unexpected outcome recovery reservation'
@@ -132,7 +178,7 @@ function Read-InstallJournal { param($Path,$TargetRoot) [pscustomobject]@{state=
     $installer=Get-Content (Join-Path $PSScriptRoot 'Install-CpvPreparationAgentCandidate.ps1') -Raw
     Check ($installer.Contains('$CompletedOutcomeRecoveryRequestId') -and $installer.Contains('Assert-CpvCompletedOutcomeUpgrade') -and $installer.Contains('recoveryStatusOperation')) 'supported installer has a distinct protected-marker recovery-upgrade branch'
     Check (!$installer.Contains("operation='cpv-preparation-reconcile-failed'") -and !$installer.Contains("operation='prepare-cpv-fixture'")) 'upgrade branch reads status only and never dispatches preparation or reconciliation'
-    Check ($installer.Contains("ExpectedInstalledVersion '1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e'")) 'installer pins the exact installed 1.0.20 runtime baseline'
+    Check ($installer.Contains("`$expectedCompletedVersion='1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e'")) 'installer preserves the exact installed 1.0.20 runtime baseline'
     $guardText=Get-Content (Join-Path $PSScriptRoot 'Repato.CpvCompletedOutcomeUpgrade.psm1') -Raw
     Check ($guardText.Contains('1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e') -and $guardText.Contains('1\.0\.21\+[A-Fa-f0-9]{12,40}') -and $guardText.Contains('590da474d11d42e2b2fedbf99edaba03')) 'completed-outcome guard pins the 1.0.21 candidate and the exact stale reservation'
     $bootstrapText=Get-Content (Join-Path $PSScriptRoot '..\QaLaunchAgent\Repato.QaLaunchAgent.Bootstrap.psm1') -Raw
