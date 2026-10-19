@@ -35,7 +35,7 @@ if(Test-Path -LiteralPath $activePath){
         $upgradeRequestId=$ReconcileRequestId;$completedOutcomeUpgrade=$false
     }
     if($TaskId -cne 'task-bf61fe7f22d74df7a92599681da5919e'){throw 'Guarded CPV upgrade task identity is invalid.'}
-    if((Get-CpvRevitProcesses).Count){throw 'Revit is running; the guarded upgrade is unavailable.'}
+    if(@(Get-CpvRevitProcesses).Count){throw 'Revit is running; the guarded upgrade is unavailable.'}
     $agents=@(Get-Process -Name Repato.QaLaunchAgent -ErrorAction Stop)
     if($agents.Count -ne 1 -or $agents[0].ProcessName -cne 'Repato.QaLaunchAgent' -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
     $processIdentity=Get-RepatoQaLaunchAgentProcessIdentity -ProcessId $agents[0].Id
@@ -86,7 +86,7 @@ if(Test-Path -LiteralPath $activePath){
     }
     $evidenceSnapshot=Get-CpvPreparationUpgradeEvidenceSnapshot -EvidenceRoot $activeRoot -RunDirectory $upgrade.RunDirectory
 } elseif($ReconcileRequestId -or $CompletedOutcomeRecoveryRequestId){throw 'A guarded upgrade request was supplied but no matching active marker exists.'}
-$revit=Get-CpvRevitProcesses
+$revit=@(Get-CpvRevitProcesses)
 if($revit.Count){throw 'Revit must be stopped.'}
 $agents=@(Get-Process Repato.QaLaunchAgent -ErrorAction SilentlyContinue)
 if($agents.Count -ne 1 -or $agents[0].Path -ine $contract.Executable){throw 'One exact installed Launch Agent process is required.'}
