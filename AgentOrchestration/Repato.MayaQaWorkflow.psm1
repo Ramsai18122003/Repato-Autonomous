@@ -1421,7 +1421,27 @@ function New-MayaQaCandidateReplacementBuildRequest {
         foreach($name in 'mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties[$name] -and $task.$name){throw 'Recovered candidate replacement found existing native state.'}}
         $recoveredBinding=New-CpvNativeContinuationBinding -Task $task -Workflow $workflow -ExpectedTaskRevision $ExpectedTaskRevision
     }
-    $retirementReady=($retirement -and $retirement.WorkflowId -ceq $WorkflowId -and $retirement.FailedAttemptId -and $retirement.RecoveredAttemptId -and $retirement.RecoveredRunId -and $retirement.ConsumedApprovalPreserved -eq $true -and $retirement.NativeLaunchAbsent -eq $true -and $task.status -ceq 'in-progress' -and $task.workflowStage -ceq 'build-checks')
+    $retirementReady=$false
+    if($retirement -and $retirement.PSObject.Properties['RecoveredAttemptId'] -and
+        $retirement.PSObject.Properties['RecoveredRunId'] -and $retirement.PSObject.Properties['ConsumedApprovalPreserved'] -and
+        $retirement.PSObject.Properties['NativeLaunchAbsent']) {
+        $retirementReady=($retirement.WorkflowId -ceq $WorkflowId -and $retirement.FailedAttemptId -and
+            $retirement.RecoveredAttemptId -and $retirement.RecoveredRunId -and
+            $retirement.ConsumedApprovalPreserved -eq $true -and $retirement.NativeLaunchAbsent -eq $true -and
+            $task.status -ceq 'in-progress' -and $task.workflowStage -ceq 'build-checks')
+    }
+    if($retirement -and $retirement.ReconciledNativeFailure -eq $true -and $retirement.WorkflowId -ceq $WorkflowId -and
+        $retirement.FailedAttemptId -and $retirement.FailedRunId -and $retirement.FailedClaimId -and
+        $retirement.HistoricalApprovalDisposition -ceq 'expired-unconsumed' -and
+        $retirement.ReplacementNativeLaunchAbsent -eq $true -and $task.status -ceq 'in-progress' -and
+        $task.workflowStage -ceq 'build-checks') {
+        $historicalApproval=@($task.approvalRequests|Where-Object {$_.requestId -ceq $retirement.HistoricalApprovalRequestId -and $_.action -ceq 'qa-run'})
+        if($historicalApproval.Count -ne 1 -or $historicalApproval[0].status -cne 'approved' -or
+            $historicalApproval[0].consumedUtc -or (Get-MayaQaCanonicalObjectSha256 $historicalApproval[0]) -ine $retirement.HistoricalApprovalSha256) {
+            throw 'Reconciled failure retirement no longer preserves the exact expired, unconsumed approval record.'
+        }
+        $retirementReady=$true
+    }
     $legacyPassedReady=($task.status -ceq 'passed' -and $task.workflowStage -ceq 'approval')
     if($workflow.qaWorkflowId -cne $QaWorkflowId -or (!$legacyPassedReady -and !$retirementReady -and !$recoveredBinding) -or $activeAttempt -or $activeExecution){throw 'Candidate replacement build requires a supported approval, retirement, or verified recovered-preparation state, with no active attempt or execution.'}
     if(@(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count){throw 'Revit is running; candidate replacement build request is blocked.'}
@@ -1447,6 +1467,209 @@ function New-MayaQaCandidateReplacementBuildRequest {
     })[-1]
     [pscustomobject]@{TaskId=$TaskId;WorkflowId=$WorkflowId;BuildRequestId=$requestId;PreviousBuildRequestId=$prior.BuildRequest.BuildRequestId;SourceCommit=$commit;WorkflowRevision=$mutation.Workflow.workflowRevision;TaskRevision=$mutation.TaskRevision;PriorCandidateEvidencePreserved=$true;BuildStatus='requested';SideEffectsPerformed=$true}
 }
+
+function Get-MayaQaCanonicalObjectSha256 {
+    param([Parameter(Mandatory)][object]$Value)
+    $json=ConvertTo-Json -InputObject $Value -Depth 50 -Compress
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try { ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','') }
+    finally { $sha.Dispose() }
+}
+
+function Recover-MayaQaReconciledDuplicateFloorPlanFailureForCandidateReplacement {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [Parameter(Mandatory)][ValidateRange(1,[long]::MaxValue)][long]$ExpectedTaskRevision,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$FailedAttemptId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$FailedRunId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$FailedClaimId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{32}$')][string]$NativeRequestId,
+        [Parameter(Mandatory)][string]$ApprovalRequestId,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedResultSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedReportSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedModelSha256,
+        [switch]$DryRun
+    )
+
+    $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    if([long]$task.revision -ne $ExpectedTaskRevision){throw 'Duplicate FloorPlan failure recovery task revision is stale.'}
+    $retirement=if($task.PSObject.Properties['mayaQaCandidateReplacementRetirement']){$task.mayaQaCandidateReplacementRetirement}else{$null}
+    if($task.status -ceq 'in-progress' -and $task.workflowStage -ceq 'build-checks' -and
+        $retirement -and $retirement.ReconciledNativeFailure -eq $true -and
+        $retirement.FailedAttemptId -ceq $FailedAttemptId -and $retirement.FailedRunId -ceq $FailedRunId -and
+        $retirement.FailedClaimId -ceq $FailedClaimId -and $retirement.NativeRequestId -ceq $NativeRequestId -and
+        $retirement.HistoricalApprovalRequestId -ceq $ApprovalRequestId -and
+        $retirement.ResultSha256 -ieq $ExpectedResultSha256 -and
+        $retirement.ReportSha256 -ieq $ExpectedReportSha256 -and
+        $retirement.ModelSha256 -ieq $ExpectedModelSha256) {
+        return [pscustomobject]@{Status='AlreadyRecovered';TaskId=$TaskId;FailedAttemptId=$FailedAttemptId;FailedRunId=$FailedRunId;HistoricalApprovalDisposition='expired-unconsumed';FailedEvidencePreserved=$true;NativeLaunchPerformed=$false;SideEffectsPerformed=$false}
+    }
+
+    $execution=$task.mayaTaraExecution
+    $attempt=$task.mayaTaraAttempt
+    if($task.status -cne 'blocked' -or $task.workflowStage -cne 'qa' -or !$execution -or !$attempt -or
+        $execution.TaskId -cne $TaskId -or $execution.WorkflowId -cne $WorkflowId -or
+        $execution.QaWorkflowId -cne 'create-plan-views-v1' -or $execution.TestId -cne 'create-plan-views-v1' -or
+        $execution.Stage -cne 'qa-failed' -or $execution.ExecutionStatus -cne 'QaFailed' -or
+        $execution.FailureCode -cne 'duplicate-floor-plan-view-family-type' -or
+        $execution.AttemptId -cne $FailedAttemptId -or $execution.RunId -cne $FailedRunId -or
+        $attempt.AttemptId -cne $FailedAttemptId -or $attempt.RunId -cne $FailedRunId -or
+        $execution.FailedClaimId -cne $FailedClaimId -or $execution.NativeRequestId -cne $NativeRequestId -or
+        $execution.ClaimId -or $execution.ClaimOwner -or $execution.ClaimStatus -cne 'released' -or
+        $execution.TransactionStatus -cne 'NotStarted' -or $execution.RollbackStatus -cne 'NotRequired' -or
+        $execution.VerificationStatus -cne 'Failed' -or $execution.CompletionStatus -cne 'Failed' -or
+        $execution.SideEffectsPerformed -ne $false) {
+        throw 'Canonical task does not contain the exact terminal, released duplicate-FloorPlan failure.'
+    }
+    if($execution.ResultSha256 -ine $ExpectedResultSha256 -or $execution.ReportSha256 -ine $ExpectedReportSha256 -or
+        $execution.DisposableModelSha256 -ine $ExpectedModelSha256 -or
+        !$execution.RequestPath -or $execution.ResultPath -cne ($execution.RequestPath+'.result.json') -or
+        $execution.ReceiptPath -cne $execution.ResultPath -or
+        !$execution.ReportPath -or !$execution.DisposableModelPath) {
+        throw 'Canonical failure evidence or model binding does not match the supplied identities.'
+    }
+    $cleanup=$execution.CleanupEvidence
+    if($execution.CleanupStatus -cne 'Verified' -or !$cleanup -or
+        $cleanup.TaskId -cne $TaskId -or $cleanup.AttemptId -cne $FailedAttemptId -or
+        $cleanup.RunId -cne $FailedRunId -or $cleanup.ClaimId -cne $FailedClaimId -or
+        $cleanup.NativeRequestId -cne $NativeRequestId -or $cleanup.NativeProcessId -ne $execution.NativeProcessId -or
+        $cleanup.ProcessExitConfirmed -ne $true -or $cleanup.Forced -ne $false -or
+        $cleanup.ModelUnlocked -ne $true -or $cleanup.RetryAuthorized -ne $false -or
+        $cleanup.FailureClass -cne 'duplicate-floor-plan-view-family-type' -or
+        $cleanup.TransactionStatus -cne 'NotStarted' -or $cleanup.RollbackStatus -cne 'NotRequired' -or
+        $cleanup.ModelSha256 -ine $ExpectedModelSha256) {
+        throw 'Verified graceful cleanup evidence is missing or does not match the failed execution.'
+    }
+    foreach($pair in @(
+        @($execution.RequestPath,$cleanup.RequestPath,$cleanup.RequestSha256),
+        @($execution.ResultPath,$cleanup.ReceiptPath,$cleanup.ReceiptSha256),
+        @($execution.ReportPath,$cleanup.ReportPath,$cleanup.ReportSha256),
+        @($execution.DisposableModelPath,$execution.DisposableModelPath,$ExpectedModelSha256),
+        @($cleanup.JournalPath,$cleanup.JournalPath,$cleanup.JournalSha256)
+    )) {
+        if(!$pair[0] -or [IO.Path]::GetFullPath([string]$pair[0]) -ine [IO.Path]::GetFullPath([string]$pair[1]) -or
+            !(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine [string]$pair[2]) {
+            throw 'Failure request, result, report, model, or journal evidence hash validation failed.'
+        }
+    }
+    if($cleanup.ReceiptSha256 -ine $ExpectedResultSha256 -or $cleanup.ReportSha256 -ine $ExpectedReportSha256 -or
+        $cleanup.ExitVerification -cne 'terminal-journal-no-process-model-unlocked' -or
+        @(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count) {
+        throw 'Failed execution cleanup is not terminal or Revit remains active.'
+    }
+    try {
+        $request=Get-Content -LiteralPath $execution.RequestPath -Raw -ErrorAction Stop|ConvertFrom-Json -ErrorAction Stop
+        $receipt=Get-Content -LiteralPath $execution.ResultPath -Raw -ErrorAction Stop|ConvertFrom-Json -ErrorAction Stop
+        $report=Get-Content -LiteralPath $execution.ReportPath -Raw -ErrorAction Stop|ConvertFrom-Json -ErrorAction Stop
+    } catch { throw "Original native failure evidence is malformed: $($_.Exception.Message)" }
+    foreach($document in @($request,$receipt,$report)) {
+        foreach($name in 'TaskId','WorkflowId','TestId','AttemptId','RunId','ClaimId') {
+            $expected=if($name -ceq 'TestId'){$execution.TestId}elseif($name -ceq 'ClaimId'){$FailedClaimId}else{$execution.$name}
+            if([string]$document.$name -cne [string]$expected){throw "Original failure evidence identity mismatch: $name"}
+        }
+        if([string]$document.RequestId -cne $NativeRequestId){throw 'Original failure evidence native request identity mismatch.'}
+    }
+    if($request.operation -cne 'launch-revit-qa' -or $request.expiresUtc -cne $attempt.RequestExpiresUtc -or
+        [IO.Path]::GetFullPath([string]$request.modelPath) -ine [IO.Path]::GetFullPath([string]$execution.DisposableModelPath) -or
+        $request.modelSha256 -ine $ExpectedModelSha256 -or
+        $receipt.Status -cne 'Failed' -or $receipt.QaWorkflowId -cne 'create-plan-views-v1' -or
+        [IO.Path]::GetFullPath([string]$receipt.ReportPath) -ine [IO.Path]::GetFullPath([string]$execution.ReportPath) -or
+        $report.Status -cne 'Failed' -or $report.RollbackStatus -cne 'NotStarted' -or
+        [IO.Path]::GetFullPath([string]$report.DocumentPath) -ine [IO.Path]::GetFullPath([string]$execution.DisposableModelPath) -or
+        $report.AssemblyIdentity.Sha256 -ine $execution.ArtifactSha256 -or
+        @($report.Errors).Count -ne 1 -or [string]$report.Errors[0] -notmatch 'Sequence contains more than one matching element' -or
+        [string]$report.Errors[0] -notmatch 'CreatePlanViewsQaApplication\.Execute' -or
+        @($report.Assertions|Where-Object {$_.Passed -ne $true}).Count -gt 0) {
+        throw 'Original native report does not prove the exact duplicate-FloorPlan pre-transaction failure.'
+    }
+    foreach($pair in @(@($execution.AuthoritativeFixturePath,$execution.AuthoritativeFixtureSha256),
+        @($execution.FixturePreparationEvidence.RequestPath,$execution.FixturePreparationEvidence.RequestSha256),
+        @($execution.FixturePreparationEvidence.ResultPath,$execution.FixturePreparationEvidence.ResultSha256))) {
+        if(!$pair[0] -or !$pair[1] -or !(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine [string]$pair[1]) {
+            throw 'Original fixture or preparation provenance hash validation failed.'
+        }
+    }
+    $approvals=@($task.approvalRequests|Where-Object {$_.requestId -ceq $ApprovalRequestId -and $_.action -ceq 'qa-run'})
+    if($approvals.Count -ne 1){throw 'The exact historical QA approval record is missing or ambiguous.'}
+    $approval=$approvals[0]
+    $consumptionFields=@(@('consumedUtc','ConsumedAttemptId','ConsumedRunId','ConsumedNativeRequestId','ConsumptionEvidencePath'|Where-Object {
+        $property=$approval.PSObject.Properties[$_];$property -and $property.Value
+    }))
+    if($approval.status -cne 'approved' -or $approval.requiredLevel -cne 'user' -or $approval.decidedBy -cne 'user' -or
+        $consumptionFields.Count) {
+        throw 'Historical approval is not the expected approved-but-unconsumed record.'
+    }
+    $approvalExpiry=[DateTimeOffset]::MinValue;$approvalDecision=[DateTimeOffset]::MinValue;$launchTime=[DateTimeOffset]::MinValue
+    if(![DateTimeOffset]::TryParse([string]$approval.expiresUtc,[ref]$approvalExpiry) -or
+        ![DateTimeOffset]::TryParse([string]$approval.decidedUtc,[ref]$approvalDecision) -or
+        ![DateTimeOffset]::TryParse([string]$execution.LaunchedUtc,[ref]$launchTime) -or
+        $approvalExpiry -gt [DateTimeOffset]::UtcNow -or $approvalDecision -gt $approvalExpiry -or $launchTime -gt $approvalExpiry) {
+        throw 'Historical approval expiry or decision-time binding is invalid.'
+    }
+    $approvalBinding=if($approval.PSObject.Properties['executionBinding']){$approval.executionBinding}else{$approval.recoveryBinding}
+    if(!$approvalBinding -or (Get-MayaQaCanonicalObjectSha256 $approvalBinding) -ine $approval.bindingHash) {
+        throw 'Historical approval binding hash is invalid.'
+    }
+    $boundAttemptId=if($approvalBinding.PSObject.Properties['AttemptId']){$approvalBinding.AttemptId}elseif($approvalBinding.NativeContinuation){$approvalBinding.NativeContinuation.AttemptId}else{$null}
+    $boundRunId=if($approvalBinding.PSObject.Properties['RunId']){$approvalBinding.RunId}elseif($approvalBinding.NativeContinuation){$approvalBinding.NativeContinuation.RunId}else{$null}
+    if([string]$boundAttemptId -cne $FailedAttemptId -or [string]$boundRunId -cne $FailedRunId){throw 'Historical approval attempt/run binding mismatch.'}
+    foreach($pair in @(@('TaskId',$TaskId),@('WorkflowId',$WorkflowId),@('CandidateSha256',$execution.ArtifactSha256),
+        @('ModelPath',$execution.DisposableModelPath),@('ModelSha256',$ExpectedModelSha256))) {
+        if([string]$approvalBinding.($pair[0]) -ine [string]$pair[1]){throw "Historical approval binding mismatch: $($pair[0])"}
+    }
+    $approvalHash=Get-MayaQaCanonicalObjectSha256 $approval
+    if($task.PSObject.Properties['mayaTaraExecutionHistory'] -and @($task.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $FailedAttemptId}).Count){throw 'Failed attempt is already archived without a matching recovery record.'}
+    if($DryRun){return [pscustomobject]@{Status='DryRun';TaskId=$TaskId;FailedAttemptId=$FailedAttemptId;FailedRunId=$FailedRunId;HistoricalApprovalDisposition='expired-unconsumed';FailedEvidencePreserved=$true;ModelUnchanged=$true;RevitAbsent=$true;NativeLaunchPerformed=$false;SideEffectsPerformed=$false}}
+
+    Invoke-RepatoStoreMutation $StoreRoot {
+        param($current,$preview)
+        $t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution
+        $currentApproval=@($t.approvalRequests|Where-Object {$_.requestId -ceq $ApprovalRequestId})
+        if([long]$t.revision -ne $ExpectedTaskRevision -or $t.status -cne 'blocked' -or $t.workflowStage -cne 'qa' -or
+            !$x -or $x.AttemptId -cne $FailedAttemptId -or $x.RunId -cne $FailedRunId -or
+            $x.FailedClaimId -cne $FailedClaimId -or $x.NativeRequestId -cne $NativeRequestId -or
+            $x.ResultSha256 -ine $ExpectedResultSha256 -or $x.ReportSha256 -ine $ExpectedReportSha256 -or
+            $x.DisposableModelSha256 -ine $ExpectedModelSha256 -or $currentApproval.Count -ne 1 -or
+            (Get-MayaQaCanonicalObjectSha256 $currentApproval[0]) -ine $approvalHash) {
+            throw 'Duplicate FloorPlan failure recovery compare-and-swap failed.'
+        }
+        $archive=[pscustomobject]$x
+        $archive|Add-Member NoteProperty CandidateReplacementArchivedUtc (Get-RepatoUtc) -Force
+        $archive|Add-Member NoteProperty HistoricalApprovalRequestId $ApprovalRequestId -Force
+        $archive|Add-Member NoteProperty HistoricalApprovalDisposition 'expired-unconsumed' -Force
+        if($t.PSObject.Properties.Name -notcontains 'mayaTaraExecutionHistory'){$t|Add-Member NoteProperty mayaTaraExecutionHistory ([object[]]@()) -Force}
+        $t.mayaTaraExecutionHistory=[object[]]@($t.mayaTaraExecutionHistory)+$archive
+        if($t.PSObject.Properties.Name -notcontains 'mayaTaraAttemptHistory'){$t|Add-Member NoteProperty mayaTaraAttemptHistory ([object[]]@()) -Force}
+        $archivedAttempt=[pscustomobject]$t.mayaTaraAttempt
+        $archivedAttempt|Add-Member NoteProperty CandidateReplacementArchivedUtc (Get-RepatoUtc) -Force
+        $t.mayaTaraAttemptHistory=[object[]]@($t.mayaTaraAttemptHistory)+$archivedAttempt
+        if($t.mayaTaraQaPacket){
+            if($t.PSObject.Properties.Name -notcontains 'mayaTaraQaPacketHistory'){$t|Add-Member NoteProperty mayaTaraQaPacketHistory ([object[]]@()) -Force}
+            $t.mayaTaraQaPacketHistory=[object[]]@($t.mayaTaraQaPacketHistory)+[pscustomobject]$t.mayaTaraQaPacket
+        }
+        $t.mayaTaraAttempt=$null;$t.mayaTaraExecution=$null;$t.mayaTaraQaPacket=$null
+        if($t.PSObject.Properties.Name -contains 'mayaTaraExecutionEvidence'){$t.mayaTaraExecutionEvidence=$null}
+        $replacementRetirement=[pscustomobject][ordered]@{
+            WorkflowId=$WorkflowId;FailedAttemptId=$FailedAttemptId;FailedRunId=$FailedRunId;FailedClaimId=$FailedClaimId
+            NativeRequestId=$NativeRequestId;HistoricalApprovalRequestId=$ApprovalRequestId
+            HistoricalApprovalDisposition='expired-unconsumed';HistoricalApprovalSha256=$approvalHash
+            ReconciledNativeFailure=$true;ReplacementNativeLaunchAbsent=$true
+            ResultSha256=$ExpectedResultSha256;ReportSha256=$ExpectedReportSha256;ModelSha256=$ExpectedModelSha256
+            RetiredUtc=Get-RepatoUtc
+        }
+        if($t.PSObject.Properties['mayaQaCandidateReplacementRetirement']){$t.mayaQaCandidateReplacementRetirement=$replacementRetirement}
+        else{$t|Add-Member NoteProperty mayaQaCandidateReplacementRetirement $replacementRetirement -Force}
+        $t.status='in-progress';$t.workflowStage='build-checks';$t.errorDetails=$null
+        Add-RepatoHistory $t 'maya-tara-reconciled-duplicate-floor-plan-failure-archived' 'Maya' "attempt=$FailedAttemptId; run=$FailedRunId; claim=$FailedClaimId; request=$NativeRequestId; approval=$ApprovalRequestId preserved expired and unconsumed; failure evidence retained; no retry or native launch"
+        [pscustomobject]@{Status='Recovered';TaskId=$TaskId;WorkflowId=$WorkflowId;FailedAttemptId=$FailedAttemptId;FailedRunId=$FailedRunId;FailedClaimId=$FailedClaimId;HistoricalApprovalDisposition='expired-unconsumed';ApprovalRecordPreserved=$true;FailedEvidencePreserved=$true;TaskStage='build-checks';NativeLaunchPerformed=$false}
+    }
+}
+
 function Resolve-MayaQaRequestWorkflow {
     param([Parameter(Mandatory)][string]$Request)
     $text=$Request.Trim().ToLowerInvariant()
@@ -2061,7 +2284,9 @@ function Get-MayaQaTrustedBuildSourceCommit {
 
 function Resolve-MayaQaAuthenticatedBuildSource {
     param([object]$AuthenticatedBuildSource)
-    $primary=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $commonGitDirectory=(& git -C $PSScriptRoot rev-parse --path-format=absolute --git-common-dir 2>$null).Trim()
+    if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonGitDirectory)){throw 'Primary repository identity could not be resolved for authenticated build-source validation.'}
+    $primary=[IO.Path]::GetFullPath((Split-Path -Parent $commonGitDirectory))
     if($null -eq $AuthenticatedBuildSource){return [pscustomobject]@{RepositoryRoot=$primary;ProjectPath=[IO.Path]::GetFullPath((Join-Path $primary 'Forma.RevitConnector.csproj'));ExpectedSourceCommit=$null;Isolated=$false}}
     foreach($n in 'RepositoryRoot','ExpectedSourceCommit','ProjectRelativePath'){
         if($AuthenticatedBuildSource.PSObject.Properties.Name -notcontains $n -or [string]::IsNullOrWhiteSpace([string]$AuthenticatedBuildSource.$n)){throw "AuthenticatedBuildSource is missing $n."}
@@ -2078,6 +2303,19 @@ function Resolve-MayaQaAuthenticatedBuildSource {
     $project=[IO.Path]::GetFullPath((Join-Path $root $projectRel));$prefix=$root.TrimEnd('\')+'\';if(!$project.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $project -PathType Leaf)){throw 'Authenticated project path is outside or missing from the worktree.'}
     if((Get-Item -LiteralPath $project -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Authenticated project path is a reparse point.'}
     [pscustomobject]@{RepositoryRoot=$root;ProjectPath=$project;ExpectedSourceCommit=[string]$AuthenticatedBuildSource.ExpectedSourceCommit;Isolated=$true}
+}
+
+function Get-MayaQaActiveCanonicalExecutionApprovals {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Approvals)
+    $active=@()
+    foreach($approval in $Approvals) {
+        if($approval.action -cne 'qa-run' -or
+            ($approval.status -cne 'pending' -and !($approval.status -ceq 'approved' -and !$approval.consumedUtc))) { continue }
+        $expiry=[DateTimeOffset]::MinValue
+        if(![DateTimeOffset]::TryParse([string]$approval.expiresUtc,[ref]$expiry)){throw 'An active QA approval has an invalid expiry and cannot be safely superseded.'}
+        if($expiry -gt [DateTimeOffset]::UtcNow){$active+=,$approval}
+    }
+    ,$active
 }
 
 function Test-MayaQaFrozenCandidate {
@@ -2508,7 +2746,8 @@ function Request-MayaQaCanonicalExecutionApproval {
     if(!$task -or $workflow.qaBuildStatus -cne 'succeeded' -or !$e -or $e.BuildRequestId -cne $BuildRequestId -or $e.BuildStatus -cne 'succeeded' -or $e.EvidenceSource -cne 'FrozenCandidate' -or $e.SourceCommit -cne $CandidateSourceCommit -or $e.CandidateSourceCommit -cne $CandidateSourceCommit -or $e.ArtifactSha256 -ine $CandidateSha256){throw 'Canonical approval candidate identity is invalid.'}
     if($e.DeploymentValidation -ne $true -or $e.ManifestIntegrityValidation -ne $true -or $e.QaIsolation -ne $true){throw 'Candidate deployment validation, manifest integrity, and isolation must pass before approval.'}
     if($task.status -cne 'in-progress' -or $task.workflowStage -cne 'qa'){throw 'Canonical execution approval requires the validated in-progress QA-ready state.'}
-    if(@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and ($_.status -ceq 'pending' -or ($_.status -ceq 'approved' -and !$_.consumedUtc))}).Count){throw 'An active or previously approved QA request prevents fresh approval creation.'}
+    $activeQaApprovals=@(Get-MayaQaActiveCanonicalExecutionApprovals -Approvals @($task.approvalRequests))
+    if($activeQaApprovals.Count){throw 'An active or previously approved QA request prevents fresh approval creation.'}
     foreach($n in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){if($task.PSObject.Properties.Name -contains $n -and $task.$n){throw 'Canonical execution approval found existing Tara execution state.'}}
     if($task.PSObject.Properties.Name -contains 'taraRuns' -and @($task.taraRuns|Where-Object {$_ -and $_.status -in @('running','passed','completed')}).Count){throw 'Canonical execution approval found existing native QA execution.'}
     if(@(Get-Process Revit -ErrorAction SilentlyContinue).Count){throw 'Canonical execution approval requires Revit to be stopped.'}
@@ -3487,6 +3726,7 @@ Export-ModuleMember -Function Request-MayaQaRecoveredNativeFailureApproval
 Export-ModuleMember -Function Request-MayaQaRecoveredExpiredAttemptApproval
 Export-ModuleMember -Function Repair-MayaQaExpiredPreparedApprovalHistory
 Export-ModuleMember -Function Repair-MayaQaCanonicalRunIdentity
+Export-ModuleMember -Function Recover-MayaQaReconciledDuplicateFloorPlanFailureForCandidateReplacement
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)

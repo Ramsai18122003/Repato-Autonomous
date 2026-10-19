@@ -29,3 +29,9 @@ These are integrity/correlation checks, not digital signatures. Acceptance still
 6. Record the evidence paths and hashes, exact human observations, and current task revision. If the result remains unknown, stop. A later run requires the supported recovery workflow, a fresh attempt, and fresh human authorization; the expired request is never reused.
 
 The reconciler may be run only against the canonical store and the explicit evidence root as a read-only diagnostic. Synthetic regression coverage is `AgentOrchestration/Test-QaNativeDispositionReadOnly.ps1` and uses a unique temporary store only.
+
+## Replacing the reconciled duplicate-FloorPlan candidate
+
+`Recover-MayaQaReconciledDuplicateFloorPlanFailureForCandidateReplacement` is limited to the exact terminal `duplicate-floor-plan-view-family-type` failure. It requires the current task revision and matching task, workflow, attempt, run, released claim, native request, receipt, report, candidate, and model identities. It re-hashes the original request/result/report/model, fixture-preparation evidence, and shutdown journal; verifies the recorded graceful process exit, absence of Revit, `TransactionStatus=NotStarted`, and `RollbackStatus=NotRequired`; and compares the report's failure stack and assembly identity. Empty element-ID arrays are not sufficient evidence of no side effects.
+
+The transition archives the failed execution and attempt without changing their failure status, clears only the active QA pointers, and advances to `in-progress/build-checks` for supported candidate replacement. It preserves the expired approval record byte-for-byte at the object level and records it as `expired-unconsumed`; it must never manufacture consumption or reuse that approval. A fresh QA approval request is blocked only by pending or approved, unconsumed QA approvals whose expiry is still in the future. Invalid expiry data fails closed. Replaying the exact transition is read-only and idempotent.
