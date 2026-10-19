@@ -3,7 +3,7 @@
     <OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
     <AssemblyName>Repato.QaLaunchAgent</AssemblyName>
-    <Version>1.0.19+05933ab8b587</Version>
+    <Version>1.0.20+09eef230b24bd1169da8b99e2bdf9b5d3b32c40e</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup><PackageReference Include="System.IO.Pipes.AccessControl" Version="6.0.0-preview.5.21301.5" /></ItemGroup>
