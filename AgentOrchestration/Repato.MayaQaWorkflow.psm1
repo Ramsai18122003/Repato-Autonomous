@@ -2141,7 +2141,11 @@ function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation {
     if($candidate.RunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Authenticated runner source evidence is invalid.'}
     $health=if($HealthInvoker){& $HealthInvoker}else{Invoke-MayaQaLaunchAgentHealth}
     if(!$health.Ready -or $health.User -ine 'RAMSAI\RepatoQA' -or $health.SID -cne 'S-1-5-21-1031246752-3872016183-2454652381-1015' -or [int]$health.SessionId -le 0 -or !$health.UserInteractive){throw 'Launch Agent health contract failed.'}
-    $pre=if($PreflightInvoker){& $PreflightInvoker}else{Invoke-MayaQaLaunchAgentPreflightReadonly}
+    $pre=if($PreflightInvoker){
+        & $PreflightInvoker $candidate $TaskId $WorkflowId $QaWorkflowId $TestId $ExpectedCandidateSourceCommit $ExpectedCandidateSha256
+    }else{
+        Invoke-MayaQaLaunchAgentPreflightReadonly -CandidateEvidence $candidate -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256
+    }
     if($pre.ExecutionIdentity -ine 'RAMSAI\RepatoQA' -or [IO.Path]::GetFullPath($pre.RunnerManifestPath) -ine [IO.Path]::GetFullPath($ExpectedRunnerManifestPath) -or $pre.ExpectedRunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Launch Agent preflight contract failed.'}
     if(!$pre.Succeeded){
         $failed=@($pre.Checks|Where-Object {!$_.passed})
@@ -2149,7 +2153,11 @@ function Invoke-MayaQaCanonicalFrozenCandidateStagingValidation {
     }
     $stage=if($StagingInvoker){& $StagingInvoker $candidate}else{Invoke-MayaQaLaunchAgentFrozenCandidateStaging -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256 -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateEvidence $candidate -TaskId $TaskId -WorkflowId $WorkflowId}
     if(!$stage.succeeded -or $stage.candidateCommit -cne $ExpectedCandidateSourceCommit -or $stage.candidateSha256 -ine $ExpectedCandidateSha256 -or $stage.qaWorkflowId -cne $QaWorkflowId -or $stage.testId -cne $TestId -or !$stage.isolationPassed -or ($stage.PSObject.Properties.Name -contains 'taskId' -and $stage.taskId -cne $TaskId) -or ($stage.PSObject.Properties.Name -contains 'workflowId' -and $stage.workflowId -cne $WorkflowId)){throw 'Fresh staging response failed canonical validation.'}
-    $post=if($PreflightInvoker){& $PreflightInvoker}else{Invoke-MayaQaLaunchAgentPreflightReadonly}
+    $post=if($PreflightInvoker){
+        & $PreflightInvoker $candidate $TaskId $WorkflowId $QaWorkflowId $TestId $ExpectedCandidateSourceCommit $ExpectedCandidateSha256
+    }else{
+        Invoke-MayaQaLaunchAgentPreflightReadonly -CandidateEvidence $candidate -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId $QaWorkflowId -TestId $TestId -CandidateCommit $ExpectedCandidateSourceCommit -ExpectedCandidateSha256 $ExpectedCandidateSha256
+    }
     $postCandidateMismatch=Test-MayaQaPostStageCandidateHashMismatch -Preflight $post -ExpectedCandidateSha256 $ExpectedCandidateSha256
     if((!$post.Succeeded -and !$postCandidateMismatch) -or $post.ExecutionIdentity -ine 'RAMSAI\RepatoQA' -or [IO.Path]::GetFullPath($post.RunnerManifestPath) -ine [IO.Path]::GetFullPath($ExpectedRunnerManifestPath) -or $post.ExpectedRunnerManifestSha256 -ine $ExpectedRunnerManifestSha256){throw 'Post-staging Launch Agent preflight contract failed.'}
     $currentTask=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
