@@ -400,4 +400,4 @@ Reject(() =>
     TestSafetyGateProvenance.Verify(sidecar, "not-hex", "not-hex");
 }, "invalid sourceSha256 format rejected");
 
-Console.WriteLine("Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations, preparation-aware safety gate provenance (25 assertions).");
+Console.WriteLine($"Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations, preparation-aware safety gate provenance (25 assertions); recovered provenance ({RecoveredProvenanceTests.Run()} assertions).");

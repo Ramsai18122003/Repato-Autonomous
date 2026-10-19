@@ -17,8 +17,10 @@ internal static class CreatePlanViewsPreparationEvidenceContract
             !Hash(request.FixturePreparationResultPath).Equals(request.FixturePreparationResultSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Correlated fixture-preparation request/result SHA-256 mismatch.");
 
+        bool recovered = request.RecoveredProvenancePath.Length != 0;
+        if (recovered) RecoveredFixtureProvenance.Resolve(disposableModelPath, request);
         CreatePlanViewsFixturePreparationRequest preparationRequest = CreatePlanViewsFixturePreparationRequest.Parse(
-            File.ReadAllText(request.FixturePreparationRequestPath), request.FixturePreparationRequestPath);
+            File.ReadAllText(request.FixturePreparationRequestPath), request.FixturePreparationRequestPath, allowExpiredEvidence: recovered);
         using JsonDocument resultDocument = JsonDocument.Parse(File.ReadAllText(request.FixturePreparationResultPath));
         JsonElement result = resultDocument.RootElement;
         string Text(string name) => result.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String

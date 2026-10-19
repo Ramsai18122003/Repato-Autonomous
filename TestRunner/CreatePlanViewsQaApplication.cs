@@ -281,7 +281,7 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
             string preparationResultPath = QAPathPolicy.ValidatePreparationEvidencePath(request.FixturePreparationResultPath, QAPathPolicy.RunsRoot);
             CreatePlanViewsPreparationEvidenceContract.Verify(request, fixture, model);
             string sidecar = QAPathPolicy.ValidatePath(model + ".fixture.json", QAPathPolicy.RunsRoot, false);
-            using (var provenance = JsonDocument.Parse(File.ReadAllText(sidecar)))
+            using (var provenance = JsonDocument.Parse(RecoveredFixtureProvenance.Resolve(model, request).GetRawText()))
             {
                 JsonElement root = provenance.RootElement;
                 string expectedFixture = ToolQaRegistry.LoadBuiltIn().Get(CreatePlanViewsRequest.Test).FixtureSpecId;

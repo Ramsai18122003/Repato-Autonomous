@@ -74,21 +74,29 @@ public sealed class LaunchCoordinator(QaAgentOptions options, IIdentitySessionPr
 
     public QaPreflightResponse HandlePreflight(QaPreflightRequest? request)
     {
-        var user = WindowsIdentity.GetCurrent().Name;
+        var user = identity.User;
         var root = Path.Combine(options.QaProfileRoot, "RepatoQA");
         var manifest = Path.Combine(Directory.GetParent(root)!.FullName, "Repato.CreatePlanViews.TestRunner.addin");
         var dll = Path.Combine(root, "Repato.Revit.dll");
         var checks = new List<QaPreflightCheck>();
+        var validRequest = QaLaunchPolicy.IsValidPreflightRequest(request);
+        checks.Add(new("request-bindings", validRequest, validRequest ? "verified" : "rejected", null, null));
+        var validIdentity = identity.User.Equals(options.ExpectedUser, StringComparison.OrdinalIgnoreCase) && identity.Sid == options.ExpectedUserSid && identity.Interactive;
+        checks.Add(new("agent-identity", validIdentity, validIdentity ? "verified" : "rejected", null, null));
+        // Only a fully validated task-bound candidate may replace the historical default pin.
+        var evidence = validRequest ? request?.CandidateEvidence : null;
+        var candidateHash = evidence?.CandidateDllSha256 ?? QaLaunchPolicy.FrozenCandidateSha256;
+        var candidatePath = evidence?.CandidateDllPath ?? QaLaunchPolicy.StagingCandidateDirectory + "\\Repato.Revit.dll";
         checks.Add(CheckDirectory("qa-profile-root", root));
         checks.Add(CheckFile("runner-manifest-exists", manifest, null, false));
         checks.Add(CheckFile("runner-manifest-readable", manifest, null, false));
         checks.Add(CheckFile("runner-manifest-integrity", manifest, "AF4DBFA78E61524DE7BD3B84178C6B70ED8D29D0A95BA17780826E09BE689D4F", true));
         checks.Add(CheckFile("deployed-candidate-dll-exists", dll, null, false));
         checks.Add(CheckFile("deployed-candidate-dll-readable", dll, null, false));
-        checks.Add(CheckFile("deployed-candidate-dll-integrity", dll, QaLaunchPolicy.FrozenCandidateSha256, true));
+        checks.Add(CheckFile("deployed-candidate-dll-integrity", dll, candidateHash, true));
         checks.Add(CheckDirectory("qa-test-runs", options.RuntimeRoot));
         checks.Add(CheckFile("revit-executable", options.RevitExe, null, false));
-        checks.Add(CheckFile("frozen-candidate", QaLaunchPolicy.StagingCandidateDirectory + "\\Repato.Revit.dll", QaLaunchPolicy.FrozenCandidateSha256, true));
+        checks.Add(CheckFile("frozen-candidate", candidatePath, candidateHash, true));
         checks.Add(CheckFile("authoritative-fixture", @"C:\Repato-Autonomous\Source\QA\Fixtures\CreatePlanViewsEmpty.rvt", "92CC9E434E2C4DD6720A2AA564E19F4E1A30EB3DA63CEA73CF737F875B9EDD45", true));
         checks.Add(CheckFile("isolation-policy", @"C:\Repato-Autonomous\Source\QA\MachineWideAddins.allowlist.json", null, false));
         checks.Add(CheckDirectory("qa-reports", @"C:\Repato-Autonomous\Source\QA\Reports"));

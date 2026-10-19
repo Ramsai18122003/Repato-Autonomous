@@ -35,7 +35,7 @@ internal static class TestSafetyGate
         );
 
         string sidecarPath = QAPathPolicy.ValidatePath(path + ".fixture.json", RunsRoot, false);
-        using var json = JsonDocument.Parse(File.ReadAllText(sidecarPath));
+        using var json = JsonDocument.Parse(RecoveredFixtureProvenance.Resolve(path, request).GetRawText());
         string fixtureId = json.RootElement.GetProperty("fixtureId").GetString() ?? "";
         string expectedHash = json.RootElement.GetProperty("sourceSha256").GetString() ?? "";
         if (requiredFixtureId is not null && !string.Equals(fixtureId, requiredFixtureId, StringComparison.Ordinal))

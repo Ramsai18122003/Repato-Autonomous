@@ -16,7 +16,7 @@ internal sealed record CreatePlanViewsFixturePreparationRequest(
     string OutputPath,
     DateTimeOffset ExpiresUtc)
 {
-    internal static CreatePlanViewsFixturePreparationRequest Parse(string json, string actualRequestPath)
+    internal static CreatePlanViewsFixturePreparationRequest Parse(string json, string actualRequestPath, bool allowExpiredEvidence = false)
     {
         using JsonDocument document = JsonDocument.Parse(json);
         JsonElement root = document.RootElement;
@@ -45,7 +45,7 @@ internal sealed record CreatePlanViewsFixturePreparationRequest(
         if (!Path.GetDirectoryName(modelPath)!.Equals(requestDirectory, StringComparison.OrdinalIgnoreCase) ||
             !Path.GetDirectoryName(outputPath)!.Equals(requestDirectory, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Fixture preparation request, model, and output must share one attempt directory.");
-        if (expiresUtc <= DateTimeOffset.UtcNow)
+        if (!allowExpiredEvidence && expiresUtc <= DateTimeOffset.UtcNow)
             throw new InvalidOperationException("Fixture preparation request expired.");
         return new(taskId, workflowId, attemptId, runId, declaredRequestPath, modelPath, modelSha256.ToUpperInvariant(),
             selectedManifestPath, selectedManifestSha256.ToUpperInvariant(), outputPath, expiresUtc);

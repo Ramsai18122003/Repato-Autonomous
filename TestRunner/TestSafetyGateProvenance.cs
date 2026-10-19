@@ -58,8 +58,9 @@ internal static class TestSafetyGateProvenance
                 !string.Equals(prepReqHash.GetString(), request.FixturePreparationRequestSha256, StringComparison.OrdinalIgnoreCase) ||
                 !Path.GetFullPath(prepResPath.GetString()!).Equals(Path.GetFullPath(request.FixturePreparationResultPath), StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(prepResHash.GetString(), request.FixturePreparationResultSha256, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(prepAttemptId.GetString(), request.AttemptId, StringComparison.Ordinal) ||
-                !string.Equals(prepRunId.GetString(), request.RunId, StringComparison.Ordinal) ||
+                (request.RecoveredProvenancePath.Length == 0 &&
+                 (!string.Equals(prepAttemptId.GetString(), request.AttemptId, StringComparison.Ordinal) ||
+                  !string.Equals(prepRunId.GetString(), request.RunId, StringComparison.Ordinal))) ||
                 !string.Equals(prepAttemptId.GetString(), request.FixturePreparationAttemptId, StringComparison.Ordinal) ||
                 !string.Equals(prepRunId.GetString(), request.FixturePreparationRunId, StringComparison.Ordinal))
                 throw new InvalidOperationException("Preparation sidecar provenance does not match the authenticated QA request identity and evidence.");

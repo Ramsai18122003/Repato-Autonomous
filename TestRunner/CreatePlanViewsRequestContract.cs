@@ -12,7 +12,8 @@ internal sealed record CreatePlanViewsRequest(
     string FixtureSha256, string FixturePreparationRequestPath, string FixturePreparationRequestSha256,
     string FixturePreparationResultPath, string FixturePreparationResultSha256,
     string FixturePreparationAttemptId, string FixturePreparationRunId,
-    string ManifestPath, string ManifestSha256, DateTimeOffset ExpiresUtc)
+    string ManifestPath, string ManifestSha256, DateTimeOffset ExpiresUtc,
+    string RecoveredProvenancePath = "", string RecoveredProvenanceSha256 = "")
 {
     internal const string Test = "create-plan-views-v1";
     internal const string RunnerIdentity = "Repato.Revit.TestRunner.CreatePlanViewsQaApplication";
@@ -32,7 +33,12 @@ internal sealed record CreatePlanViewsRequest(
             Text("fixturePreparationRequestPath"), Text("fixturePreparationRequestSha256"),
             Text("fixturePreparationResultPath"), Text("fixturePreparationResultSha256"),
             Text("fixturePreparationAttemptId"), Text("fixturePreparationRunId"),
-            Text("manifestPath"), Text("manifestSha256"), expires);
+            Text("manifestPath"), Text("manifestSha256"), expires,
+            root.TryGetProperty("recoveredProvenancePath", out _) ? Text("recoveredProvenancePath") : "",
+            root.TryGetProperty("recoveredProvenanceSha256", out _) ? Text("recoveredProvenanceSha256") : "");
+        if ((request.RecoveredProvenancePath.Length != 0 || request.RecoveredProvenanceSha256.Length != 0) &&
+            (!Path.IsPathFullyQualified(request.RecoveredProvenancePath) || !IsHash(request.RecoveredProvenanceSha256)))
+            throw new InvalidDataException("Recovered provenance requires a fully qualified path and bound SHA-256.");
         if (version != 2 || root.GetProperty("operation").GetString() != "launch-revit-qa" ||
             !Guid.TryParseExact(request.RequestId, "N", out _) || !Guid.TryParseExact(request.AttemptId, "N", out _) ||
             !Guid.TryParseExact(request.RunId, "N", out _) || !Guid.TryParseExact(request.ClaimId, "N", out _) ||

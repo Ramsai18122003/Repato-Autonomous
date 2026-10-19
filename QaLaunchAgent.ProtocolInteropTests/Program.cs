@@ -62,6 +62,7 @@ var rq=JsonSerializer.Deserialize<QaLaunchRequest>(camelJson, QaLaunchPolicy.Jso
 if(rq.SchemaVersion!=2||rq.Operation!=QaLaunchPolicy.Operation||rq.RequestId!=request.RequestId||rq.AttemptId!=request.AttemptId)throw new Exception("Request interoperability failed.");
 var integrityRequest = request with { RequestSha256 = QaLaunchPolicy.CanonicalRequestSha256(camelJson) };
 StartupContractTests.Run(integrityRequest);
+ReadonlyCandidatePreflightTests.Run(integrityRequest);
 if (!Guid.TryParse(integrityRequest.RequestId, out _)) throw new Exception("Synthetic launch request ID must be a GUID.");
 var runLabelRequest = integrityRequest with { RequestId = "qa-run-ec774245da5341549b5d8c8a90d062b8", RunId = "qa-run-ec774245da5341549b5d8c8a90d062b8" };
 if (QaLaunchPolicy.IsValidRequest(runLabelRequest, DateTimeOffset.UtcNow)) throw new Exception("Run label was incorrectly accepted as the transport request ID.");

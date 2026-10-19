@@ -9,7 +9,7 @@ public sealed record QaLaunchRequest(
     string WorkflowId, string QaWorkflowId, string TestId, string AttemptId,
     string RunId, string ClaimId, string RequestPath, string RequestSha256,
     string ModelPath, string ModelSha256, string ManifestPath,
-    string ManifestSha256, DateTimeOffset ExpiresUtc);
+    string ManifestSha256, DateTimeOffset ExpiresUtc, string? RecoveredProvenancePath = null, string? RecoveredProvenanceSha256 = null);
 
 public sealed record QaLaunchResponse(
     int SchemaVersion, string RequestId, bool Accepted, int? Pid, string? User,
@@ -25,7 +25,9 @@ public sealed record QaLaunchResponseV2(
 
 public sealed record QaHealthRequest(int SchemaVersion, string Operation);
 public sealed record QaHealthResponse(int SchemaVersion, string Operation, bool Ready, string User, string Sid, int SessionId, bool Interactive, string? FailureCode);
-public sealed record QaPreflightRequest(int SchemaVersion, string Operation);
+public sealed record QaPreflightRequest(int SchemaVersion, string Operation, string? TaskId = null, string? WorkflowId = null,
+    string? QaWorkflowId = null, string? TestId = null, string? CandidateCommit = null,
+    string? ExpectedCandidateSha256 = null, QaCandidateEvidence? CandidateEvidence = null);
 public sealed record QaPreflightCheck(string Name, bool Passed, string Status, string? Path, string? Detail);
 public sealed record QaPreflightResponse(int SchemaVersion, string Operation, bool Succeeded, string ExecutionIdentity, string QaAddinRoot, string RunnerManifestPath, string ExpectedRunnerManifestSha256, IReadOnlyList<QaPreflightCheck> Checks, string? FailureCode);
 public sealed record QaCandidateEvidence(
@@ -99,6 +101,18 @@ public static class QaLaunchPolicy
         }
         catch { return false; }
     }
+    public static bool IsValidPreflightRequest(QaPreflightRequest? request)
+    {
+        if (request is null || request.SchemaVersion != SchemaVersion || request.Operation != PreflightOperation) return false;
+        if (request.CandidateEvidence is null)
+            return request.TaskId is null && request.WorkflowId is null && request.QaWorkflowId is null && request.TestId is null && request.CandidateCommit is null && request.ExpectedCandidateSha256 is null;
+        var evidence = request.CandidateEvidence;
+        return request.QaWorkflowId == "create-plan-views-v1" && request.TestId == request.QaWorkflowId &&
+            request.CandidateCommit == evidence.CandidateSourceCommit &&
+            string.Equals(request.ExpectedCandidateSha256, evidence.CandidateDllSha256, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(evidence.RunnerManifestSha256, ExpectedRunnerManifestSha256, StringComparison.OrdinalIgnoreCase) &&
+            IsValidCandidateEvidence(evidence, request.TaskId ?? "", request.WorkflowId ?? "", request.QaWorkflowId, request.TestId);
+    }
     private static bool Under(string path, string root) => path.StartsWith(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
     public static bool HasValidDeploymentManifestEvidence(QaDeploymentValidationResponse? response)
@@ -118,7 +132,20 @@ public static class QaLaunchPolicy
         !string.IsNullOrWhiteSpace(r.ClaimId) && !string.IsNullOrWhiteSpace(r.RequestPath) &&
         !string.IsNullOrWhiteSpace(r.ModelPath) && !string.IsNullOrWhiteSpace(r.ManifestPath) &&
         IsSha256(r.RequestSha256) && IsSha256(r.ModelSha256) && IsSha256(r.ManifestSha256) &&
-        AllowedQaWorkflows.Contains(r.QaWorkflowId) && r.TestId == r.QaWorkflowId && r.ExpiresUtc > now;
+        AllowedQaWorkflows.Contains(r.QaWorkflowId) && r.TestId == r.QaWorkflowId && r.ExpiresUtc > now &&
+        IsValidRecoveredProvenanceBinding(r);
+
+    public static bool IsValidRecoveredProvenanceBinding(QaLaunchRequest r)
+    {
+        if (r.RecoveredProvenancePath is null && r.RecoveredProvenanceSha256 is null) return true;
+        if (r.RecoveredProvenancePath != r.ModelPath + ".recovered.fixture.json" || !IsSha256(r.RecoveredProvenanceSha256!)) return false;
+        try
+        {
+            RevitCpvPreparationBoundary.NoLinks(r.RecoveredProvenancePath);
+            return Hash(r.RecoveredProvenancePath).Equals(r.RecoveredProvenanceSha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
 
     private static bool IsSha256(string value) => value is not null && value.Length == 64 && value.All(Uri.IsHexDigit);
 }
