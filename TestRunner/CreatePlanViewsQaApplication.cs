@@ -350,8 +350,10 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
             .ToArray();
         if (levels.Any(level => level is null)) throw new InvalidOperationException("Required levels 0, 1, and 2 are not present in the controlled fixture.");
         report.Assert("required-levels-present", true, new[] { "0", "1", "2" }, levels.Select(level => level!.Name).ToArray());
-        ViewFamilyType floorPlanType = new FilteredElementCollector(document).OfClass(typeof(ViewFamilyType)).Cast<ViewFamilyType>()
-            .SingleOrDefault(type => type.ViewFamily == ViewFamily.FloorPlan) ?? throw new InvalidOperationException("Floor-plan view family type is unavailable.");
+        ViewFamilyType[] floorPlanTypes = new FilteredElementCollector(document).OfClass(typeof(ViewFamilyType)).Cast<ViewFamilyType>()
+            .Where(type => type.ViewFamily == ViewFamily.FloorPlan).ToArray();
+        ElementId defaultFloorPlanTypeId = document.GetDefaultElementTypeId(ElementTypeGroup.ViewTypeFloorPlan);
+        ViewFamilyType floorPlanType = ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Id == defaultFloorPlanTypeId);
         ViewPlan template = new FilteredElementCollector(document).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()
             .SingleOrDefault(view => view.IsTemplate && view.Name.Contains("Architectural", StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Architectural view template is unavailable.");

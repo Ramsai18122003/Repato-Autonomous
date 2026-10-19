@@ -4,6 +4,18 @@ using Repato.Revit.TestRunner;
 static void Check(bool value, string reason) { if (!value) throw new InvalidOperationException("FAILED: " + reason); }
 static void Reject(Action action, string reason) { try { action(); } catch { return; } throw new InvalidOperationException("FAILED: " + reason); }
 
+var duplicateFloorPlanTypes = new[]
+{
+    (Id: 1, Family: "FloorPlan"),
+    (Id: 2, Family: "FloorPlan"),
+    (Id: 3, Family: "CeilingPlan")
+};
+var floorPlanTypes = duplicateFloorPlanTypes.Where(type => type.Family == "FloorPlan").ToArray();
+var selectedFloorPlanType = ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Id == 2);
+Check(selectedFloorPlanType.Id == 2, "multiple floor-plan family types resolve to the configured default");
+Reject(() => ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Id == 4), "missing default floor-plan family type is rejected");
+Reject(() => ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Family == "FloorPlan"), "ambiguous default floor-plan family type is rejected");
+
 string pathPolicyRoot = Path.Combine(Path.GetTempPath(), "repato-runner-path-policy-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(pathPolicyRoot);
 try
@@ -400,4 +412,4 @@ Reject(() =>
     TestSafetyGateProvenance.Verify(sidecar, "not-hex", "not-hex");
 }, "invalid sourceSha256 format rejected");
 
-Console.WriteLine($"Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations, preparation-aware safety gate provenance (25 assertions); recovered provenance ({RecoveredProvenanceTests.Run()} assertions).");
+Console.WriteLine($"Create Plan Views runner contract tests passed: request parsing/binding, result identity, failed reporting, canonical verifier expectations, preparation-aware safety gate provenance (28 assertions); recovered provenance ({RecoveredProvenanceTests.Run()} assertions).");
