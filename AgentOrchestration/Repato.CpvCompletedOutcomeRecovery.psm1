@@ -1,8 +1,10 @@
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvRecoveredProvenance.psm1') -WarningAction SilentlyContinue
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
-Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationRecovery.psm1') -Force -WarningAction SilentlyContinue
+# Reuse loaded dependencies. Forcing their reload here unloads the installer's
+# already imported Maya health API when the retained-reservation gate is reached.
+Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -WarningAction SilentlyContinue
+Import-Module (Join-Path $PSScriptRoot 'Repato.CpvPreparationRecovery.psm1') -WarningAction SilentlyContinue
 
 $script:CpvOutcomeRecoveryOperation = 'cpv-preparation-recover-completed'
 $script:CpvOutcomeRecoveryStatusOperation = 'cpv-preparation-recover-completed-status'
