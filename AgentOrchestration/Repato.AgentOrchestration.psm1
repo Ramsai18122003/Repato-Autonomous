@@ -55,10 +55,35 @@ function Assert-RepatoTask($Task) {
     }
 }
 
+function Restore-RepatoTaskStoreDateMarkers($Value,[hashtable]$Markers) {
+    if($null -eq $Value){return $null}
+    if($Value -is [string] -and $Markers.ContainsKey($Value)){return $Markers[$Value]}
+    if($Value -is [array]){
+        for($i=0;$i -lt $Value.Count;$i++){$Value[$i]=Restore-RepatoTaskStoreDateMarkers $Value[$i] $Markers}
+        return ,$Value
+    }
+    if($Value -is [System.Management.Automation.PSCustomObject]){
+        foreach($property in $Value.PSObject.Properties){$property.Value=Restore-RepatoTaskStoreDateMarkers $property.Value $Markers}
+    }
+    $Value
+}
+
+function ConvertFrom-RepatoTaskStoreJson([string]$Json) {
+    $markers=@{}
+    $matches=[regex]::Matches($Json,'"(?<value>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)"')
+    for($i=$matches.Count-1;$i -ge 0;$i--){
+        $match=$matches[$i];$marker='__REPATO_ISO_TIMESTAMP_'+[guid]::NewGuid().ToString('N')+'__'
+        $markers[$marker]=$match.Groups['value'].Value
+        $Json=$Json.Remove($match.Index,$match.Length).Insert($match.Index,'"'+$marker+'"')
+    }
+    $data=ConvertFrom-Json -InputObject $Json
+    Restore-RepatoTaskStoreDateMarkers $data $markers
+}
+
 function Read-RepatoTaskStore([string]$StoreRoot) {
     $paths = Get-RepatoStorePaths $StoreRoot
     if (!(Test-Path -LiteralPath $paths.Queue -PathType Leaf)) { throw "Task queue does not exist: $($paths.Queue)" }
-    try { $data = Get-Content -LiteralPath $paths.Queue -Raw | ConvertFrom-Json }
+    try { $data = ConvertFrom-RepatoTaskStoreJson (Get-Content -LiteralPath $paths.Queue -Raw) }
     catch { throw "Malformed task queue JSON: $($_.Exception.Message)" }
     if ($data.schemaVersion -ne 1 -or $data.PSObject.Properties.Name -notcontains 'tasks' -or $data.tasks -isnot [Array]) { throw 'Malformed task queue root.' }
     $seen = @{}
