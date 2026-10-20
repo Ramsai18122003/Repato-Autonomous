@@ -7,7 +7,7 @@ $script:Agents = @('Maya','Neil','Tara')
 $script:ApprovalLevels = @('none','maya','user')
 $script:DangerousActions = @('production-commit','revit-launch','file-delete','addin-change','destructive-file-operation','disable-addins')
 
-function Get-RepatoUtc { [DateTimeOffset]::UtcNow.ToString('O') }
+function Get-RepatoUtc { [DateTimeOffset]::UtcNow.ToString('O', [Globalization.CultureInfo]::InvariantCulture) }
 
 function Assert-RepatoValue([string]$Name,[string]$Value,[string[]]$Allowed) {
     if ($Value -cnotin $Allowed) { throw "$Name must be one of: $($Allowed -join ', ')." }
@@ -47,7 +47,7 @@ function Assert-RepatoTask($Task) {
     Assert-RepatoValue RequiredApprovalLevel ([string]$Task.requiredApprovalLevel) $script:ApprovalLevels
     foreach ($name in @('logs','reportPaths','approvalRequests','executorRuns','history')) { if ($Task.$name -isnot [Array]) { throw "Malformed task: $name must be an array." } }
     if ($Task.revision -isnot [long] -and $Task.revision -isnot [int]) { throw 'Malformed task revision.' }
-    $null = [DateTimeOffset]::Parse($Task.createdUtc)
+    $null = [DateTimeOffset]::Parse([string]$Task.createdUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
 }
 
 function Read-RepatoTaskStore([string]$StoreRoot) {
