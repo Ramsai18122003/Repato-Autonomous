@@ -12,5 +12,5 @@ $timeoutObserved=$false
 try{& $module {param($p,$child)Wait-TaraResult $p $child} $plan $process}catch [TimeoutException]{$timeoutObserved=$true}
 if(!$timeoutObserved -or $process.Killed){throw 'No-force result timeout attempted forced termination or did not report timeout.'}
 $fixtureScript=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-TaraCreatePlanViewsFixturePreparation.ps1') -Raw
-if($fixtureScript -notmatch '-TimeoutSeconds 7200' -or $fixtureScript -notmatch '-NoForceRevitClose'){throw 'CPV fixture preparation does not use the bounded no-force cleanup mode.'}
+if($fixtureScript -notmatch '-TimeoutSeconds 7200' -or $fixtureScript -notmatch '-NoForceRevitClose' -or $fixtureScript -notmatch 'Repato\.Deployment\.v4\.psm1'){throw 'CPV fixture preparation does not use the bounded no-force path and supported workflow module.'}
 [pscustomobject]@{Status='PASS';Assertions=3;GracefulCloseRequested=$process.CloseRequested;ForceTerminationAttempted=$process.Killed;TimeoutObserved=$timeoutObserved;FixturePreparationNoForce=$true}|ConvertTo-Json -Compress

@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.AgentOrchestration.psm1') -Force -WarningAction SilentlyContinue
-Import-Module (Join-Path $PSScriptRoot 'Repato.Deployment.psm1') -Force -WarningAction SilentlyContinue
+Import-Module (Join-Path $PSScriptRoot 'Repato.Deployment.v4.psm1') -Force -WarningAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'Repato.TaraRevitQa.psm1') -Force -WarningAction SilentlyContinue
 if(@(Get-Process Revit -ErrorAction SilentlyContinue).Count){throw 'An existing Revit process is present; fixture preparation launch is refused.'}
 $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
