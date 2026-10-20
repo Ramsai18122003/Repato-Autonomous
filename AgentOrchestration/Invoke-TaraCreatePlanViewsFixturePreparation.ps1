@@ -40,7 +40,9 @@ if($recoveredBuildCheck){
         throw 'Recovered prior run was not safely archived before fixture preparation.'
     }
 }
-$qa=Join-Path (Split-Path $PSScriptRoot -Parent) 'QA'
+$primaryRepositoryRoot=(Resolve-MayaQaAuthenticatedBuildSource $null).PrimaryRepositoryRoot
+$qa=[IO.Path]::GetFullPath((Join-Path $primaryRepositoryRoot 'QA'))
+if($qa -ine [IO.Path]::GetFullPath('C:\Repato-Autonomous\Source\QA')){throw 'Fixture preparation must use the pinned primary Source\QA root.'}
 $source=Join-Path $qa 'Fixtures\CreatePlanViewsEmpty.rvt'
 $sourceHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
 $provenance=Get-Content -LiteralPath (Join-Path $qa 'Fixtures\CreatePlanViewsEmpty.provenance.json') -Raw|ConvertFrom-Json
