@@ -82,7 +82,7 @@ function Test-TaraLegacyDeploymentManifestCompatibility {
     $true
 }
 function New-TaraRevitQaPlan {
-    param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,86400)][int]$TimeoutSeconds=900,[switch]$DryRun,[switch]$LevelInventory,[switch]$FixturePreparation,[switch]$ManualLoadOnce,[Parameter(Mandatory)]$Context,[scriptblock]$SessionValidationInvoker)
+    param([string]$StoreRoot,[string]$TaskId,[string]$WorkflowId,[string]$QaWorkflowId,[string]$RunId,[string]$ModelPath,[string]$SidecarPath,[string]$ReportDirectory,[string]$RevitInstallDir,[string]$QaAddinRoot,[ValidateRange(1,86400)][int]$TimeoutSeconds=900,[switch]$DryRun,[switch]$LevelInventory,[switch]$FixturePreparation,[switch]$ManualLoadOnce,[switch]$NoForceRevitClose,[Parameter(Mandatory)]$Context,[scriptblock]$SessionValidationInvoker)
     if($LevelInventory -and $FixturePreparation){throw 'Level inventory and fixture preparation modes are mutually exclusive.'}
     $QaWorkflowId=$QaWorkflowId.Trim()
     $runners=@{
@@ -142,7 +142,7 @@ function New-TaraRevitQaPlan {
     $trust=if($remoteDeployment){$remoteDeployment}else{Get-TaraQaTrustConfiguration $addin $qa $inventory}
     $dispatchVariable=if($LevelInventory){'REPATO_QA_CREATE_PLAN_VIEWS_LEVEL_INVENTORY'}elseif($FixturePreparation){'REPATO_QA_CREATE_PLAN_VIEWS_FIXTURE_PREPARATION'}else{$runner[1]}
     $outputPath=$requestPath+$(if($LevelInventory){'.inventory.json'}elseif($FixturePreparation){'.preparation.json'}else{''})
-    [pscustomobject]@{StoreRoot=$StoreRoot;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;RequestExpiresUtc=[DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds);Context=$Context;ModelPath=$model;SidecarPath=$sidecar;SidecarSha256=(Get-TaraSha256 $sidecar);ReportDirectory=$reportRoot;RevitInstallDir=$RevitInstallDir;QaAddinRoot=$addin;TrustConfiguration=$trust;TimeoutSeconds=$TimeoutSeconds;Executable=$exe;ExecutableSha256=(Get-TaraSha256 $exe);Command=('"'+$exe+'"');Arguments='';EnvironmentVariable=$dispatchVariable;LevelInventory=[bool]$LevelInventory;FixturePreparation=[bool]$FixturePreparation;ManualLoadOnce=[bool]$ManualLoadOnce;OpenModelPath=$(if($LevelInventory -or $FixturePreparation){$model}else{$null});InventoryOutputPath=$outputPath;VerifierPath=$verifier;VerifierSha256=(Get-TaraSha256 $verifier);RequestId=$requestId;RequestPath=$requestPath;ResultPath=$(if($LevelInventory -or $FixturePreparation){$outputPath}else{$requestPath+'.result.json'});EvidencePath=(Join-Path $reportRoot ('tara-'+$requestId+'.json'));InstalledDll=$dll;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$Context.ManifestSha256;QaRunnerManifestPath=$manifest;QaRunnerManifestSha256=$qaRunnerManifestSha256;InstalledManifest=$manifest;Isolation=$inventory;SideEffectsPerformed=$false}
+    [pscustomobject]@{StoreRoot=$StoreRoot;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId=$QaWorkflowId;RunId=$RunId;RequestExpiresUtc=[DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds);Context=$Context;ModelPath=$model;SidecarPath=$sidecar;SidecarSha256=(Get-TaraSha256 $sidecar);ReportDirectory=$reportRoot;RevitInstallDir=$RevitInstallDir;QaAddinRoot=$addin;TrustConfiguration=$trust;TimeoutSeconds=$TimeoutSeconds;Executable=$exe;ExecutableSha256=(Get-TaraSha256 $exe);Command=('"'+$exe+'"');Arguments='';EnvironmentVariable=$dispatchVariable;LevelInventory=[bool]$LevelInventory;FixturePreparation=[bool]$FixturePreparation;ManualLoadOnce=[bool]$ManualLoadOnce;NoForceRevitClose=[bool]$NoForceRevitClose;OpenModelPath=$(if($LevelInventory -or $FixturePreparation){$model}else{$null});InventoryOutputPath=$outputPath;VerifierPath=$verifier;VerifierSha256=(Get-TaraSha256 $verifier);RequestId=$requestId;RequestPath=$requestPath;ResultPath=$(if($LevelInventory -or $FixturePreparation){$outputPath}else{$requestPath+'.result.json'});EvidencePath=(Join-Path $reportRoot ('tara-'+$requestId+'.json'));InstalledDll=$dll;ArtifactManifestPath=$artifactManifest;ArtifactManifestSha256=$Context.ManifestSha256;QaRunnerManifestPath=$manifest;QaRunnerManifestSha256=$qaRunnerManifestSha256;InstalledManifest=$manifest;Isolation=$inventory;SideEffectsPerformed=$false}
 }
 function Write-TaraJsonNew($Path,$Value){
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value|ConvertTo-Json -Depth 30));$stream=[IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -220,12 +220,13 @@ function Stop-TaraOwnedProcess($Process){
     # Never discover/reacquire by PID or name. The original Process handle owns this termination.
     $Process.Refresh();if(!$Process.HasExited){$Process.Kill();[void]$Process.WaitForExit(5000)}
 }
-function Close-TaraOwnedProcess($Process,[int]$GraceSeconds=30){
+function Close-TaraOwnedProcess($Process,[int]$GraceSeconds=30,[switch]$NoForceRevitClose){
     $Process.Refresh(); if($Process.HasExited){ return [pscustomobject]@{State='Exited';ExitCode=$Process.ExitCode;Forced=$false} }
     $requested=$false; try{$requested=$Process.CloseMainWindow()}catch{}
     $deadline=[DateTime]::UtcNow.AddSeconds($GraceSeconds)
     while(!$Process.HasExited -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Seconds 1;$Process.Refresh()}
-    if(!$Process.HasExited){ Stop-TaraOwnedProcess $Process; return [pscustomobject]@{State='ForceTerminated';ExitCode=$Process.ExitCode;Forced=$true} }
+    if(!$Process.HasExited -and $NoForceRevitClose){return [pscustomobject]@{State='GracefulCloseTimedOut';ExitCode=$null;Forced=$false;CloseRequested=$requested}}
+    if(!$Process.HasExited){ Stop-TaraOwnedProcess $Process; return [pscustomobject]@{State='ForceTerminated';ExitCode=$Process.ExitCode;Forced=$true;CloseRequested=$requested} }
     return [pscustomobject]@{State='Exited';ExitCode=$Process.ExitCode;Forced=$false}
 }
 function Assert-TaraModelUnlocked([string]$Path){
@@ -236,7 +237,7 @@ function Wait-TaraResult($Plan,$Process){
     while(!(Test-Path -LiteralPath $Plan.ResultPath -PathType Leaf)){
         Assert-TaraSecurityPromptAbsent $Plan
         $Process.Refresh();if($Process.HasExited){throw 'QA Revit exited before publishing a result.'}
-        if($timer.Elapsed.TotalSeconds -ge $Plan.TimeoutSeconds){Stop-TaraOwnedProcess $Process;throw [TimeoutException]::new('QA hard timeout; only the bridge-owned Revit process was terminated.')}
+        if($timer.Elapsed.TotalSeconds -ge $Plan.TimeoutSeconds){if($Plan.NoForceRevitClose){throw [TimeoutException]::new('QA hard timeout; Revit will receive a graceful close request without force termination.')};Stop-TaraOwnedProcess $Process;throw [TimeoutException]::new('QA hard timeout; only the bridge-owned Revit process was terminated.')}
         Start-Sleep -Seconds 20
     }
 }
@@ -281,7 +282,7 @@ function Invoke-TaraRevitQa {
     $process=$null;$handler=$null
     try{
         # Revalidate the filesystem immediately before writing/launching; a dry plan is not authorization.
-        $args=@{};foreach($name in @('StoreRoot','TaskId','WorkflowId','QaWorkflowId','RunId','ModelPath','SidecarPath','ReportDirectory','RevitInstallDir','QaAddinRoot','TimeoutSeconds','Context')){$args[$name]=$Plan.$name};if($Plan.LevelInventory){$args.LevelInventory=$true};if($Plan.FixturePreparation){$args.FixturePreparation=$true};if($Plan.ManualLoadOnce){$args.ManualLoadOnce=$true};$fresh=New-TaraRevitQaPlan @args
+        $args=@{};foreach($name in @('StoreRoot','TaskId','WorkflowId','QaWorkflowId','RunId','ModelPath','SidecarPath','ReportDirectory','RevitInstallDir','QaAddinRoot','TimeoutSeconds','Context')){$args[$name]=$Plan.$name};if($Plan.LevelInventory){$args.LevelInventory=$true};if($Plan.FixturePreparation){$args.FixturePreparation=$true};if($Plan.ManualLoadOnce){$args.ManualLoadOnce=$true};if($Plan.NoForceRevitClose){$args.NoForceRevitClose=$true};$fresh=New-TaraRevitQaPlan @args
         if($fresh.ExecutableSha256 -ine $Plan.ExecutableSha256 -or $fresh.SidecarSha256 -ine $Plan.SidecarSha256 -or $fresh.Isolation.PolicySha256 -ine $Plan.Isolation.PolicySha256 -or $fresh.VerifierSha256 -ine $Plan.VerifierSha256){throw 'Preflight evidence changed before launch.'}
         if($Plan.LevelInventory){$request=New-TaraLevelInventoryRequest -TaskId $Plan.TaskId -AttemptId $Plan.RequestId -RunId $Plan.RunId -ModelPath $Plan.ModelPath -ModelSha256 $Plan.Context.FixtureSha256 -OutputPath $Plan.InventoryOutputPath}elseif($Plan.FixturePreparation){$request=New-TaraFixturePreparationRequest -TaskId $Plan.TaskId -WorkflowId $Plan.WorkflowId -AttemptId $Plan.RequestId -RunId $Plan.RunId -RequestPath $Plan.RequestPath -ModelPath $Plan.ModelPath -ModelSha256 $Plan.Context.FixtureSha256 -SelectedManifestPath $Plan.QaRunnerManifestPath -SelectedManifestSha256 $Plan.QaRunnerManifestSha256 -OutputPath $Plan.InventoryOutputPath -ExpiresUtc ([DateTimeOffset]::UtcNow.AddSeconds($Plan.TimeoutSeconds))}else{$request=[ordered]@{requestId=$Plan.RequestId;testId=$Plan.Context.TestId;modelPath=$Plan.ModelPath;assemblySha256=$Plan.Context.ArtifactSha256;selectedManifestPath=$Plan.QaRunnerManifestPath;selectedManifestSha256=$Plan.QaRunnerManifestSha256;createdUtc=$result.StartedUtc;expiresUtc=[DateTimeOffset]::UtcNow.AddSeconds($Plan.TimeoutSeconds).ToString('O');addinIsolation=$Plan.Isolation;TaskId=$Plan.TaskId;WorkflowId=$Plan.WorkflowId;QaWorkflowId=$Plan.QaWorkflowId;RunId=$Plan.RunId}}
         Write-TaraJsonNew $Plan.RequestPath $request;$result.SideEffectsPerformed=$true;$result.RequestSha256=Get-TaraSha256 $Plan.RequestPath
@@ -295,7 +296,7 @@ function Invoke-TaraRevitQa {
     finally{
         $result.FinishedUtc=[DateTimeOffset]::UtcNow.ToString('O');$result.Success=($result.Status -ceq 'Passed')
         if($handler){try{Stop-TaraTrustPromptHandler $handler}catch{$result.FailureReason=([string]$result.FailureReason+' Trust-handler cleanup failed: '+$_.Exception.Message);$result.Error=$result.FailureReason}}
-        if($process){try{$cleanup=Close-TaraOwnedProcess $process;if($cleanup.Forced){$result.ExitState='ForceTerminated';$result.FailureReason=([string]$result.FailureReason+' Graceful Revit close timed out; bridge-owned process force-terminated.')}else{$result.ExitState='Exited'};$result.ExitCode=$cleanup.ExitCode;$process.Refresh();$result.ProcessEndUtc=$process.ExitTime.ToUniversalTime().ToString('O');Assert-TaraModelUnlocked $Plan.ModelPath}catch{$result.ExitState='CleanupFailed';$result.FailureReason=([string]$result.FailureReason+' Cleanup failed: '+$_.Exception.Message);$result.Error=$result.FailureReason};$process.Dispose()}
+        if($process){try{$cleanup=Close-TaraOwnedProcess $process -NoForceRevitClose:([bool]$Plan.NoForceRevitClose);if($cleanup.State -eq 'Exited' -or $cleanup.State -eq 'ForceTerminated'){$result.ExitState=$cleanup.State;$result.ExitCode=$cleanup.ExitCode;$process.Refresh();$result.ProcessEndUtc=$process.ExitTime.ToUniversalTime().ToString('O');Assert-TaraModelUnlocked $Plan.ModelPath}else{$result.ExitState='CleanupFailed';$result.Status='Failed';$result.Success=$false;$result.FailureReason=([string]$result.FailureReason+" Graceful Revit close timed out for PID $($process.Id); no force termination was attempted. Human closure and model-unlock verification are required.")}}catch{$result.ExitState='CleanupFailed';$result.Status='Failed';$result.Success=$false;$result.FailureReason=([string]$result.FailureReason+' Cleanup failed: '+$_.Exception.Message);$result.Error=$result.FailureReason};$process.Dispose()}
         $result.SideEffectsPerformed=$true
         try{Write-TaraJsonNew $Plan.EvidencePath ([pscustomobject]$result)}catch{$result.FailureReason=([string]$result.FailureReason+' Evidence persistence failed: '+$_.Exception.Message);$result.Status='Failed'}
     }
