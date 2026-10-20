@@ -26,6 +26,18 @@ function Assert-TaraPath {
     }
     $full
 }
+function Get-TaraNormalizedUtc($Value,[string]$Context = 'Timestamp'){
+    if($Value -is [DateTimeOffset]){return $Value.ToUniversalTime()}
+    if($Value -is [DateTime]){
+        $offset = if($Value.Kind -eq [DateTimeKind]::Utc){[TimeSpan]::Zero} elseif($Value.Kind -eq [DateTimeKind]::Local){[TimeZoneInfo]::Local.GetUtcOffset($Value)} else {[TimeZoneInfo]::Local.GetUtcOffset($Value)}
+        return [DateTimeOffset]::new($Value,$offset)
+    }
+    if([string]::IsNullOrWhiteSpace([string]$Value)){throw "$Context timestamp is missing."}
+    $candidate=[DateTimeOffset]::MinValue
+    if([DateTimeOffset]::TryParse([string]$Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$candidate)){return $candidate.ToUniversalTime()}
+    throw "$Context timestamp is invalid."
+}
+
 function Get-TaraSha256([string]$Path){
     $s=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);$h=[Security.Cryptography.SHA256]::Create()
     try{([BitConverter]::ToString($h.ComputeHash($s))).Replace('-','')}finally{$h.Dispose();$s.Dispose()}
@@ -375,8 +387,12 @@ function Assert-TaraResult($Plan){
     if($receipt.Status -cne 'Passed' -or $report.Status -cne 'Passed' -or $report.RollbackStatus -cne 'RolledBack' -or @($report.Errors).Count -or !$report.Assertions -or @($report.Assertions|Where-Object {$_.Passed -isnot [bool] -or !$_.Passed}).Count){throw 'Failed report: Passed, RolledBack, successful assertions and no errors are required.'}
     $runtimeModelHash=if($report.PSObject.Properties.Name -contains 'RuntimeModelSha256'){$report.RuntimeModelSha256}else{$Plan.Context.FixtureSha256}
     if($report.TestId -cne $Plan.Context.TestId -or $report.DocumentPath -ine $Plan.ModelPath -or $report.FixtureId -cne $Plan.Context.FixtureId -or $report.FixtureSha256 -ine $Plan.Context.FixtureSha256 -or $runtimeModelHash -notmatch '^[A-Fa-f0-9]{64}$' -or ($Plan.QaWorkflowId -eq 'create-plan-views-v1' -and $report.PSObject.Properties.Name -notcontains 'RuntimeModelSha256') -or $report.AssemblyIdentity.Sha256 -ine $Plan.Context.ArtifactSha256){throw 'Report model, fixture, artifact or test identity mismatch.'}
-    if([DateTimeOffset]::Parse($report.StartedUtc) -lt [DateTimeOffset]::Parse($request.createdUtc) -or [DateTimeOffset]::Parse($report.FinishedUtc) -lt [DateTimeOffset]::Parse($report.StartedUtc) -or [DateTimeOffset]::Parse($report.FinishedUtc) -gt [DateTimeOffset]::UtcNow.AddSeconds(5)){throw 'Report is stale or has invalid timestamps.'}
-    if([DateTimeOffset]::Parse($report.FinishedUtc) -gt [DateTimeOffset]::Parse($request.expiresUtc)){throw 'Report completed after request expiry.'}
+    $startedUtc=Get-TaraNormalizedUtc $report.StartedUtc 'Report StartedUtc'
+    $finishedUtc=Get-TaraNormalizedUtc $report.FinishedUtc 'Report FinishedUtc'
+    $createdUtc=Get-TaraNormalizedUtc $request.createdUtc 'Request createdUtc'
+    $expiresUtc=Get-TaraNormalizedUtc $request.expiresUtc 'Request expiresUtc'
+    if($startedUtc -lt $createdUtc -or $finishedUtc -lt $startedUtc -or $finishedUtc -gt [DateTimeOffset]::UtcNow.AddSeconds(5)){throw 'Report is stale or has invalid timestamps.'}
+    if($finishedUtc -gt $expiresUtc){throw 'Report completed after request expiry.'}
     if((Get-TaraSha256 $Plan.ModelPath) -ine $runtimeModelHash){throw 'Prepared runtime model hash mismatch.'}
     foreach($pair in @(@($Plan.Context.SourceFixturePath,$Plan.Context.FixtureSha256),@($Plan.SidecarPath,$Plan.SidecarSha256),@($Plan.InstalledDll,$Plan.Context.ArtifactSha256),@($Plan.InstalledManifest,$Plan.QaRunnerManifestSha256),@($Plan.Context.ManifestPath,$Plan.Context.ManifestSha256),@($Plan.Context.ArtifactPath,$Plan.Context.ArtifactSha256))){if((Get-TaraSha256 $pair[0]) -ine $pair[1]){throw 'Post-run evidence hash mismatch.'}}
     $repoRoot=[IO.Path]::GetDirectoryName($Plan.Context.QaRoot)

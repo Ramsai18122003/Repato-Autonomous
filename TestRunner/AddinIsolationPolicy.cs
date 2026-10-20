@@ -141,7 +141,7 @@ public static class AddinIsolationPolicy
                             hash.Equals(Hash(source), StringComparison.OrdinalIgnoreCase);
                         reason = allowed ? "Selected QA manifest matches request and trusted source SHA-256." : "Selected QA manifest does not match request or trusted source.";
                     }
-                    else if (name.Equals("Repato.CreateLevels.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleVisibility.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleOffset.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridResequence.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.WelcomeSmoke.TestRunner.addin", StringComparison.OrdinalIgnoreCase))
+                    else if (name.Equals("Repato.CreateGrids.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.CreateLevels.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleVisibility.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridBubbleOffset.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.GridResequence.TestRunner.addin", StringComparison.OrdinalIgnoreCase) || name.Equals("Repato.WelcomeSmoke.TestRunner.addin", StringComparison.OrdinalIgnoreCase))
                     {
                         string source = Path.Combine(sourceRoot, name);
                         CheckPath(source);
