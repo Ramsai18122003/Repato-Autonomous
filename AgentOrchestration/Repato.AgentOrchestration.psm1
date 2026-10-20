@@ -161,7 +161,9 @@ function Get-RepatoCanonicalQaDeploymentApprovalEvidence {
        $e.RunnerManifestPath -cne $RunnerManifestPath -or $e.RunnerManifestSha256 -ine $RunnerManifestSha256){
         throw 'Canonical QA deployment evidence does not match the approved candidate.'
     }
-    $trustedRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\QA')).TrimEnd('\')+'\'
+    $commonGitDirectory=(& git -C $PSScriptRoot rev-parse --path-format=absolute --git-common-dir 2>$null).Trim()
+    if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonGitDirectory)){throw 'Canonical QA repository identity could not be resolved.'}
+    $trustedRoot=[IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $commonGitDirectory) 'QA')).TrimEnd('\')+'\'
     $manifest=[IO.Path]::GetFullPath($RunnerManifestPath)
     if(!$manifest.StartsWith($trustedRoot,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $manifest -PathType Leaf) -or
        (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ine $RunnerManifestSha256){throw 'Canonical QA runner manifest is not trusted or has changed.'}
@@ -333,18 +335,54 @@ function Resolve-RepatoTaskApproval([string]$StoreRoot,[string]$TaskId,[string]$
                 if($request.action -cne 'qa-run' -or $Actor -cne 'user' -or $request.requiredLevel -cne 'user' -or !$binding.PSObject.Properties['NativeContinuation']){throw 'Recovered preparation requires fresh bound native user authorization.'}
                 Assert-CpvNativeContinuationBinding -Task $task -Workflow $workflows[0] -Binding $binding.NativeContinuation
             }elseif($binding.PSObject.Properties['NativeContinuation']){throw 'Native continuation has no verified recovered preparation.'}
-            $plan=$binding.ExecutionPlan;$candidateRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\DeploymentCandidates\AgentBuilds'));$runnerRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\QA'))
+            $plan=$binding.ExecutionPlan
             if([string]$binding.BuildRequestId -cne [string]$e.BuildRequestId -or [string]$binding.CandidateSourceCommit -cne [string]$e.CandidateSourceCommit -or [string]$binding.CandidateSha256 -ine [string]$e.ArtifactSha256 -or [string]$binding.RunnerManifestPath -ine [string]$e.RunnerManifestPath -or [string]$binding.RunnerManifestSha256 -ine [string]$e.RunnerManifestSha256 -or !$e.DeploymentValidation -or !$e.ManifestIntegrityValidation -or !$e.QaIsolation -or [string]$binding.RunId -cne [string]$workflows[0].qaRunId -or [string]$binding.ModelPath -ine [string]$workflows[0].qaModelPath -or [string]$binding.SidecarPath -ine [string]$workflows[0].qaSidecarPath -or [string]$binding.FixtureId -cne [string]$workflows[0].qaFixtureId -or [string]$binding.FixtureSha256 -ine [string]$workflows[0].qaFixtureSha256 -or [string]$plan.TaskId -cne $TaskId -or [string]$plan.WorkflowId -cne [string]$binding.WorkflowId -or [string]$plan.QaWorkflowId -cne [string]$binding.QaWorkflowId -or [string]$plan.Stage -cne 'qa-prepared' -or [string]$plan.NextAgent -cne 'Tara' -or [string]$plan.NextOperation -cne 'canonical-execution-record' -or $plan.SideEffectsPerformed -ne $false){throw 'Bound QA approval no longer matches candidate or execution evidence.'}
             $currentDeploymentBinding=Get-RepatoCanonicalQaDeploymentApprovalEvidence -Task $task -Workflow $workflows[0] -BuildRequestId $binding.BuildRequestId -CandidateSourceCommit $binding.CandidateSourceCommit -CandidateSha256 $binding.CandidateSha256 -RunnerManifestPath $binding.RunnerManifestPath -RunnerManifestSha256 $binding.RunnerManifestSha256
             $currentDeploymentJson=ConvertTo-Json -InputObject $currentDeploymentBinding -Depth 20 -Compress;$approvedDeploymentJson=ConvertTo-Json -InputObject $binding.DeploymentValidationEvidence -Depth 20 -Compress
             if($currentDeploymentJson -cne $approvedDeploymentJson){throw 'Bound QA approval deployment-validation operation or authenticated response changed.'}
+            $trustedRoots=Get-RepatoCanonicalQaTrustedRoots
             $candidateDirectory=[IO.Path]::GetFullPath([string]$e.CandidateDirectory);$runnerPath=[IO.Path]::GetFullPath([string]$binding.RunnerManifestPath)
-            if(!$candidateDirectory.StartsWith([IO.Path]::GetFullPath($candidateRoot).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or !$runnerPath.StartsWith([IO.Path]::GetFullPath($runnerRoot).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Bound QA approval candidate or runner path is outside its trusted root.'}
+            if(!(Test-RepatoPathWithinTrustedRoot -Path $candidateDirectory -Root $trustedRoots.CandidateRoot)){throw 'Bound QA candidate directory is outside the authorized primary-repository candidate root.'}
+            if(!(Test-RepatoPathWithinTrustedRoot -Path $runnerPath -Root $trustedRoots.QaRoot)){throw 'Bound QA runner manifest is outside the authorized primary-repository QA root.'}
             foreach($pair in @(@($e.ArtifactPath,$binding.CandidateSha256),@($binding.RunnerManifestPath,$binding.RunnerManifestSha256),@($e.CandidateProvenancePath,$binding.CandidateProvenanceSha256),@($binding.ModelPath,$binding.ModelSha256),@($binding.SidecarPath,$binding.SidecarSha256))){if(!(Test-Path -LiteralPath $pair[0] -PathType Leaf) -or (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ine $pair[1]){throw 'Bound QA approval file evidence changed.'}}
         }
         if($request.requiredLevel -ceq 'user' -and $Actor -cne 'user'){throw 'This action requires user approval.'}
         $request.status=$(if($Decision -ceq 'approve'){'approved'}else{'rejected'});$request.decidedUtc=Get-RepatoUtc;$request.decidedBy=$Actor;$request.reason=$Reason;$task.status=$(if($Decision -ceq'approve'){$request.previousStatus}else{'blocked'});Add-RepatoHistory $task ('approval-'+$Decision) $Actor $(if($preview){'dry-run preview'}else{$Reason});if($Decision -ceq'approve'){$request.approvedRevision=[long]$task.revision};$task
     } -DryRun:$DryRun
+}
+
+function Get-RepatoCanonicalQaTrustedRoots {
+    $worktreeRoot=(& git -C $PSScriptRoot rev-parse --show-toplevel 2>$null).Trim()
+    if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($worktreeRoot)){throw 'Approval source worktree identity could not be resolved.'}
+    $worktreeRoot=[IO.Path]::GetFullPath($worktreeRoot)
+    $moduleRoot=[IO.Path]::GetFullPath($PSScriptRoot)
+    if(!$moduleRoot.StartsWith($worktreeRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Approval module is outside its Git worktree root.'}
+
+    $commonGitDirectory=(& git -C $worktreeRoot rev-parse --path-format=absolute --git-common-dir 2>$null).Trim()
+    if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commonGitDirectory)){throw 'Approval primary-repository identity could not be resolved.'}
+    $commonGitDirectory=[IO.Path]::GetFullPath($commonGitDirectory)
+    if([IO.Path]::GetFileName($commonGitDirectory) -cne '.git'){throw 'Approval repository common directory is not the expected .git directory.'}
+    $primaryRoot=[IO.Path]::GetFullPath((Split-Path -Parent $commonGitDirectory))
+    if(!(Test-Path -LiteralPath $primaryRoot -PathType Container)){throw 'Approval primary-repository root is missing.'}
+    $primaryTop=(& git -C $primaryRoot rev-parse --show-toplevel 2>$null).Trim()
+    $primaryCommon=(& git -C $primaryRoot rev-parse --path-format=absolute --git-common-dir 2>$null).Trim()
+    if($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($primaryTop) -ine $primaryRoot -or
+        [IO.Path]::GetFullPath($primaryCommon) -ine $commonGitDirectory){throw 'Approval primary-repository root does not match the isolated worktree Git identity.'}
+
+    [pscustomobject]@{
+        WorktreeRoot=$worktreeRoot
+        PrimaryRepositoryRoot=$primaryRoot
+        CandidateRoot=[IO.Path]::GetFullPath((Join-Path $primaryRoot 'DeploymentCandidates\AgentBuilds'))
+        QaRoot=[IO.Path]::GetFullPath((Join-Path $primaryRoot 'QA'))
+    }
+}
+
+function Test-RepatoPathWithinTrustedRoot {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Root)
+    if([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)){return $false}
+    $canonicalPath=[IO.Path]::GetFullPath($Path)
+    $canonicalRoot=[IO.Path]::GetFullPath($Root).TrimEnd('\')+'\'
+    $canonicalPath.StartsWith($canonicalRoot,[StringComparison]::OrdinalIgnoreCase)
 }
 
 function Complete-RepatoTask([string]$StoreRoot,[string]$TaskId,[switch]$DryRun) {

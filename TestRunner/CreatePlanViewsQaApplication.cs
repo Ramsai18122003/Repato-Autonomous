@@ -354,9 +354,9 @@ public sealed class CreatePlanViewsQaApplication : IExternalApplication
             .Where(type => type.ViewFamily == ViewFamily.FloorPlan).ToArray();
         ElementId defaultFloorPlanTypeId = document.GetDefaultElementTypeId(ElementTypeGroup.ViewTypeFloorPlan);
         ViewFamilyType floorPlanType = ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Id == defaultFloorPlanTypeId);
-        ViewPlan template = new FilteredElementCollector(document).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()
-            .SingleOrDefault(view => view.IsTemplate && view.Name.Contains("Architectural", StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException("Architectural view template is unavailable.");
+        ViewPlan template = ArchitecturalTemplateSelection.SelectDefaultTemplate(
+            new FilteredElementCollector(document).OfClass(typeof(ViewPlan)).Cast<ViewPlan>(),
+            view => view.IsTemplate, view => view.Name, view => view.Id.Value);
         report.Assert("architectural-template-intent", true, "Architectural", template.Name);
 
         var baselinePlanIds = new FilteredElementCollector(document).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()

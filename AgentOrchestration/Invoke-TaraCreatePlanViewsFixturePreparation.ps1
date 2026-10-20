@@ -56,6 +56,23 @@ $sidecar=$model+'.fixture.json'
 [ordered]@{fixtureId='CreatePlanViewsEmpty';sourceSha256=$sourceHash}|ConvertTo-Json|Set-Content -LiteralPath $sidecar -Encoding UTF8
 $context=[pscustomobject]@{QaRoot=$qa;SourceFixturePath=$source;FixtureId='CreatePlanViewsEmpty';FixtureSha256=$sourceHash;TestId='create-plan-views-v1';ArtifactPath=$evidence.ArtifactPath;ArtifactSha256=$evidence.ArtifactSha256;ManifestPath=$evidence.ManifestPath;ManifestSha256=$evidence.ManifestSha256;TaskId=$TaskId;WorkflowId=$WorkflowId;QaWorkflowId='create-plan-views-v1';RunId=$runId}
 $plan=New-TaraRevitQaPlan -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -QaWorkflowId 'create-plan-views-v1' -RunId $runId -ModelPath $model -SidecarPath $sidecar -ReportDirectory (Join-Path $qa 'Reports') -RevitInstallDir 'E:\revit\Revit 2025' -QaAddinRoot 'C:\Users\RepatoQA\AppData\Roaming\Autodesk\Revit\Addins\2025\RepatoQA' -TimeoutSeconds 7200 -FixturePreparation -ManualLoadOnce -NoForceRevitClose -Context $context
+$startedUtc=[DateTimeOffset]::UtcNow
 $result=Invoke-TaraRevitQa -Plan $plan
-[pscustomobject]@{Success=$result.Success;Status=$result.Status;TaskId=$TaskId;WorkflowId=$WorkflowId;AttemptId=$plan.RequestId;RunId=$runId;ProcessId=$result.ProcessId;PromptDetected=$result.PromptDetected;PromptAction=$result.PromptAction;ModelPath=$model;SourceModelSha256=$sourceHash;PreparedModelSha256=(Get-FileHash $model -Algorithm SHA256).Hash;RequestPath=$plan.RequestPath;PreparationPath=$plan.ResultPath;EvidencePath=$plan.EvidencePath;Failure=$result.FailureReason;Preparation=$result.Preparation}|ConvertTo-Json -Depth 8
+$preparedHash=$null;$journalPath=$null;$journalSha256=$null;$journalPromptDetected=$null;$evidenceConsistent=$false
+if($result.ExitState -eq 'Exited' -and @(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count -eq 0){
+    $preparedHash=(Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash
+    $journalRoot=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Autodesk\Revit\Autodesk Revit 2025\Journals'
+    $journals=@(Get-ChildItem -LiteralPath $journalRoot -File -Filter 'journal.*.txt' -ErrorAction Stop|Where-Object {$_.LastWriteTimeUtc -ge $startedUtc.UtcDateTime}|Sort-Object LastWriteTimeUtc -Descending)
+    $journal=@($journals|Where-Object {(Get-Content -LiteralPath $_.FullName -Raw) -match [regex]::Escape($model)}|Select-Object -First 1)
+    if($journal.Count -eq 1){
+        $journalPath=$journal[0].FullName
+        $journalText=Get-Content -LiteralPath $journalPath -Raw
+        $journalSha256=(Get-FileHash -LiteralPath $journalPath -Algorithm SHA256).Hash
+        $journalPromptDetected=($journalText -match '(?i)TaskDialog_Security_Unsigned_File_Loading|publisher\s+of\s+this\s+add-in\s+could\s+not\s+be\s+verified')
+        $evidenceConsistent=(!$journalPromptDetected -and !$result.PromptDetected -and $result.PromptFree -and $result.PromptObservationCount -gt 0 -and $preparedHash -ieq [string]$result.Preparation.PreparedModelSha256)
+    }
+}
+$success=($result.Success -and $result.Status -ceq 'Passed' -and $result.ExitState -ceq 'Exited' -and $preparedHash -ieq [string]$result.Preparation.PreparedModelSha256 -and $evidenceConsistent)
+[pscustomobject]@{Success=$success;Status=$(if($success){'Passed'}elseif($result.PromptDetected){'AwaitingHumanTrustDecision'}else{'Failed'});TaskId=$TaskId;WorkflowId=$WorkflowId;AttemptId=$plan.RequestId;RunId=$runId;ProcessId=$result.ProcessId;PromptDetected=$result.PromptDetected;PromptAction=$result.PromptAction;PromptFree=$result.PromptFree;PromptObservationCount=$result.PromptObservationCount;PromptEvidence=$result.PromptEvidence;ModelPath=$model;SourceModelSha256=$sourceHash;PreparedModelSha256=$preparedHash;RequestPath=$plan.RequestPath;PreparationPath=$plan.ResultPath;EvidencePath=$plan.EvidencePath;JournalPath=$journalPath;JournalSha256=$journalSha256;JournalPromptDetected=$journalPromptDetected;PromptEvidenceConsistent=$evidenceConsistent;ExitState=$result.ExitState;Failure=$result.FailureReason;Preparation=$result.Preparation}|ConvertTo-Json -Depth 10
 if(!$result.Success){throw "Disposable fixture preparation failed: $($result.FailureReason)"}
+if(!$success){throw 'Fixture preparation evidence is incomplete or inconsistent; it cannot be used for QA authorization.'}

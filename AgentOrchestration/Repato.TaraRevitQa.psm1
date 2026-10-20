@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Repato.CpvRecoveredProvenance.psm1') -WarningAction SilentlyContinue
+$script:TaraPromptObservationCount=0
+$script:TaraLastSecurityPrompt=$null
+$script:TaraSecurityPromptScanError=$null
 
 function Assert-TaraPath {
     param([string]$Path,[string]$Root,[switch]$Leaf)
@@ -187,34 +190,152 @@ function Start-TaraProcess($Plan){
     $child=[Diagnostics.Process]::Start($info);$null=$child.Handle;return $child
 }
 function Get-TaraSecurityPrompt {
+    param([int]$ProcessId=0,[scriptblock]$WindowProvider)
     if(!( 'TaraPromptNative' -as [type])){
-        Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class TaraPromptNative { [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c,string t); [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr p,IntPtr c,string n,string t); [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n); }'
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public sealed class TaraPromptWindow {
+    public int ProcessId { get; set; }
+    public long Handle { get; set; }
+    public long OwnerHandle { get; set; }
+    public string Title { get; set; }
+    public string ClassName { get; set; }
+    public string Text { get; set; }
+    public string[] ButtonLabels { get; set; }
+    public bool IsVisible { get; set; }
+    public bool IsEnabled { get; set; }
+    public bool IsMain { get; set; }
+    public bool OwnerEnabled { get; set; }
+}
+
+public static class TaraPromptNative {
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int count);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+
+    private static string ReadText(IntPtr window) {
+        var text = new StringBuilder(4096);
+        GetWindowText(window, text, text.Capacity);
+        return text.ToString();
     }
-    foreach($title in @('Security - Unsigned Add-In','Security - Signed Add-In','Security - Unsigned Executable File','Security - Signed Executable File')){
-        $dialog=[TaraPromptNative]::FindWindow($null,$title)
-        if($dialog -eq [IntPtr]::Zero){continue}
-        $text=Get-TaraWindowText $dialog;$child=[TaraPromptNative]::FindWindowEx($dialog,[IntPtr]::Zero,$null,$null)
-        while($child -ne [IntPtr]::Zero){$text+=' '+(Get-TaraWindowText $child);$child=[TaraPromptNative]::FindWindowEx($dialog,$child,$null,$null)}
-        return [pscustomobject]@{Title=$title;Text=$text}
+
+    private static string ReadClass(IntPtr window) {
+        var name = new StringBuilder(512);
+        GetClassName(window, name, name.Capacity);
+        return name.ToString();
+    }
+
+    public static List<TaraPromptWindow> GetWindows(int targetProcessId) {
+        var windows = new List<TaraPromptWindow>();
+        IntPtr mainWindow = IntPtr.Zero;
+        try { mainWindow = System.Diagnostics.Process.GetProcessById(targetProcessId).MainWindowHandle; }
+        catch (ArgumentException) { return windows; }
+
+        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            uint processId;
+            GetWindowThreadProcessId(window, out processId);
+            if (targetProcessId != 0 && processId != (uint)targetProcessId) return true;
+
+            var owner = GetWindow(window, 4);
+            var labels = new List<string>();
+            var text = new StringBuilder(ReadText(window));
+            EnumChildWindows(window, delegate(IntPtr child, IntPtr childParameter) {
+                var label = ReadText(child);
+                var className = ReadClass(child);
+                if (!String.IsNullOrWhiteSpace(label)) {
+                    if (text.Length > 0) text.Append(" | ");
+                    text.Append(label);
+                    if (String.Equals(className, "Button", StringComparison.OrdinalIgnoreCase))
+                        labels.Add(label);
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            windows.Add(new TaraPromptWindow {
+                ProcessId = (int)processId,
+                Handle = window.ToInt64(),
+                OwnerHandle = owner.ToInt64(),
+                Title = ReadText(window),
+                ClassName = ReadClass(window),
+                Text = text.ToString(),
+                ButtonLabels = labels.ToArray(),
+                IsVisible = IsWindowVisible(window),
+                IsEnabled = IsWindowEnabled(window),
+                IsMain = window == mainWindow,
+                OwnerEnabled = owner != IntPtr.Zero && IsWindowEnabled(owner)
+            });
+            return true;
+        }, IntPtr.Zero);
+        return windows;
+    }
+}
+'@
+    }
+    $windows=if($WindowProvider){@(& $WindowProvider $ProcessId)}elseif($ProcessId -gt 0){@([TaraPromptNative]::GetWindows($ProcessId))}else{@()}
+    foreach($window in $windows){
+        if($ProcessId -gt 0 -and [int]$window.ProcessId -ne $ProcessId){continue}
+        $title=[string]$window.Title
+        $text=[string]$window.Text
+        $knownTitle=$title -in @('Security - Unsigned Add-In','Security - Signed Add-In','Security - Unsigned Executable File','Security - Signed Executable File')
+        $publisherWarning=$text -match '(?i)publisher\s+of\s+this\s+add-in\s+could\s+not\s+be\s+verified|TaskDialog_Security_Unsigned_File_Loading'
+        $modal=([bool]$window.IsVisible -and !$window.IsMain -and [long]$window.OwnerHandle -ne 0 -and !$window.OwnerEnabled)
+        if($knownTitle -or $publisherWarning -or $modal){
+            $kind=if($publisherWarning){'PublisherVerification'}elseif($knownTitle){'RevitSecurityDialog'}else{'UnclassifiedModal'}
+            return [pscustomobject]@{Title=$title;Text=$text;ProcessId=[int]$window.ProcessId;WindowHandle=[long]$window.Handle;WindowClass=[string]$window.ClassName;ButtonLabels=[string[]]@($window.ButtonLabels);Kind=$kind;ObservedUtc=[DateTimeOffset]::UtcNow.ToString('O')}
+        }
     }
     $null
 }
-function Get-TaraWindowText([IntPtr]$Window){$b=New-Object Text.StringBuilder 2048;[void][TaraPromptNative]::GetWindowText($Window,$b,$b.Capacity);$b.ToString()}
-function Assert-TaraSecurityPromptAbsent($Plan,[scriptblock]$PromptProvider){
-    $prompt=if($PromptProvider){& $PromptProvider}else{Get-TaraSecurityPrompt}
+function Assert-TaraSecurityPromptAbsent($Plan,[scriptblock]$PromptProvider,[int]$ProcessId=0){
+    $script:TaraLastSecurityPrompt=$null
+    $script:TaraSecurityPromptScanError=$null
+    $script:TaraPromptObservationCount=[int]$script:TaraPromptObservationCount+1
+    try{$prompt=if($PromptProvider){& $PromptProvider}else{Get-TaraSecurityPrompt -ProcessId $ProcessId}}
+    catch{$script:TaraSecurityPromptScanError=$_.Exception.Message;$script:TaraLastSecurityPrompt=[pscustomobject]@{Kind='DetectionFailure';Title='Revit trust-dialog detection failed';Text=$_.Exception.Message;ProcessId=$ProcessId;WindowHandle=$null;WindowClass=$null;ButtonLabels=@();ObservedUtc=[DateTimeOffset]::UtcNow.ToString('O');Identity='Unknown'};throw "Revit trust-dialog detection failed closed; process left for human review. $($_.Exception.Message)"}
     if(!$prompt){return}
-    $matches=@($Plan.TrustConfiguration.PromptRecords|Where-Object {$prompt.Text -match [regex]::Escape($_.DllPath) -or $prompt.Text -match [regex]::Escape($_.ManifestPath)})
-    if(!$matches.Count){throw ('Human trust decision required for unidentified add-in; no security interaction performed. '+$prompt.Title+': '+$prompt.Text)}
-    foreach($match in $matches){if((Get-TaraSha256 $match.ManifestPath) -ine $match.ManifestSha256 -or (Get-TaraSha256 $match.DllPath) -ine $match.DllSha256){throw 'Security prompt identity hash mismatch; no security interaction performed.'}}
-    throw ('Human trust decision required for verified add-in; select Always Load manually only after checking the exact stable identity. No security interaction performed. '+$prompt.Title+': '+$prompt.Text)
+    $promptKind=if($prompt.PSObject.Properties['Kind']){[string]$prompt.Kind}else{'UnclassifiedDialog'}
+    $promptProcessId=if($prompt.PSObject.Properties['ProcessId']){[int]$prompt.ProcessId}else{$ProcessId}
+    $promptButtons=@()
+    if($prompt.PSObject.Properties['ButtonLabels']){$promptButtons=@($prompt.ButtonLabels)}
+    $observedUtc=if($prompt.PSObject.Properties['ObservedUtc']){[string]$prompt.ObservedUtc}else{[DateTimeOffset]::UtcNow.ToString('O')}
+    $script:TaraLastSecurityPrompt=[pscustomobject]@{Kind=$promptKind;Title=[string]$prompt.Title;Text=[string]$prompt.Text;ProcessId=$promptProcessId;WindowHandle=$(if($prompt.PSObject.Properties['WindowHandle']){$prompt.WindowHandle}else{$null});WindowClass=$(if($prompt.PSObject.Properties['WindowClass']){$prompt.WindowClass}else{$null});ButtonLabels=$promptButtons;ObservedUtc=$observedUtc;Identity='Unresolved'}
+    $matches=@(foreach($record in @($Plan.TrustConfiguration.PromptRecords)){
+        $dllPath=if($record.PSObject.Properties['DllPath']){[string]$record.DllPath}else{''}
+        $manifestPath=if($record.PSObject.Properties['ManifestPath']){[string]$record.ManifestPath}else{''}
+        $manifestName=if($record.PSObject.Properties['ManifestName']){[string]$record.ManifestName}else{''}
+        if(($dllPath -and $prompt.Text -match [regex]::Escape($dllPath)) -or ($manifestPath -and $prompt.Text -match [regex]::Escape($manifestPath)) -or ($manifestName -and $prompt.Text -match [regex]::Escape($manifestName))){$record}
+    })
+    $identity='Unresolved; no exact configured add-in identity appears in the observed dialog.'
+    if($matches.Count -eq 1){
+        $match=$matches[0]
+        if((Get-TaraSha256 $match.ManifestPath) -ine $match.ManifestSha256 -or (Get-TaraSha256 $match.DllPath) -ine $match.DllSha256){$script:TaraLastSecurityPrompt.Identity='HashMismatch; no interaction performed.';throw 'Security prompt identity hash mismatch; no interaction performed.'}
+        $manifest=[xml](Get-Content -LiteralPath $match.ManifestPath -Raw)
+        $addin=@($manifest.RevitAddIns.AddIn)
+        if($addin.Count -ne 1){$script:TaraLastSecurityPrompt.Identity='Ambiguous manifest identity; no interaction performed.';throw 'Security prompt manifest identity is ambiguous; no interaction performed.'}
+        $identity=[pscustomobject]@{ManifestName=$(if($match.PSObject.Properties['ManifestName']){[string]$match.ManifestName}else{[IO.Path]::GetFileName([string]$match.ManifestPath)});ManifestPath=$match.ManifestPath;ManifestSha256=$match.ManifestSha256;DllPath=$match.DllPath;DllSha256=$match.DllSha256;AddInName=[string]$addin[0].Name;FullClassName=[string]$addin[0].FullClassName;AddInId=[string]$addin[0].AddInId;VendorId=[string]$addin[0].VendorId;PublisherSignatureStatus=(Get-AuthenticodeSignature -FilePath $match.DllPath).Status}
+    }elseif($matches.Count -gt 1){$identity='Ambiguous; multiple configured add-ins match the observed dialog.'}
+    $script:TaraLastSecurityPrompt.Identity=$identity
+    $options=if($promptButtons.Count){$promptButtons -join ', '}else{'not exposed by the window controls'}
+    throw ('Human trust review required; no security interaction performed. Add-in identity: '+($identity|ConvertTo-Json -Compress -Depth 4)+'; choices: '+$options+'; dialog: '+$prompt.Title+' '+$prompt.Text)
 }
 function Wait-TaraManualLoadOnce($Plan,$Process){
     # Kept for call compatibility; disappearance of a dialog is never evidence of user approval.
     Handle-TaraTrustPrompt $Plan $Process $null
 }
 function Handle-TaraTrustPrompt($Plan,$Process,$Handler,[scriptblock]$PromptProvider){
-    Assert-TaraSecurityPromptAbsent $Plan $PromptProvider
-    [pscustomobject]@{PromptDetected=$false;PromptAction='None';ApprovedManifest=$null;PromptRecords=@();ManualApprovalEvidence=$null;PromptFree=$true}
+    $processId=if($Process -and $Process.PSObject.Properties['Id']){[int]$Process.Id}else{0}
+    Assert-TaraSecurityPromptAbsent $Plan $PromptProvider $processId
+    [pscustomobject]@{PromptDetected=$false;PromptAction='None';ApprovedManifest=$null;PromptRecords=@();ManualApprovalEvidence=$null;PromptFree=$true;ObservationCount=$script:TaraPromptObservationCount}
 }
 function Stop-TaraOwnedProcess($Process){
     # Never discover/reacquire by PID or name. The original Process handle owns this termination.
@@ -235,7 +356,8 @@ function Assert-TaraModelUnlocked([string]$Path){
 function Wait-TaraResult($Plan,$Process){
     $timer=[Diagnostics.Stopwatch]::StartNew()
     while(!(Test-Path -LiteralPath $Plan.ResultPath -PathType Leaf)){
-        Assert-TaraSecurityPromptAbsent $Plan
+        $processId=if($Process.PSObject.Properties['Id']){[int]$Process.Id}else{0}
+        Assert-TaraSecurityPromptAbsent $Plan $null $processId
         $Process.Refresh();if($Process.HasExited){throw 'QA Revit exited before publishing a result.'}
         if($timer.Elapsed.TotalSeconds -ge $Plan.TimeoutSeconds){if($Plan.NoForceRevitClose){throw [TimeoutException]::new('QA hard timeout; Revit will receive a graceful close request without force termination.')};Stop-TaraOwnedProcess $Process;throw [TimeoutException]::new('QA hard timeout; only the bridge-owned Revit process was terminated.')}
         Start-Sleep -Seconds 20
@@ -278,7 +400,8 @@ function Invoke-TaraRevitQa {
         }
     }
     Assert-TaraInteractiveSession
-    $result=[ordered]@{Success=$false;Mode='Real';Status='Failed';TaskId=$Plan.TaskId;WorkflowId=$Plan.WorkflowId;QaWorkflowId=$Plan.QaWorkflowId;RunId=$Plan.RunId;RequestId=$Plan.RequestId;RequestPath=$Plan.RequestPath;ResultPath=$Plan.ResultPath;EvidencePath=$Plan.EvidencePath;ReportPath=$null;ReportSha256=$null;NativeRunId=$null;ResultSha256=$null;RequestSha256=$null;ModelPath=$Plan.ModelPath;SidecarPath=$Plan.SidecarPath;SidecarSha256=$Plan.SidecarSha256;FixtureId=$Plan.Context.FixtureId;FixtureSha256=$Plan.Context.FixtureSha256;ArtifactPath=$Plan.InstalledDll;ArtifactSha256=$Plan.Context.ArtifactSha256;ArtifactManifestPath=$Plan.ArtifactManifestPath;ArtifactManifestSha256=$Plan.ArtifactManifestSha256;QaRunnerManifestPath=$Plan.QaRunnerManifestPath;QaRunnerManifestSha256=$Plan.QaRunnerManifestSha256;ManifestPath=$Plan.InstalledManifest;ManifestSha256=$Plan.QaRunnerManifestSha256;ExecutableSha256=$Plan.ExecutableSha256;PolicySha256=$Plan.Isolation.PolicySha256;Command=$Plan.Command;EnvironmentVariable=$Plan.EnvironmentVariable;EnvironmentValue=$Plan.RequestPath;ModelSha256=$Plan.Context.FixtureSha256;ProcessStarted=$false;ProcessId=$null;ProcessStartUtc=$null;ProcessEndUtc=$null;StartedUtc=[DateTimeOffset]::UtcNow.ToString('O');FinishedUtc=$null;ExitState='NotStarted';ExitCode=$null;FailureReason=$null;Error=$null;SideEffectsPerformed=$false}
+    $script:TaraPromptObservationCount=0;$script:TaraLastSecurityPrompt=$null;$script:TaraSecurityPromptScanError=$null
+    $result=[ordered]@{Success=$false;Mode='Real';Status='Failed';TaskId=$Plan.TaskId;WorkflowId=$Plan.WorkflowId;QaWorkflowId=$Plan.QaWorkflowId;RunId=$Plan.RunId;RequestId=$Plan.RequestId;RequestPath=$Plan.RequestPath;ResultPath=$Plan.ResultPath;EvidencePath=$Plan.EvidencePath;ReportPath=$null;ReportSha256=$null;NativeRunId=$null;ResultSha256=$null;RequestSha256=$null;ModelPath=$Plan.ModelPath;SidecarPath=$Plan.SidecarPath;SidecarSha256=$Plan.SidecarSha256;FixtureId=$Plan.Context.FixtureId;FixtureSha256=$Plan.Context.FixtureSha256;ArtifactPath=$Plan.InstalledDll;ArtifactSha256=$Plan.Context.ArtifactSha256;ArtifactManifestPath=$Plan.ArtifactManifestPath;ArtifactManifestSha256=$Plan.ArtifactManifestSha256;QaRunnerManifestPath=$Plan.QaRunnerManifestPath;QaRunnerManifestSha256=$Plan.QaRunnerManifestSha256;ManifestPath=$Plan.InstalledManifest;ManifestSha256=$Plan.QaRunnerManifestSha256;ExecutableSha256=$Plan.ExecutableSha256;PolicySha256=$Plan.Isolation.PolicySha256;Command=$Plan.Command;EnvironmentVariable=$Plan.EnvironmentVariable;EnvironmentValue=$Plan.RequestPath;ModelSha256=$Plan.Context.FixtureSha256;ProcessStarted=$false;ProcessId=$null;ProcessStartUtc=$null;ProcessEndUtc=$null;StartedUtc=[DateTimeOffset]::UtcNow.ToString('O');FinishedUtc=$null;ExitState='NotStarted';ExitCode=$null;FailureReason=$null;Error=$null;SideEffectsPerformed=$false;PromptDetected=$false;PromptAction='None';PromptFree=$false;PromptObservationCount=0;PromptEvidence=$null;ManualApprovalEvidence=$null}
     $process=$null;$handler=$null
     try{
         # Revalidate the filesystem immediately before writing/launching; a dry plan is not authorization.
@@ -292,11 +415,13 @@ function Invoke-TaraRevitQa {
         $observed=Get-Content -LiteralPath $Plan.ResultPath -Raw|ConvertFrom-Json
         $result.ResultSha256=Get-TaraSha256 $Plan.ResultPath
         if($Plan.LevelInventory){if($observed.TaskId -cne $Plan.TaskId -or $observed.AttemptId -cne $Plan.RequestId -or $observed.RunId -cne $Plan.RunId -or [IO.Path]::GetFullPath($observed.ModelPath) -ine [IO.Path]::GetFullPath($Plan.ModelPath) -or $observed.ModelSha256 -ine $Plan.Context.FixtureSha256 -or !$observed.Levels){throw 'Revit level inventory identity/model evidence failed.'};if((Get-TaraSha256 $Plan.ModelPath) -ine $Plan.Context.FixtureSha256){throw 'Model changed during read-only level inventory.'};$result.Inventory=$observed;$result.Status='Passed'}elseif($Plan.FixturePreparation){if($observed.Status -cne 'Passed'){throw "Revit fixture preparation failed: $($observed.Error)"};$levels=@($observed.Levels|Sort-Object Name);$names=@($levels|ForEach-Object Name)-join '|';$levelsValid=$levels.Count -eq 3 -and $names -ceq '0|1|2' -and [Math]::Abs([double]$levels[0].ElevationMeters) -le 0.000001 -and [Math]::Abs(([double]$levels[1].ElevationMeters)-4.0) -le 0.000001 -and [Math]::Abs(([double]$levels[2].ElevationMeters)-7.8) -le 0.000001;if($observed.TaskId -cne $Plan.TaskId -or $observed.WorkflowId -cne $Plan.WorkflowId -or $observed.AttemptId -cne $Plan.RequestId -or $observed.RunId -cne $Plan.RunId -or [IO.Path]::GetFullPath($observed.ModelPath) -ine [IO.Path]::GetFullPath($Plan.ModelPath) -or $observed.SourceModelSha256 -ine $Plan.Context.FixtureSha256 -or $observed.PreparedModelSha256 -ine (Get-TaraSha256 $Plan.ModelPath) -or !$levelsValid){throw 'Revit fixture preparation identity/hash/level/elevation evidence failed.'};$result.Preparation=$observed;$result.Status='Passed'}else{$result.ReportPath=Assert-TaraPath $observed.ReportPath $Plan.ReportDirectory -Leaf;$result.ReportSha256=Get-TaraSha256 $result.ReportPath;$result.NativeRunId=$observed.RunId;$verified=Assert-TaraResult $Plan;foreach($name in @('ReportPath','ReportSha256','NativeRunId','ResultSha256')){$result[$name]=$verified.$name};$result.Status='Passed'}
-    }catch{$result.FailureReason=$_.Exception.Message;$result.Error=$_.Exception.Message;if($_.Exception -is [TimeoutException]){$result.Status='TimedOut'}}
+    }catch{$result.FailureReason=$_.Exception.Message;$result.Error=$_.Exception.Message;if($_.Exception -is [TimeoutException]){$result.Status='TimedOut'};if($script:TaraLastSecurityPrompt){$result.PromptDetected=$true;$result.PromptAction=if($script:TaraLastSecurityPrompt.Kind -ceq 'DetectionFailure'){'DetectionFailedHumanReview'}else{'AwaitingHumanDecision'};$result.PromptFree=$false;$result.PromptEvidence=$script:TaraLastSecurityPrompt;$result.Status=if($script:TaraLastSecurityPrompt.Kind -ceq 'DetectionFailure'){'SecurityPromptDetectionFailed'}else{'AwaitingHumanTrustDecision'}}}
     finally{
         $result.FinishedUtc=[DateTimeOffset]::UtcNow.ToString('O');$result.Success=($result.Status -ceq 'Passed')
+        $result.PromptObservationCount=[int]$script:TaraPromptObservationCount
+        if($result.PromptObservationCount -gt 0 -and !$result.PromptDetected){$result.PromptFree=$true}
         if($handler){try{Stop-TaraTrustPromptHandler $handler}catch{$result.FailureReason=([string]$result.FailureReason+' Trust-handler cleanup failed: '+$_.Exception.Message);$result.Error=$result.FailureReason}}
-        if($process){try{$cleanup=Close-TaraOwnedProcess $process -NoForceRevitClose:([bool]$Plan.NoForceRevitClose);if($cleanup.State -eq 'Exited' -or $cleanup.State -eq 'ForceTerminated'){$result.ExitState=$cleanup.State;$result.ExitCode=$cleanup.ExitCode;$process.Refresh();$result.ProcessEndUtc=$process.ExitTime.ToUniversalTime().ToString('O');Assert-TaraModelUnlocked $Plan.ModelPath}else{$result.ExitState='CleanupFailed';$result.Status='Failed';$result.Success=$false;$result.FailureReason=([string]$result.FailureReason+" Graceful Revit close timed out for PID $($process.Id); no force termination was attempted. Human closure and model-unlock verification are required.")}}catch{$result.ExitState='CleanupFailed';$result.Status='Failed';$result.Success=$false;$result.FailureReason=([string]$result.FailureReason+' Cleanup failed: '+$_.Exception.Message);$result.Error=$result.FailureReason};$process.Dispose()}
+        if($process){if($result.PromptDetected -and !$result.ManualApprovalEvidence){$result.ExitState='AwaitingHumanDecision'}else{try{$cleanup=Close-TaraOwnedProcess $process -NoForceRevitClose:([bool]$Plan.NoForceRevitClose);if($cleanup.State -eq 'Exited' -or $cleanup.State -eq 'ForceTerminated'){$result.ExitState=$cleanup.State;$result.ExitCode=$cleanup.ExitCode;$process.Refresh();$result.ProcessEndUtc=$process.ExitTime.ToUniversalTime().ToString('O');Assert-TaraModelUnlocked $Plan.ModelPath}else{$result.ExitState='CleanupFailed';$result.Status='Failed';$result.Success=$false;$result.FailureReason=([string]$result.FailureReason+" Graceful Revit close timed out for PID $($process.Id); no force termination was attempted. Human closure and model-unlock verification are required.")}}catch{$result.ExitState='CleanupFailed';$result.Status='Failed';$result.Success=$false;$result.FailureReason=([string]$result.FailureReason+' Cleanup failed: '+$_.Exception.Message);$result.Error=$result.FailureReason}};$process.Dispose()}
         $result.SideEffectsPerformed=$true
         try{Write-TaraJsonNew $Plan.EvidencePath ([pscustomobject]$result)}catch{$result.FailureReason=([string]$result.FailureReason+' Evidence persistence failed: '+$_.Exception.Message);$result.Status='Failed'}
     }

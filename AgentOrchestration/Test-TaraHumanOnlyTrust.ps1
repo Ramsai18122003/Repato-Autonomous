@@ -14,7 +14,7 @@ try {
     }
     $plan=[pscustomobject]@{TrustConfiguration=[pscustomobject]@{PromptRecords=@([pscustomobject]@{ManifestPath=$path;ManifestSha256=$hash;DllPath=$dll;DllSha256=$dh})}}
     foreach($text in @($dll,'unknown unrelated add-in')){
-        try{& $module {param($p,$t)Handle-TaraTrustPrompt $p $null $null { [pscustomobject]@{Title='Security - Unsigned Add-In';Text=$t} }} $plan $text|Out-Null;throw 'Security prompt accepted.'}catch{if($_.Exception.Message -notmatch 'Human trust decision required'){throw}}
+        try{& $module {param($p,$t)Handle-TaraTrustPrompt $p $null $null { [pscustomobject]@{Title='Security - Unsigned Add-In';Text=$t} }} $plan $text|Out-Null;throw 'Security prompt accepted.'}catch{if($_.Exception.Message -notmatch 'Human trust review required'){throw}}
     }
     $r=& $module {param($p)Handle-TaraTrustPrompt $p $null $null {$null}} $plan
     if($r.PromptAction -cne 'None' -or $r.ManualApprovalEvidence){throw 'Absent prompt became authorization.'}

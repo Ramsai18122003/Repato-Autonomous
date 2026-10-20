@@ -73,11 +73,12 @@ $task|Add-Member NoteProperty status 'in-progress';$task|Add-Member NoteProperty
 $workflow|Add-Member NoteProperty qaBuildStatus 'succeeded';$workflow|Add-Member NoteProperty qaBuildRequest ([pscustomobject]@{BuildRequestId='old-build'})
 $task.approvalRequests=@($task.approvalRequests[0])
 & $m {param($root) function script:Resolve-MayaQaAuthenticatedBuildSource {param($source) [pscustomobject]@{RepositoryRoot='synthetic';ProjectPath='synthetic';ExpectedSourceCommit=('b'*40)}};function script:Get-MayaQaTrustedBuildSourceCommit {param($RepositoryRoot,$ProjectPath) ('b'*40)}} $root
+$expiredQaApproval=Clone $approval;$expiredQaApproval.expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes(-1).ToString('O');$task.approvalRequests=@($task.approvalRequests)+$expiredQaApproval
 $replacement=New-MayaQaCandidateReplacementBuildRequest -StoreRoot $root -TaskId task -WorkflowId workflow -QaWorkflowId create-plan-views-v1 -PreserveRecoveredPreparation -ExpectedTaskRevision 127 -DryRun
 Check ($replacement.BuildStatus -ceq 'planned') 'Recovered preparation replacement contract unsupported.'
 Check ($workflow.qaFixturePreparationEvidence.ExpiresUtc -ceq $expiry -and $workflow.qaModelPath -ceq $model.Path) 'Replacement planning modified historical preparation.'
 Reject {New-MayaQaCandidateReplacementBuildRequest -StoreRoot $root -TaskId task -WorkflowId workflow -QaWorkflowId create-plan-views-v1 -PreserveRecoveredPreparation -ExpectedTaskRevision 126 -DryRun}
 Reject {New-MayaQaCandidateReplacementBuildRequest -StoreRoot $root -TaskId task -WorkflowId workflow -QaWorkflowId create-plan-views-v1 -DryRun}
-$task.approvalRequests=@($task.approvalRequests)+$approval
+$task.approvalRequests=@($task.approvalRequests[0]);$approval.expiresUtc=[DateTimeOffset]::UtcNow.AddMinutes(5).ToString('O');$task.approvalRequests=@($task.approvalRequests)+$approval
 Reject {New-MayaQaCandidateReplacementBuildRequest -StoreRoot $root -TaskId task -WorkflowId workflow -QaWorkflowId create-plan-views-v1 -PreserveRecoveredPreparation -ExpectedTaskRevision 127 -DryRun}
 Write-Output "CPV native continuation: $count assertions passed; synthetic root=$root"

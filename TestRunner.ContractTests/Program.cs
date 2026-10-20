@@ -16,6 +16,27 @@ Check(selectedFloorPlanType.Id == 2, "multiple floor-plan family types resolve t
 Reject(() => ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Id == 4), "missing default floor-plan family type is rejected");
 Reject(() => ViewFamilyTypeSelection.SelectDefault(floorPlanTypes, type => type.Family == "FloorPlan"), "ambiguous default floor-plan family type is rejected");
 
+var architecturalTemplates = new[]
+{
+    (Id: 11L, IsTemplate: true, Name: "Architectural Plan"),
+    (Id: 12L, IsTemplate: true, Name: "Architectural Reflected Ceiling Plan"),
+    (Id: 13L, IsTemplate: false, Name: "Architectural Plan - Working")
+};
+var selectedArchitecturalTemplate = ArchitecturalTemplateSelection.SelectDefaultTemplate(
+    architecturalTemplates, template => template.IsTemplate, template => template.Name, template => template.Id);
+Check(selectedArchitecturalTemplate.Id == 11L, "multiple architectural view templates resolve by lowest element id");
+var exactArchitecturalTemplates = new[]
+{
+    (Id: 21L, IsTemplate: true, Name: "Architectural"),
+    (Id: 22L, IsTemplate: true, Name: "Architectural Plan")
+};
+var exactArchitecturalTemplate = ArchitecturalTemplateSelection.SelectDefaultTemplate(
+    exactArchitecturalTemplates, template => template.IsTemplate, template => template.Name, template => template.Id);
+Check(exactArchitecturalTemplate.Id == 21L, "exact architectural view template name is preferred");
+Reject(() => ArchitecturalTemplateSelection.SelectDefaultTemplate(
+    architecturalTemplates.Where(template => !template.IsTemplate), template => template.IsTemplate, template => template.Name, template => template.Id),
+    "missing architectural view template is rejected");
+
 string pathPolicyRoot = Path.Combine(Path.GetTempPath(), "repato-runner-path-policy-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(pathPolicyRoot);
 try

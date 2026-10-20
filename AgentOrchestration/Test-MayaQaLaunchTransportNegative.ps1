@@ -13,11 +13,12 @@ try {
   $rejected=$base.PSObject.Copy();$rejected.accepted=$false;$rejected.failureCode='request-invalid';Assert-Rejected 'accepted-false' {param($r)$rejected}
   Assert-Rejected 'transport-unavailable' {param($r)throw 'pipe unavailable'}
   Assert-Rejected 'malformed-response' {param($r)'not-json'}
-  $injected=& $module {Invoke-MayaQaProcessLauncher -Executable 'ignored.exe' -Arguments '' -Launcher {param($e,$a)[pscustomobject]@{Pid=99;StartedUtc='now'}} -LaunchRequest $null};if($injected.Pid -ne 99){throw 'Injected launcher seam failed.'}
+  $injected=& $module {Invoke-MayaQaProcessLauncher -Executable 'ignored.exe' -Arguments '' -Launcher {param($e,$a)[pscustomobject]@{Pid=99;StartedUtc=[DateTimeOffset]::UtcNow.ToString('O')}} -LaunchRequest $null};if($injected.Pid -ne 99){throw 'Injected launcher seam failed.'}
+  Assert-Rejected 'launcher-unparseable-start-time' {Invoke-MayaQaProcessLauncher -Executable 'ignored.exe' -Arguments '' -Launcher {param($e,$a)[pscustomobject]@{Pid=99;StartedUtc='not-a-timestamp'}} -LaunchRequest $null}
   $source=Get-Content (Join-Path $PSScriptRoot 'Repato.MayaQaWorkflow.psm1') -Raw
   if($source -notmatch '(?s)\$requestId=\[guid\]::NewGuid\(\)\.ToString\(''N''\).*?requestId=\$requestId.*?NativeRequestId \$requestId'){throw 'Canonical transport request ID is not independently generated and durably bound before transmission.'}
   if($source -notmatch '\$plan=if\(\$PlanPreflightInvoker\)\{.*\}else\{New-TaraRevitQaPlan'){throw 'Canonical native preflight does not invoke the default plan builder when no test seam is supplied.'}
   if($source -match 'Start-Process'){throw 'Direct Start-Process fallback remains.'}
   foreach($mark in 'ExecutionStatus=''LaunchOutcomeUnknown''','FailureCode=''native-launch-outcome-unknown''','Duplicate native launch rejected.','if($x.Stage -cne ''launching'' -or $x.NativeProcessId)'){if($source -notmatch [regex]::Escape($mark)){throw "Missing canonical fail-closed marker: $mark"}}
-  'Maya v2 focused negative transport checks passed: 16'
+  'Maya v2 focused negative transport checks passed: 17'
 } finally {if(Test-Path $root){Remove-Item $root -Recurse -Force}}
