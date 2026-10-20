@@ -1305,11 +1305,12 @@ function Invoke-MayaQaCanonicalNativeCore {
     $transition=Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'launching' -or $x.NativeProcessId){throw 'Duplicate native launch rejected.'};$x.NativeProcessId=[int]$started.Pid;$x.LaunchedUtc=$started.StartedUtc;$x.ExecutingUtc=$started.StartedUtc;$x.Stage='executing';$x.ExecutionStatus='Executing';Add-RepatoHistory $t 'maya-tara-native-executing' 'Tara' "pid=$($started.Pid)";$x}
     $currentResult=Read-RepatoTaskStore $StoreRoot;$currentTask=Find-RepatoTask $currentResult $TaskId;$x=$currentTask.mayaTaraExecution
     if($null -eq $Result){return [pscustomobject]@{Stage=$x.Stage;ExecutionStatus=$x.ExecutionStatus;NativeProcessId=$x.NativeProcessId;RequestPath=$x.RequestPath;RequestId=$x.RequestPath;ProcessStarted=$true;ResultAccepted=$false;Completed=$false}}
-    foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','HandoffId','AttemptId','RunId','ClaimId'){if($Result.PSObject.Properties.Name -notcontains $n -or [string]$Result.$n -cne [string]$x.$n){throw "Result identity mismatch: $n"}}
-    if(!$Result.EvidenceAccepted){throw 'Native evidence was not accepted.'};Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'executing'){throw 'Evidence transition out of order.'};$x.Stage='evidence-collected';$x.ExecutionStatus='EvidenceCollected';$x.ResultPath=$Result.ResultPath;$x.ReportPath=$Result.ReportPath;$x.EvidencePath=$Result.EvidencePath;Add-RepatoHistory $t 'maya-tara-evidence-collected' 'Tara' 'correlated evidence accepted';$x}
-    if(!$Result.RollbackProven){throw 'Rollback proof is required.'};Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'evidence-collected'){throw 'Rollback transition out of order.'};$x.Stage='rollback-verified';$x.ExecutionStatus='RollbackVerified';$x.RollbackStatus='Verified';$x.RollbackVerifiedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-rollback-verified' 'Tara' 'rollback evidence accepted';$x}
-    if(!$Result.Verified){throw 'QA verification failed.'};Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'rollback-verified'){throw 'Verification transition out of order.'};$x.Stage='verified';$x.ExecutionStatus='Verified';$x.VerificationStatus='Verified';$x.VerifiedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-verified' 'Tara' 'QA verification accepted';$x}
+    foreach($n in 'TaskId','WorkflowId','QaWorkflowId','TestId','HandoffId','AttemptId','RunId','ClaimId'){if($Result.PSObject.Properties.Name -notcontains $n -or [string]$Result.$n -cne [string]$x.$n){Invoke-MayaQaRevitGracefulShutdownCore -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId ([string]$x.WorkflowId) -FailureOutcomeReported | Out-Null;throw "Result identity mismatch: $n"}}
+    if(!$Result.EvidenceAccepted){Invoke-MayaQaRevitGracefulShutdownCore -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId ([string]$x.WorkflowId) -FailureOutcomeReported | Out-Null;throw 'Native evidence was not accepted.'};Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'executing'){throw 'Evidence transition out of order.'};$x.Stage='evidence-collected';$x.ExecutionStatus='EvidenceCollected';$x.ResultPath=$Result.ResultPath;$x.ReportPath=$Result.ReportPath;$x.EvidencePath=$Result.EvidencePath;Add-RepatoHistory $t 'maya-tara-evidence-collected' 'Tara' 'correlated evidence accepted';$x}
+    if(!$Result.RollbackProven){Invoke-MayaQaRevitGracefulShutdownCore -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId ([string]$x.WorkflowId) -FailureOutcomeReported | Out-Null;throw 'Rollback proof is required.'};Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'evidence-collected'){throw 'Rollback transition out of order.'};$x.Stage='rollback-verified';$x.ExecutionStatus='RollbackVerified';$x.RollbackStatus='Verified';$x.RollbackVerifiedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-rollback-verified' 'Tara' 'rollback evidence accepted';$x}
+    if(!$Result.Verified){Invoke-MayaQaRevitGracefulShutdownCore -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId ([string]$x.WorkflowId) -FailureOutcomeReported | Out-Null;throw 'QA verification failed.'};Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'rollback-verified'){throw 'Verification transition out of order.'};$x.Stage='verified';$x.ExecutionStatus='Verified';$x.VerificationStatus='Verified';$x.VerifiedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-verified' 'Tara' 'QA verification accepted';$x}
     Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;$x=$t.mayaTaraExecution;if($x.Stage -cne 'verified'){throw 'Completion transition out of order.'};$x.Stage='completed';$x.ExecutionStatus='Completed';$x.CompletionStatus='Completed';$x.CompletedUtc=Get-RepatoUtc;Add-RepatoHistory $t 'maya-tara-completed' 'Tara' 'canonical execution completed';$x}
+    if(!$DryRun){Invoke-MayaQaRevitGracefulShutdownCore -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId ([string]$x.WorkflowId) | Out-Null}
 }
 function Prepare-MayaQaCanonicalNativeLaunch {
     [CmdletBinding()]
@@ -3758,6 +3759,112 @@ function Complete-MayaQaApprovedRunAuthorization {
         [pscustomobject]@{Status='Reconciled';TaskId=$TaskId;WorkflowId=$WorkflowId;ApprovalId=[string]$ap.requestId;RunId=$nativeRunId;ConsumedUtc=[string]$ap.consumedUtc;TaskRevision=[long]$t.revision;SideEffectsPerformed=$true}
     }
 }
+function Invoke-MayaQaRevitGracefulShutdownCore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [ValidateRange(1,14400)][int]$GracefulTimeoutSeconds=120,
+        [switch]$FailureOutcomeReported,
+        [scriptblock]$ProcessProvider
+    )
+    $storePath=[IO.Path]::GetFullPath($StoreRoot);$tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+    if(!$storePath.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -and $GracefulTimeoutSeconds -lt 120){throw 'Revit graceful shutdown timeout must be at least 120 seconds outside synthetic test stores.'}
+    if(!$ProcessProvider){$ProcessProvider={Get-Process Revit -ErrorAction SilentlyContinue}}
+    $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
+    if(!$task){throw 'Revit graceful shutdown requires the task.'}
+    if($task.PSObject.Properties.Name -notcontains 'mayaTaraExecution' -or !$task.mayaTaraExecution){throw 'Revit graceful shutdown requires the native execution record.'}
+    $x=$task.mayaTaraExecution
+    if([string]$x.WorkflowId -cne $WorkflowId){throw 'Revit graceful shutdown workflow identity mismatch.'}
+    $pidProp=$x.PSObject.Properties['NativeProcessId']
+    if(!$pidProp -or !$pidProp.Value){throw 'Revit graceful shutdown requires the recorded native process identity.'}
+    $targetPid=[int]$pidProp.Value
+    if($targetPid -le 0){throw 'Revit graceful shutdown native process identity is invalid.'}
+    $completed=($x.PSObject.Properties['CompletionStatus'] -and [string]$x.CompletionStatus -ceq 'Completed')
+    $failed=($x.PSObject.Properties['FailureCode'] -and $x.FailureCode) -and ($x.PSObject.Properties['FailedUtc'] -and $x.FailedUtc)
+    if(!$completed -and !$failed -and !$FailureOutcomeReported){throw 'Revit graceful shutdown requires a completed or failed native attempt record without pending Revit operations.'}
+    $existing=$x.PSObject.Properties['RevitShutdownStatus']
+    if($existing -and $existing.Value){return [pscustomobject]@{Status='AlreadyShutdown';Detail=('previous='+[string]$existing.Value);ProcessId=$targetPid;ModelUnlocked=$null;ModelSha256=$null;ModelShaMatch=$null;TaskRevision=[long]$task.revision;SideEffectsPerformed=$false}}
+    if($FailureOutcomeReported){throw 'Failure-outcome shutdown is coordinator-only and cannot be invoked from the module boundary.'}
+    $procs=@(& $ProcessProvider)
+    $matching=@($procs|Where-Object {try{[int]$_.Id -eq $targetPid}catch{$false}})
+    $otherCount=@($procs|Where-Object {try{[int]$_.Id -ne $targetPid -and [string]$_.ProcessName -ieq 'Revit'}catch{$false}}).Count
+    $outcome=$null;$detail=$null;$sideEffects=$false
+    if($matching.Count -eq 0){
+        $outcome='Closed';$detail=('process-already-exited'+$(if($otherCount){'; other-revit-instances-present='+$otherCount}else{''}))
+    } else {
+        $target=$matching[0]
+        if([string]$target.ProcessName -cne 'Revit'){throw "Recorded native process $targetPid is not a Revit process."}
+        $closed=$false
+        try{
+            if($target.HasExited){$closed=$true;$detail='process-already-exited'}
+            elseif($target.MainWindowHandle -eq [IntPtr]::Zero){$detail='window-close-unavailable';$closed=$false}
+            else{$closed=[bool]$target.CloseMainWindow();if($closed){$detail='window-close-requested'}}
+        }catch{$closed=$false;$detail='window-close-refused'}
+        if($closed -and $detail -ceq 'window-close-requested'){$sideEffects=$true}
+        if(-not $closed){
+            if(-not $detail){$detail='window-close-refused'}
+            $outcome='Blocked'
+        } else {
+            $deadline=[DateTimeOffset]::UtcNow.AddSeconds($GracefulTimeoutSeconds)
+            $exited=$false
+            while([DateTimeOffset]::UtcNow -lt $deadline){
+                Start-Sleep -Seconds 1
+                $latest=@(& $ProcessProvider)
+                if(-not @($latest|Where-Object {try{[int]$_.Id -eq $targetPid}catch{$false}})){$exited=$true;break}
+            }
+            if($exited){$outcome='Closed';$detail='window-close-requested; process-exited'}
+            else{$outcome='Timeout'}
+        }
+    }
+    $modelUnlocked=$null;$modelSha=$null;$modelShaMatch=$null
+    if($outcome -ceq 'Closed'){
+        $modelPathProp=$x.PSObject.Properties['DisposableModelPath']
+        $modelPath=if($modelPathProp){[string]$modelPathProp.Value}else{''}
+        if(![string]::IsNullOrWhiteSpace($modelPath) -and (Test-Path -LiteralPath $modelPath -PathType Leaf)){
+            for($i=0;$i -lt 5;$i++){
+                try{$fs=[IO.File]::Open($modelPath,'Open','Read','Read');$fs.Close();$modelUnlocked=$true;break}catch{$modelUnlocked=$false;Start-Sleep -Seconds 1}
+            }
+            if($modelUnlocked){
+                $modelSha=(Get-FileHash -LiteralPath $modelPath -Algorithm SHA256).Hash
+                $expectedShaProp=$x.PSObject.Properties['DisposableModelSha256']
+                if($expectedShaProp -and $expectedShaProp.Value){$modelShaMatch=($modelSha -ieq [string]$expectedShaProp.Value)}
+            }
+        }
+    }
+    if($modelShaMatch -eq $false){$detail=([string]$detail)+'; model-sha-mismatch'}
+    $needsStamp=($sideEffects -or $outcome -in @('Blocked','Timeout'))
+    if(-not $needsStamp){
+        return [pscustomobject]@{Status=$outcome;Detail=$detail;ProcessId=$targetPid;ModelUnlocked=$modelUnlocked;ModelSha256=$modelSha;ModelShaMatch=$modelShaMatch;TaskRevision=[long]$task.revision;SideEffectsPerformed=$false}
+    }
+    $expectedRevision=[long]$task.revision
+    $stamp=Invoke-RepatoStoreMutation $StoreRoot {param($data,$preview)
+        $t=Find-RepatoTask $data $TaskId
+        if([long]$t.revision -ne $expectedRevision){throw 'Revit graceful shutdown compare-and-swap failed.'}
+        $xr=$t.mayaTaraExecution
+        if(!$xr -or [string]$xr.RunId -cne [string]$x.RunId -or [string]$xr.AttemptId -cne [string]$x.AttemptId -or ([int]$xr.NativeProcessId) -ne $targetPid){throw 'Native execution record changed during Revit graceful shutdown.'}
+        if($xr.PSObject.Properties['RevitShutdownStatus'] -and $xr.RevitShutdownStatus){throw 'Revit graceful shutdown already stamped.'}
+        $xr|Add-Member NoteProperty RevitShutdownStatus ([string]$outcome) -Force
+        $xr|Add-Member NoteProperty RevitShutdownUtc (Get-RepatoUtc) -Force
+        $xr|Add-Member NoteProperty RevitShutdownDetail ([string]$detail) -Force
+        $xr|Add-Member NoteProperty RevitShutdownModelUnlocked $modelUnlocked -Force
+        $xr|Add-Member NoteProperty RevitShutdownModelSha256 $modelSha -Force
+        Add-RepatoHistory $t 'maya-tara-revit-graceful-shutdown' 'Maya' "pid=$targetPid; outcome=$outcome; detail=$detail; modelUnlocked=$modelUnlocked"
+        [pscustomobject]@{TaskRevision=[long]$t.revision}}
+    [pscustomobject]@{Status=$outcome;Detail=$detail;ProcessId=$targetPid;ModelUnlocked=$modelUnlocked;ModelSha256=$modelSha;ModelShaMatch=$modelShaMatch;TaskRevision=$stamp.TaskRevision;SideEffectsPerformed=$sideEffects}
+}
+function Invoke-MayaQaRevitGracefulShutdown {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$TaskId,
+        [Parameter(Mandatory)][string]$WorkflowId,
+        [ValidateRange(1,14400)][int]$GracefulTimeoutSeconds=120,
+        [scriptblock]$ProcessProvider
+    )
+    Invoke-MayaQaRevitGracefulShutdownCore -StoreRoot $StoreRoot -TaskId $TaskId -WorkflowId $WorkflowId -GracefulTimeoutSeconds $GracefulTimeoutSeconds $ProcessProvider
+}
 function Complete-MayaQaWorkflow { param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$WorkflowId,[switch]$DryRun)
     $w=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
     $completion = if($w.PSObject.Properties.Name -contains 'qaCompletionStatus'){[string]$w.qaCompletionStatus}else{$null}
@@ -4176,6 +4283,7 @@ Export-ModuleMember -Function Recover-MayaQaReconciledDuplicateFloorPlanFailureF
 Export-ModuleMember -Function Reset-MayaQaReconciledDuplicateFloorPlanWorkflowPlan
 Export-ModuleMember -Function Remove-MayaQaExpiredOrphanedPreparation
 Export-ModuleMember -Function Complete-MayaQaApprovedRunAuthorization
+Export-ModuleMember -Function Invoke-MayaQaRevitGracefulShutdown
 
 function Accept-MayaQaLegacyManifestAttestation {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[Parameter(Mandatory)][string]$ClaimId,[Parameter(Mandatory)][string]$EvidencePath,[Parameter(Mandatory)][string]$EvidenceSha256,[scriptblock]$StoreMutationBoundary)
