@@ -718,11 +718,18 @@ function Recover-MayaQaCorrelatedNativeFailure {
     if($launchedUtc -ge $attemptExpiresUtc){throw 'Recorded native launch did not occur within the exact attempt authorization window.'}
     $matchingApprovals=@($task.approvalRequests|Where-Object {
         $identity=Get-MayaQaApprovalAttemptRunIdentity $_
-        $_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and
+        if(!($_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and
         (!$identity.AttemptId -or $identity.AttemptId -ceq [string]$old.AttemptId) -and
-        $identity.RunId -ceq [string]$old.RunId
+        $identity.RunId -ceq [string]$old.RunId)){return $false}
+        $approvedExpiresUtc=[DateTimeOffset]::MinValue;$approvedRequestedUtc=[DateTimeOffset]::MinValue;$approvedDecidedUtc=[DateTimeOffset]::MinValue
+        try{
+            $approvedExpiresUtc=[DateTimeOffset]::Parse([string]$_.expiresUtc)
+            $approvedRequestedUtc=[DateTimeOffset]::Parse([string]$_.requestedUtc)
+            $approvedDecidedUtc=[DateTimeOffset]::Parse([string]$_.decidedUtc)
+        }catch{return $false}
+        $approvedExpiresUtc -gt $launchedUtc -and $approvedRequestedUtc -le $launchedUtc -and $approvedDecidedUtc -le $launchedUtc
     })
-    if($matchingApprovals.Count -ne 1){throw 'Exactly one approved qa-run request bound to the failed attempt and run is required for consumption bookkeeping.'}
+    if($matchingApprovals.Count -ne 1){throw 'Exactly one approved qa-run request bound to the failed attempt and run, authorizing the recorded launch, is required for consumption bookkeeping.'}
     $approvedRequest=$matchingApprovals[0];$approvalBinding=if($approvedRequest.PSObject.Properties.Name -contains 'recoveryBinding'){$approvedRequest.recoveryBinding}elseif($approvedRequest.PSObject.Properties.Name -contains 'executionBinding'){$approvedRequest.executionBinding}else{$null}
     if(!$approvalBinding -or $approvedRequest.requiredLevel -cne 'user' -or $approvedRequest.decidedBy -cne 'user' -or !$approvedRequest.approvedRevision){throw 'Failed execution has no exact human-approved QA binding.'}
     $bindingJson=ConvertTo-Json -InputObject $approvalBinding -Depth 20 -Compress;$bindingSha=[Security.Cryptography.SHA256]::Create();try{$actualBindingHash=([BitConverter]::ToString($bindingSha.ComputeHash([Text.Encoding]::UTF8.GetBytes($bindingJson)))).Replace('-','')}finally{$bindingSha.Dispose()}

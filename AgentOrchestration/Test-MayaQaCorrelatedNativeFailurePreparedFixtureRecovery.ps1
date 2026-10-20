@@ -100,7 +100,7 @@ try {
         $report2=[ordered]@{RequestId=$native2;TaskId=$taskId;WorkflowId=$workflowId;TestId=$qaWorkflowId;AttemptId=$attempt2;RunId=$run2;ClaimId=$claim2;Status='Failed';DocumentPath='';RollbackStatus='NotStarted';Errors=@('Sequence contains more than one matching element');CreatedIds=@();ChangedIds=@();DeletedIds=@();Screenshots=@()}
         $report2|ConvertTo-Json|Set-Content -LiteralPath $reportPath2 -Encoding UTF8
         $store2=Join-Path $schemaRoot 'Store';New-RepatoTask $store2 $taskId 'Synthetic recovery' 'Canonical schema recovery contract' 'qa/native-prepared-recovery'|Out-Null
-        $decisionUtc2=$legacyLaunch.AddMinutes(-1);$approvalExpiry2=$legacyLaunch.AddMinutes(30)
+        $approvalExpiry2=$legacyLaunch.AddMinutes(30)
         Invoke-RepatoStoreMutation $store2 {
             param($data,$preview);$task=Find-RepatoTask $data $taskId;$task.revision=7;$task.status='in-progress';$task.workflowStage='approval'
             $task|Add-Member NoteProperty mayaPlan ([pscustomobject]@{WorkflowId=$workflowId;QaWorkflowId=$qaWorkflowId}) -Force
@@ -109,7 +109,9 @@ try {
             $task|Add-Member NoteProperty mayaTaraExecution ([pscustomobject]@{TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaWorkflowId;TestId=$qaWorkflowId;HandoffId=$handoff2;AttemptId=$attempt2;RunId=$run2;ClaimOwner='Tara';ClaimId=$claim2;ClaimStatus='claimed';Stage='executing';ExecutionStatus='Executing';NativeProcessId=4242;NativeRequestId=$native2;RequestPath=$requestPath2;LaunchedUtc='10/20/2026 12:55:48';DisposableRuntimeRoot=$runtime2;DisposableModelPath=$oldModel2;DisposableModelSha256=$preparedHash2;FixturePreparationEvidence=$prepEvidence2;AuthoritativeFixturePath=$source2;AuthoritativeFixtureSha256=$sourceHash2;ArtifactPath=$artifact2;ArtifactSha256=$artifactHash2;RunnerManifestPath=$manifest2;RunnerManifestSha256=$manifestHash2;IsolationPolicyPath=$isolation2;IsolationPolicySha256=$isolationHash2;IsolationAllowed=$true;SideEffectsPerformed=$false;EvidencePath=$null;VerificationStatus='Pending';CompletionStatus='Pending'}) -Force
             $binding=[pscustomobject][ordered]@{SchemaVersion='maya-qa-canonical-execution-approval-v1';TaskId=$taskId;WorkflowId=$workflowId;QaWorkflowId=$qaWorkflowId;BuildRequestId='build-synthetic';CandidateSourceCommit=('a'*40);CandidateSha256=$artifactHash2;RunnerManifestPath=$manifest2;RunnerManifestSha256=$manifestHash2;RunId=$run2;ModelPath=$oldModel2;ModelSha256=$preparedHash2}
             $json=ConvertTo-Json -InputObject $binding -Depth 20 -Compress;$sha=[Security.Cryptography.SHA256]::Create();try{$bindingHash2=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))).Replace('-','')}finally{$sha.Dispose()}
-            $task.approvalRequests=[object[]]@([pscustomobject]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='approved';bindingHash=$bindingHash2;executionBinding=$binding;previousStatus='in-progress';requestedRevision=6;approvedRevision=7;requestedUtc=$decisionUtc2.AddMinutes(-1).ToString('O');expiresUtc=$approvalExpiry2.ToString('O');decidedUtc=$decisionUtc2.ToString('O');decidedBy='user';reason='synthetic canonical approved QA';consumedUtc=$null})
+            $staleApproved=[pscustomobject]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='approved';bindingHash=$bindingHash2;executionBinding=$binding;previousStatus='in-progress';requestedRevision=6;approvedRevision=7;requestedUtc=$legacyLaunch.AddMinutes(-3).ToString('O');expiresUtc=$legacyLaunch.AddMinutes(-2).ToString('O');decidedUtc=$legacyLaunch.AddMinutes(-3).ToString('O');decidedBy='user';reason='stale approved refresh predecessor';consumedUtc=$null}
+            $freshApproved=[pscustomobject]@{requestId=[guid]::NewGuid().ToString('N');action='qa-run';requiredLevel='user';status='approved';bindingHash=$bindingHash2;executionBinding=$binding;previousStatus='in-progress';requestedRevision=6;approvedRevision=7;requestedUtc=$legacyLaunch.AddMinutes(-20).ToString('O');expiresUtc=$approvalExpiry2.ToString('O');decidedUtc=$legacyLaunch.AddMinutes(-5).ToString('O');decidedBy='user';reason='synthetic canonical approved QA';consumedUtc=$null}
+            $task.approvalRequests=[object[]]@($staleApproved,$freshApproved)
             $task
         }|Out-Null
         $schemaResolved=Recover-MayaQaCorrelatedNativeFailure -StoreRoot $store2 -TaskId $taskId -RuntimeRoot $runs2 -ProcessInspector $processInspector -AttemptDurationMinutes 600
@@ -118,6 +120,8 @@ try {
         if(!$schemaResolved.AttemptId -or $schemaResolved.AttemptId -ceq $attempt2){throw 'Canonical-schema recovery did not preserve the attempt identity.'}
         if($archived2.Count -ne 1 -or $archived2[0].ResultSha256 -ine (Get-FileHash $resultPath2 -Algorithm SHA256).Hash){throw 'Canonical-schema recovery did not archive the failed attempt evidence.'}
         if($consumed2.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$consumed2[0].consumedUtc)){throw 'Canonical-schema approval was not consumed for bookkeeping.'}
+        $staleUnchecked=@($task2.approvalRequests|Where-Object {$_.reason -ceq 'stale approved refresh predecessor' -and $_.consumedUtc})
+        if($staleUnchecked.Count){throw 'Stale approved predecessor that did not authorize the launch was consumed.'}
         if($task2.status -cne 'in-progress' -or $task2.workflowStage -cne 'approval' -or $task2.mayaTaraExecution.Stage -cne 'prepared'){throw 'Canonical-schema recovery left the task in an unexpected state.'}
         [pscustomobject]@{CanonicalBindingAccepted=$true;AttemptIdentityPreserved=($schemaResolved.AttemptId -ceq $attempt2);ApprovalConsumed=$true}|ConvertTo-Json -Compress
     } finally {
