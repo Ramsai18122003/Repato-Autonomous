@@ -18,7 +18,13 @@ public sealed class NamedPipeLaunchServer(QaAgentOptions options, LaunchCoordina
         await pipe.WaitForConnectionAsync(cancellationToken);
         using var reader = new StreamReader(pipe);
         var line = await reader.ReadLineAsync(cancellationToken);
-        if (line is null || line.Length > 32768) throw new InvalidDataException("Bounded request rejected.");
+        if (line is null || line.Length > 32768)
+        {
+            // A probe that connects and disconnects, or sends an oversized envelope,
+            // must release the connection without a response and without terminating
+            // the long-lived scheduled-task listener.
+            return;
+        }
         object response;
         string? observedOperation = null;
         try
