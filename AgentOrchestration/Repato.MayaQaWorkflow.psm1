@@ -657,6 +657,18 @@ function Register-MayaQaCorrelatedStartupFailure {
 }
 Export-ModuleMember -Function Register-MayaQaCorrelatedStartupFailure
 
+function Get-MayaQaApprovalAttemptRunIdentity {
+    param([Parameter(Mandatory)]$Request)
+    $attempt=$null;$run=$null
+    if($Request.PSObject.Properties.Name -contains 'attemptId'){$attempt=[string]$Request.attemptId}
+    if($Request.PSObject.Properties.Name -contains 'runId'){$run=[string]$Request.runId}
+    $binding=if($Request.PSObject.Properties.Name -contains 'recoveryBinding'){$Request.recoveryBinding}elseif($Request.PSObject.Properties.Name -contains 'executionBinding'){$Request.executionBinding}else{$null}
+    if($binding){
+        if(!$attempt -and $binding.PSObject.Properties.Name -contains 'AttemptId'){$attempt=[string]$binding.AttemptId}
+        if(!$run -and $binding.PSObject.Properties.Name -contains 'RunId'){$run=[string]$binding.RunId}
+    }
+    [pscustomobject]@{AttemptId=$attempt;RunId=$run}
+}
 function Recover-MayaQaCorrelatedNativeFailure {
     param([Parameter(Mandatory)][string]$StoreRoot,[Parameter(Mandatory)][string]$TaskId,[string]$RuntimeRoot,[scriptblock]$ProcessInspector,[ValidateRange(1,1440)][Nullable[int]]$AttemptDurationMinutes)
     if($null -eq $AttemptDurationMinutes){$AttemptDurationMinutes=Get-MayaQaAttemptDurationMinutes};
@@ -704,12 +716,21 @@ function Recover-MayaQaCorrelatedNativeFailure {
     try{$launchedUtc=Get-MayaQaNormalizedUtc -Value ([string]$old.LaunchedUtc) -Context 'Correlated native launch timestamp'}catch{throw 'Correlated native launch or attempt expiry timestamp is invalid.'}
     try{$attemptExpiresUtc=[DateTimeOffset]::Parse([string]$attempt.RequestExpiresUtc)}catch{throw 'Correlated native launch or attempt expiry timestamp is invalid.'}
     if($launchedUtc -ge $attemptExpiresUtc){throw 'Recorded native launch did not occur within the exact attempt authorization window.'}
-    $matchingApprovals=@($task.approvalRequests|Where-Object {$_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.attemptId -ceq $old.AttemptId -and $_.runId -ceq $old.RunId})
+    $matchingApprovals=@($task.approvalRequests|Where-Object {
+        $identity=Get-MayaQaApprovalAttemptRunIdentity $_
+        $_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and
+        (!$identity.AttemptId -or $identity.AttemptId -ceq [string]$old.AttemptId) -and
+        $identity.RunId -ceq [string]$old.RunId
+    })
     if($matchingApprovals.Count -ne 1){throw 'Exactly one approved qa-run request bound to the failed attempt and run is required for consumption bookkeeping.'}
     $approvedRequest=$matchingApprovals[0];$approvalBinding=if($approvedRequest.PSObject.Properties.Name -contains 'recoveryBinding'){$approvedRequest.recoveryBinding}elseif($approvedRequest.PSObject.Properties.Name -contains 'executionBinding'){$approvedRequest.executionBinding}else{$null}
     if(!$approvalBinding -or $approvedRequest.requiredLevel -cne 'user' -or $approvedRequest.decidedBy -cne 'user' -or !$approvedRequest.approvedRevision){throw 'Failed execution has no exact human-approved QA binding.'}
     $bindingJson=ConvertTo-Json -InputObject $approvalBinding -Depth 20 -Compress;$bindingSha=[Security.Cryptography.SHA256]::Create();try{$actualBindingHash=([BitConverter]::ToString($bindingSha.ComputeHash([Text.Encoding]::UTF8.GetBytes($bindingJson)))).Replace('-','')}finally{$bindingSha.Dispose()}
-    foreach($pair in @(@('TaskId',$TaskId),@('WorkflowId',[string]$old.WorkflowId),@('QaWorkflowId',[string]$old.QaWorkflowId),@('AttemptId',[string]$old.AttemptId),@('RunId',[string]$old.RunId),@('CandidateSha256',[string]$old.ArtifactSha256),@('ModelPath',[string]$old.DisposableModelPath),@('ModelSha256',[string]$old.DisposableModelSha256))){if([string]$approvalBinding.($pair[0]) -ine [string]$pair[1]){throw "Human approval binding mismatch: $($pair[0])"}}
+    foreach($pair in @(@('TaskId',$TaskId),@('WorkflowId',[string]$old.WorkflowId),@('QaWorkflowId',[string]$old.QaWorkflowId),@('RunId',[string]$old.RunId),@('CandidateSha256',[string]$old.ArtifactSha256),@('ModelPath',[string]$old.DisposableModelPath),@('ModelSha256',[string]$old.DisposableModelSha256))){
+        $actualValue=if($approvalBinding.PSObject.Properties.Name -contains $pair[0]){$approvalBinding.($pair[0])}else{$null}
+        if([string]$actualValue -ine [string]$pair[1]){throw "Human approval binding mismatch: $($pair[0])"}
+    }
+    if($approvalBinding.PSObject.Properties.Name -contains 'AttemptId' -and [string]$approvalBinding.AttemptId -ine [string]$old.AttemptId){throw 'Human approval binding mismatch: AttemptId'}
     if($actualBindingHash -ine [string]$approvedRequest.bindingHash -or [DateTimeOffset]::Parse([string]$approvedRequest.expiresUtc) -le $launchedUtc -or [DateTimeOffset]::Parse([string]$approvedRequest.requestedUtc) -gt $launchedUtc -or [DateTimeOffset]::Parse([string]$approvedRequest.decidedUtc) -gt $launchedUtc){throw 'Human approval hash, decision time, or expiry does not authorize the recorded launch.'}
     if($approvalBinding.PSObject.Properties.Name -contains 'SourceRunnerManifestPath' -and ([string]$approvalBinding.SourceRunnerManifestPath -ine [string]$old.RunnerManifestPath -or [string]$approvalBinding.SourceRunnerManifestSha256 -ine [string]$old.RunnerManifestSha256)){throw 'Human approval source runner-manifest binding mismatch.'}
     if($approvalBinding.PSObject.Properties.Name -contains 'DeployedRunnerManifestPath' -and ([string]$approvalBinding.DeployedRunnerManifestPath -ine [string]$old.ValidatedRunnerManifestPath -or [string]$approvalBinding.DeployedRunnerManifestSha256 -ine [string]$old.ValidatedRunnerManifestSha256)){throw 'Human approval deployed runner-manifest binding mismatch.'}
@@ -825,7 +846,12 @@ function Recover-MayaQaCorrelatedNativeFailure {
     Invoke-RepatoStoreMutation $StoreRoot {param($current,$preview)$t=Find-RepatoTask $current $TaskId;
     $x=$t.mayaTaraExecution;
     if($t.revision -ne $task.revision -or $t.status -cne 'in-progress' -or $t.workflowStage -cne 'approval' -or $x.AttemptId -cne $old.AttemptId -or $x.RunId -cne $old.RunId -or $x.ClaimId -cne $old.ClaimId -or $x.Stage -cne 'executing' -or $x.NativeProcessId -ne $old.NativeProcessId){throw 'QA failure recovery compare-and-swap failed.'};
-    $currentApprovals=@($t.approvalRequests|Where-Object {$_.requestId -ceq $approvedRequest.requestId -and $_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and $_.attemptId -ceq $old.AttemptId -and $_.runId -ceq $old.RunId -and $_.bindingHash -ceq $approvedRequest.bindingHash})
+    $currentApprovals=@($t.approvalRequests|Where-Object {
+        $identity=Get-MayaQaApprovalAttemptRunIdentity $_
+        $_.requestId -ceq $approvedRequest.requestId -and $_.action -ceq 'qa-run' -and $_.status -ceq 'approved' -and
+        (!$identity.AttemptId -or $identity.AttemptId -ceq [string]$old.AttemptId) -and
+        $identity.RunId -ceq [string]$old.RunId -and $_.bindingHash -ceq $approvedRequest.bindingHash
+    })
     if($currentApprovals.Count -ne 1 -or $currentApprovals[0].decidedBy -cne 'user'){throw 'Failed attempt human approval changed during recovery compare-and-swap.'}
     if($currentApprovals[0].consumedUtc -and [DateTimeOffset]::Parse([string]$currentApprovals[0].consumedUtc) -ne $launchedUtc){throw 'Human approval consumption timestamp conflicts with the recorded native launch.'}
     if(!$currentApprovals[0].consumedUtc){$currentApprovals[0].consumedUtc=$launchedUtc.ToString('O')}
