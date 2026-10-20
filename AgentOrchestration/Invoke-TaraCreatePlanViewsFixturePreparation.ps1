@@ -13,11 +13,31 @@ $task=Find-RepatoTask (Read-RepatoTaskStore $StoreRoot) $TaskId
 $workflow=Get-DeployWorkflow $StoreRoot $TaskId $WorkflowId
 $evidence=$workflow.qaBuildEvidence
 $retirement=if($task.PSObject.Properties['mayaQaCandidateReplacementRetirement']){$task.mayaQaCandidateReplacementRetirement}else{$null}
+$shapeB=$false;$shapeA=$false;$failedRunId=$null
+if($retirement -and $retirement.WorkflowId -ceq $WorkflowId){
+    $shapeB=($retirement.ReconciledNativeFailure -eq $true -and
+        $retirement.HistoricalApprovalDisposition -ceq 'expired-unconsumed' -and
+        $retirement.ReplacementNativeLaunchAbsent -eq $true)
+    $shapeA=($retirement.PSObject.Properties['FailedAttemptId'] -and
+        $retirement.PSObject.Properties['RecoveredAttemptId'] -and
+        $retirement.PSObject.Properties['RecoveredRunId'] -and
+        $retirement.ConsumedApprovalPreserved -eq $true -and
+        $retirement.NativeLaunchAbsent -eq $true)
+    if($shapeB){$failedRunId=$retirement.FailedRunId}
+    if($shapeA){
+        $consumedApprovals=@($task.approvalRequests|Where-Object {
+            $_.PSObject.Properties['requestId'] -and $_.PSObject.Properties['action'] -and $_.PSObject.Properties['status'] -and
+            $_.requestId -ceq [string]$retirement.ApprovalRequestId -and $_.action -ceq 'qa-run'
+        })
+        if($consumedApprovals.Count -eq 1 -and $consumedApprovals[0].status -ceq 'approved' -and $consumedApprovals[0].consumedUtc -and
+            $consumedApprovals[0].PSObject.Properties['executionBinding'] -and $consumedApprovals[0].executionBinding -and
+            $consumedApprovals[0].executionBinding.PSObject.Properties['RunId'] -and [string]$consumedApprovals[0].executionBinding.RunId){
+            $failedRunId=[string]$consumedApprovals[0].executionBinding.RunId
+        }
+    }
+}
 $recoveredBuildCheck=($task.status -ceq 'in-progress' -and $task.workflowStage -ceq 'build-checks' -and
-    $retirement -and $retirement.ReconciledNativeFailure -eq $true -and
-    $retirement.WorkflowId -ceq $WorkflowId -and
-    $retirement.HistoricalApprovalDisposition -ceq 'expired-unconsumed' -and
-    $retirement.ReplacementNativeLaunchAbsent -eq $true)
+    ($shapeB -or $shapeA))
 if(($task.status -cne 'passed' -and !$recoveredBuildCheck) -or !$evidence -or
     !$evidence.DeploymentValidation -or !$evidence.ManifestIntegrityValidation -or !$evidence.QaIsolation){
     throw 'Frozen candidate approval, validated deployment, manifest integrity, or isolation gate is not satisfied.'
@@ -34,9 +54,19 @@ if($recoveredBuildCheck){
     foreach($name in 'mayaTaraAttempt','mayaTaraExecution','mayaTaraQaPacket','mayaTaraExecutionEvidence'){
         if($task.PSObject.Properties[$name] -and $null -ne $task.$name){throw 'Active Tara execution state prevents fixture preparation.'}
     }
+    $archivedRunOk=$false
+    if($shapeB){
+        $archivedRunOk=(@($workflow.qaRunHistory|Where-Object {$_.RunId -ceq $retirement.FailedRunId}).Count -eq 1)
+    }
+    if($shapeA){
+        $handoffHistory=@()
+        if($workflow.PSObject.Properties['qaHandoffHistory']){$handoffHistory=@($workflow.qaHandoffHistory)}
+        $archivedRunOk=((-not [string]::IsNullOrWhiteSpace([string]$failedRunId)) -and
+            @($handoffHistory|Where-Object {$_ -and [string]$_.RunId -ceq $failedRunId}).Count -eq 1 -and
+            @($task.mayaTaraExecutionHistory|Where-Object {$_.AttemptId -ceq $retirement.FailedAttemptId}).Count -ge 1)
+    }
     if($workflow.qaRunId -or $workflow.qaModelPath -or $workflow.qaSidecarPath -or
-        $workflow.qaFixturePreparationEvidence -or
-        @($workflow.qaRunHistory|Where-Object {$_.RunId -ceq $retirement.FailedRunId}).Count -ne 1){
+        $workflow.qaFixturePreparationEvidence -or !$archivedRunOk){
         throw 'Recovered prior run was not safely archived before fixture preparation.'
     }
 }
