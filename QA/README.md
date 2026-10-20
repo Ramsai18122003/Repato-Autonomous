@@ -1,5 +1,11 @@
 # Safe Revit QA workspace
 
+## Tara unattended execution bridge
+
+The new `qa-tara-execute` Maya operation connects an approved build, handoff, and run plan to the existing native request/result runners. Read [the interactive operator guide](TaraExecutionOperatorGuide.md) for account setup, exact dry-run/integration commands, evidence, and recovery. `Show-TaraRevitQaConfiguration.ps1` prints the one-time paths and settings without changing files.
+
+Real execution requires explicit authorization, `-IntegrationTest`, and the dedicated `RepatoQA` account logged in with an unlocked interactive desktop. Never use a service or Session 0, store passwords, bypass add-in security, deploy to a production profile, or use production models. The bridge deploys nothing. Current native runners require `C:\Repato-Autonomous\Source\QA`; the `AgentWork` development checkout alone is not a qualified execution environment. Supported unattended workflows are Create Levels, Grid Bubble Visibility, Grid Bubble Offset, and Grid Resequence. Welcome and Create Grids remain unsupported by this bridge. The historical runner-specific instructions below do not authorize execution or deployment.
+
 Revit execution is still disabled until a dedicated fixture and Test Runner are created. Their creation alone does not enable execution: Maya must also confirm the safety prerequisites and obtain explicit user authorization under the root AGENTS.md rules. Do not launch Revit, send commands to an existing session, or deploy an add-in yet.
 
 ## Allowed models
@@ -180,3 +186,5 @@ Set-Location 'C:\Repato-Autonomous\Source'
 $receipt = .\QA\Invoke-WelcomeSmokeQA.ps1 -Action Run -TimeoutSeconds 900
 .\QA\Invoke-WelcomeSmokeQA.ps1 -Action Verify -ReceiptPath $receipt
 ```
+Tara dry runs may be performed by `rsgud` only when the approved QA paths are readable. Permission-denied paths are reported as structured validation failures; no permissions are changed. Real Tara execution requires the logged-in, unlocked `RepatoQA` interactive session.
+Tara uses two independent manifests. Neil's artifact manifest and SHA-256 remain build evidence; the workflow-selected QA runner manifest (such as `Repato.CreateLevels.TestRunner.addin`) is resolved from the QA registration/source directory and is validated separately against the installed QA DLL, startup class, and policy. Their filenames are not required to match.

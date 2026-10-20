@@ -17,7 +17,7 @@ public sealed class WelcomeSmokeTestCommand : IExternalCommand
 {
     public const string SupportedTestId = "welcome-supervised-dialog-v1";
     internal const string QaApplicationTitle = "Repato Welcome Smoke QA Startup";
-    internal const string ExpectedVisibleWindowTitle = QaApplicationTitle + " - " + RepatoWelcomeCommand.DialogTitle;
+    internal const string ExpectedVisibleWindowTitle = "Repato QA - Welcome Smoke - Repato";
 
     public Result Execute(ExternalCommandData data, ref string message, ElementSet elements)
     {
@@ -44,7 +44,8 @@ public sealed class WelcomeSmokeTestCommand : IExternalCommand
             AddinIsolationPolicy.RequireAllowed(report);
             if (testId != SupportedTestId) throw new InvalidOperationException("Unknown test ID.");
             Document document = app.ActiveUIDocument?.Document ?? throw new InvalidOperationException("No active disposable document.");
-            TestSafetyGate.Verify(document, report, "CreateLevelsEmpty");
+            report.DocumentPath = document.PathName;
+            TestSafetyGate.Verify(document, report, "CreateLevelsEmpty", allowControlledFixtureSource: true);
             string beforeHash = TestRunReport.Hash(document.PathName);
             string[] beforeElements = Elements(document);
             bool observed = false;

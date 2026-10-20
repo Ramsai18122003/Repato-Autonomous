@@ -1,0 +1,11 @@
+rules:
+  - id: repato.hardcoded-credential-assignment
+    message: Possible hard-coded credential assigned in source.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: (?i)(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*["'][^"']{8,}["']
+  - id: repato.shell-injection-interpolation
+    message: Review shell command construction that interpolates a variable.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: (?i)(invoke-expression|iex)\s+.*\$[A-Za-z_]
