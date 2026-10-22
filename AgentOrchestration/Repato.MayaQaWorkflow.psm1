@@ -937,6 +937,8 @@ function Recover-MayaQaCorrelatedNativeFailure {
     if($currentApprovals.Count -ne 1 -or $currentApprovals[0].decidedBy -cne 'user'){throw 'Failed attempt human approval changed during recovery compare-and-swap.'}
     if($currentApprovals[0].consumedUtc -and [DateTimeOffset]::Parse([string]$currentApprovals[0].consumedUtc) -ne $launchedUtc){throw 'Human approval consumption timestamp conflicts with the recorded native launch.'}
     if(!$currentApprovals[0].consumedUtc){$currentApprovals[0].consumedUtc=$launchedUtc.ToString('O')}
+    if($currentApprovals[0].consumedUtc -and [DateTimeOffset]::Parse([string]$currentApprovals[0].consumedUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) -ne $launchedUtc){throw 'Human approval consumption timestamp conflicts with the recorded native launch.'}
+    if(!$currentApprovals[0].consumedUtc){$currentApprovals[0].consumedUtc=$launchedUtc.ToString('O', [Globalization.CultureInfo]::InvariantCulture)}
     $arch=[pscustomobject]$x;
     $arch|Add-Member NoteProperty Stage 'qa-failed' -Force;
     $arch|Add-Member NoteProperty ExecutionStatus 'QaFailed' -Force;

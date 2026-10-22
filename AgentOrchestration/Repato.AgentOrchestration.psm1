@@ -8,7 +8,7 @@ $script:Agents = @('Maya','Neil','Tara')
 $script:ApprovalLevels = @('none','maya','user')
 $script:DangerousActions = @('production-commit','revit-launch','file-delete','addin-change','destructive-file-operation','disable-addins')
 
-function Get-RepatoUtc { [DateTimeOffset]::UtcNow.ToString('O') }
+function Get-RepatoUtc { [DateTimeOffset]::UtcNow.ToString('O', [Globalization.CultureInfo]::InvariantCulture) }
 
 function Assert-RepatoValue([string]$Name,[string]$Value,[string[]]$Allowed) {
     if ($Value -cnotin $Allowed) { throw "$Name must be one of: $($Allowed -join ', ')." }
@@ -78,6 +78,7 @@ function ConvertFrom-RepatoTaskStoreJson([string]$Json) {
     }
     $data=ConvertFrom-Json -InputObject $Json
     Restore-RepatoTaskStoreDateMarkers $data $markers
+    $null = [DateTimeOffset]::Parse([string]$Task.createdUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
 }
 
 function Read-RepatoTaskStore([string]$StoreRoot) {
